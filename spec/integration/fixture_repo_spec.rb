@@ -90,6 +90,91 @@ RSpec.describe 'fixture repo integration' do
     expect(stdout).to include('| 1 | ruby | app/models/user.rb |')
   end
 
+  it 'filters output to files changed vs --diff-base, preserving full-repo rank and score' do
+    system('git', '-C', repo_path, 'branch', '-D', 'base', out: File::NULL, err: File::NULL)
+    system('git', '-C', repo_path, 'branch', 'base')
+    File.open(File.join(repo_path, 'app/models/post.rb'), 'a') { |file| file.puts "\n# edit" }
+    system('git', '-C', repo_path, 'add', 'app/models/post.rb')
+    system('git', '-C', repo_path, 'commit', '-qm', 'edit post')
+
+    full = JSON.parse(run_cli('--min-files', '5', '--output', 'json').first)
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'json', '--diff-base', 'base')
+    filtered = JSON.parse(stdout)
+
+    expect(status).to be_success, stderr
+    emitted = (filtered['ruby'] + filtered['javascript']).map { |file| file['path'] }
+    expect(emitted).to contain_exactly('app/models/post.rb')
+
+    full_post = full['ruby'].find { |file| file['path'] == 'app/models/post.rb' }
+    filtered_post = filtered['ruby'].first
+    expect(filtered_post['rank']).to eq(full_post['rank'])
+    expect(filtered_post['score']).to eq(full_post['score'])
+    expect(filtered['meta']['filtered']).to be(true)
+    expect(filtered['meta']['diff_base']).to eq('base')
+  end
+
+  it 'filters output to explicit --only paths and records them in meta' do
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'json',
+                                     '--only', 'app/models/user.rb,app/models/post.rb')
+    payload = JSON.parse(stdout)
+
+    expect(status).to be_success, stderr
+    expect(payload['ruby'].map { |file| file['path'] }).to contain_exactly('app/models/user.rb',
+                                                                           'app/models/post.rb')
+    expect(payload['meta']['filtered']).to be(true)
+    expect(payload['meta']).not_to have_key('diff_base')
+    expect(payload['meta']['only_paths']).to contain_exactly('app/models/user.rb', 'app/models/post.rb')
+  end
+
+  it 'applies --top to the filtered set, not the full set' do
+    system('git', '-C', repo_path, 'branch', '-D', 'base', out: File::NULL, err: File::NULL)
+    system('git', '-C', repo_path, 'branch', 'base')
+    %w[app/models/post.rb app/models/user.rb app/models/profile.rb].each do |f|
+      File.open(File.join(repo_path, f), 'a') { |file| file.puts "\n# edit" }
+    end
+    system('git', '-C', repo_path, 'add', '.')
+    system('git', '-C', repo_path, 'commit', '-qm', 'edit multiple')
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'json',
+                                     '--diff-base', 'base', '--top', '2')
+    payload = JSON.parse(stdout)
+
+    expect(status).to be_success, stderr
+    expect(payload['ruby'].length).to eq(2)
+    expect(payload['ruby'].map { |f| f['rank'] }).to eq(payload['ruby'].map { |f| f['rank'] }.sort)
+  end
+
+  it 'emits filter note in markdown output' do
+    system('git', '-C', repo_path, 'branch', '-D', 'base', out: File::NULL, err: File::NULL)
+    system('git', '-C', repo_path, 'branch', 'base')
+    File.open(File.join(repo_path, 'app/models/post.rb'), 'a') { |file| file.puts "\n# edit" }
+    system('git', '-C', repo_path, 'add', '.')
+    system('git', '-C', repo_path, 'commit', '-qm', 'edit post')
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'markdown', '--diff-base', 'base')
+
+    expect(status).to be_success, stderr
+    expect(stdout).to include('Filtered to files changed vs base')
+    expect(stdout).to include('ranks are against the full repo')
+  end
+
+  it 'warns and sets diff_no_scored_files when diff touches only unscorable files' do
+    system('git', '-C', repo_path, 'branch', '-D', 'base', out: File::NULL, err: File::NULL)
+    system('git', '-C', repo_path, 'branch', 'base')
+    File.write(File.join(repo_path, 'README.md'), '# updated')
+    system('git', '-C', repo_path, 'add', 'README.md')
+    system('git', '-C', repo_path, 'commit', '-qm', 'update readme')
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'json', '--diff-base', 'base')
+    payload = JSON.parse(stdout)
+
+    expect(status).to be_success, stderr
+    expect(stderr).to include('no scored files matched the diff')
+    expect(payload['warnings']).to include('diff_no_scored_files')
+    expect(payload['ruby']).to eq([])
+    expect(payload['javascript']).to eq([])
+  end
+
   def run_cli(*args)
     Open3.capture3('bundle', 'exec', 'ruby', bin_path, repo_path, *args)
   end

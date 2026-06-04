@@ -113,6 +113,8 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--branch-threshold N` | fan_in percentile cutoff for branch classification (default: 50) |
 | `--exclude PATTERN` | Exclude glob pattern (repeatable). `spec/` and `test/` excluded by default. |
 | `--top N` | Emit only the top N results |
+| `--diff-base REF` | Score the whole repo but emit only the files changed on `HEAD` vs the merge-base with `REF` (e.g. `origin/staging`). Ranks and scores stay relative to the full repo. Ideal for per-PR runs. |
+| `--only PATHS` | Emit only these comma-separated repo-relative paths. Like `--diff-base` but with an explicit list instead of a git diff. Mutually exclusive with `--diff-base`. |
 | `--min-files N` | Advisory minimum file count to trust percentiles (default: 20) |
 | `--verbose` | Print suppressed per-file warnings to stderr |
 | `--version`, `--help` | Self-explanatory |

@@ -5,7 +5,7 @@ require 'set'
 
 module StudFinder
   class FanIn
-    Result = Struct.new(:counts, keyword_init: true)
+    Result = Struct.new(:counts, :fan_out_counts, :edges, keyword_init: true)
 
     PATH_ROOTS = %w[app lib test].freeze
     CLASS_OR_MODULE_TYPES = %i[class module].freeze
@@ -18,15 +18,32 @@ module StudFinder
     def call
       constants = constant_ownership
       references = reference_sets(@files)
+      reverse_constants = constants.invert
 
-      counts = @files.to_h do |file|
+      counts = @files.to_h { |file| [file, 0] }
+      fan_out_counts = @files.to_h { |file| [file, 0] }
+      dependents = @files.to_h { |file| [file, []] }
+      dependencies = @files.to_h { |file| [file, []] }
+
+      @files.each do |file|
         constant = constants[file]
-        count = constant ? fan_in_count(file, constant, references) : 0
+        counts[file] = constant ? fan_in_count(file, constant, references) : 0
 
-        [file, count]
+        references[file]&.each do |ref_constant|
+          dep_file = reverse_constants[ref_constant]
+          next unless dep_file && dep_file != file
+
+          fan_out_counts[file] += 1
+          dependencies[file] << dep_file
+          dependents[dep_file] << file
+        end
       end
 
-      Result.new(counts: counts)
+      edges = @files.to_h do |file|
+        [file, { dependents: dependents[file].uniq, dependencies: dependencies[file].uniq }]
+      end
+
+      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges)
     end
 
     private
@@ -45,8 +62,8 @@ module StudFinder
     end
 
     def fan_in_count(file, constant, references)
-      references.count do |source_file, source_references|
-        source_file != file && source_references.include?(constant)
+      references.count do |source_file, source_refs|
+        source_file != file && source_refs.include?(constant)
       end
     end
 

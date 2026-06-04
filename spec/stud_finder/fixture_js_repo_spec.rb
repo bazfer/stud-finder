@@ -35,6 +35,8 @@ RSpec.describe 'JavaScript fixture repo integration' do
     expect(payload.fetch('javascript').first['language']).to eq('javascript')
     expect(payload.fetch('javascript').first['path']).to eq('src/hub.js')
     expect(payload.fetch('javascript').first['fan_in']).to eq(3)
+    expect(payload.fetch('javascript').first['fan_out']).to be_a(Integer)
+    expect(payload.fetch('javascript').first['instability']).to be_between(0.0, 1.0).inclusive
     expect(payload.fetch('javascript').first['complexity']).to be > 0
     language_by_path = payload.fetch('javascript').to_h { |file| [file['path'], file['language']] }
     expect(language_by_path['src/b.ts']).to eq('typescript')

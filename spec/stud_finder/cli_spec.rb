@@ -15,11 +15,15 @@ RSpec.describe StudFinder::CLI do
   def make_repo(file_count: 5)
     Dir.mktmpdir do |dir|
       system('git', 'init', '-q', dir)
+      system('git', '-C', dir, 'config', 'user.email', 'stud-finder@example.test')
+      system('git', '-C', dir, 'config', 'user.name', 'Stud Finder')
       file_count.times do |i|
         path = File.join(dir, "app/models/model_#{i}.rb")
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, "class Model#{i}\nend\n")
       end
+      system('git', '-C', dir, 'add', '.')
+      system('git', '-C', dir, 'commit', '-qm', 'initial')
       yield dir
     end
   end
@@ -273,7 +277,7 @@ RSpec.describe StudFinder::CLI do
       expect(status).to eq(0)
       expect(JSON.parse(stdout).fetch('ruby').length).to eq(4)
       expect(stderr).to include("stud-finder → collecting files... 5 found\n")
-      expect(stderr).to include("stud-finder → computing Ruby fan_in (rubocop-ast)...\n")
+      expect(stderr).to include("stud-finder → computing Ruby fan_in + fan_out (rubocop-ast)...\n")
       expect(stderr).to include("stud-finder → computing Ruby complexity (rubocop)...\n")
       expect(stderr).to include("stud-finder → computing Ruby churn (git log, 12 days)...\n")
       expect(stderr).to include("stud-finder → normalizing + scoring 4 files...\n")
@@ -317,7 +321,7 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '7', '1.0000', '3', '15', '1.0000', '']
+        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '7', '1.0000', '3', '15', '1.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
     end
@@ -337,6 +341,63 @@ RSpec.describe StudFinder::CLI do
 
     expect(status).to eq(1)
     expect(stderr).to include("Error: coverage file not found: #{missing}")
+  end
+
+  it 'rejects --diff-base combined with --only' do
+    status, _stdout, stderr = run_cli(['--diff-base', 'origin/staging', '--only', 'app/models/user.rb'])
+
+    expect(status).to eq(1)
+    expect(stderr).to include('--diff-base and --only are mutually exclusive')
+  end
+
+  it 'exits with a clear error when the --diff-base ref is unknown' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--min-files', '5', '--diff-base', 'origin/missing-branch'])
+
+      expect(status).to eq(1)
+      expect(stderr).to include('diff base ref not found')
+    end
+  end
+
+  it 'errors on unknown --diff-base before running the full analysis' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--min-files', '5', '--diff-base', 'origin/missing-branch'])
+
+      expect(status).to eq(1)
+      expect(stderr).to include('diff base ref not found')
+      expect(stderr).not_to include('computing Ruby')
+    end
+  end
+
+  it 'emits diff_filter_empty warning when the diff is empty' do
+    make_repo(file_count: 5) do |root|
+      system('git', '-C', root, 'branch', 'base')
+      status, stdout, stderr = run_cli([root, '--min-files', '5', '--output', 'json', '--diff-base', 'base'])
+      payload = JSON.parse(stdout)
+
+      expect(status).to eq(0)
+      expect(stderr).to include('diff contains no changed files')
+      expect(payload['warnings']).to include('diff_filter_empty')
+    end
+  end
+
+  # Regression: row paths are relative to the analysis root, but diff paths are
+  # repo-root-relative. When PATH is a subdirectory they must be rebased to match,
+  # else every changed file is silently dropped.
+  it 'matches changed files when analyzing a subdirectory with --diff-base' do
+    make_repo(file_count: 5) do |root|
+      system('git', '-C', root, 'branch', 'base')
+      File.write(File.join(root, 'app/models/model_0.rb'), "class Model0\n  def x = 1\nend\n")
+      system('git', '-C', root, 'commit', '-qam', 'change model_0')
+
+      status, stdout, stderr = run_cli([File.join(root, 'app'), '--min-files', '5',
+                                        '--diff-base', 'base', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      paths = JSON.parse(stdout)['ruby'].map { |row| row['path'] }
+      expect(paths).to eq(['models/model_0.rb'])
+      expect(stderr).not_to include('no scored files matched')
+    end
   end
 
   it 'accepts positive coverage weight when --coverage is provided' do

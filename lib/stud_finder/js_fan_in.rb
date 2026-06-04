@@ -7,7 +7,7 @@ require 'timeout'
 
 module StudFinder
   class JsFanIn
-    Result = Struct.new(:counts, :warnings, keyword_init: true)
+    Result = Struct.new(:counts, :fan_out_counts, :edges, :warnings, keyword_init: true)
 
     TOOL_MISSING = 'js_tools_missing'
     TIMEOUT = 'js_depcruise_timeout'
@@ -28,10 +28,11 @@ module StudFinder
       stdout, _stderr, status = run_depcruise(depcruise)
       return missing_tools unless status.success?
 
-      Result.new(counts: parse(stdout), warnings: [])
+      counts, fan_out_counts, edges = parse(stdout)
+      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: [])
     rescue Timeout::Error
       warn(TIMEOUT)
-      Result.new(counts: zero_counts, warnings: [TIMEOUT])
+      Result.new(counts: zero_counts, fan_out_counts: zero_counts, edges: empty_edges, warnings: [TIMEOUT])
     rescue JSON::ParserError, KeyError, TypeError
       missing_tools
     end
@@ -67,6 +68,9 @@ module StudFinder
       payload = JSON.parse(stdout)
       file_set = @files.to_h { |file| [file, true] }
       counts = zero_counts
+      fan_out_counts = zero_counts
+      dependents = @files.to_h { |file| [file, []] }
+      dependencies = @files.to_h { |file| [file, []] }
       seen_edges = Set.new
 
       Array(payload.fetch('modules')).each do |mod|
@@ -80,10 +84,17 @@ module StudFinder
           next unless seen_edges.add?([source, target])
 
           counts[target] += 1
+          fan_out_counts[source] += 1
+          dependents[target] << source
+          dependencies[source] << target
         end
       end
 
-      counts
+      edges = @files.to_h do |file|
+        [file, { dependents: dependents[file], dependencies: dependencies[file] }]
+      end
+
+      [counts, fan_out_counts, edges]
     end
 
     def normalize_path(path)
@@ -92,11 +103,15 @@ module StudFinder
 
     def missing_tools
       warn(TOOL_MISSING)
-      Result.new(counts: zero_counts, warnings: [TOOL_MISSING])
+      Result.new(counts: zero_counts, fan_out_counts: zero_counts, edges: empty_edges, warnings: [TOOL_MISSING])
     end
 
     def zero_counts
       @files.to_h { |file| [file, 0] }
+    end
+
+    def empty_edges
+      @files.to_h { |file| [file, { dependents: [], dependencies: [] }] }
     end
 
     def warn(code)

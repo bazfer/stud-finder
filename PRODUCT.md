@@ -127,20 +127,26 @@ score = 0.35 × fan_in_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 �
 
 ## Roadmap
 
-**Phase 1 — Ruby (complete)**
-Full 4-signal analysis for Rails and Ruby projects.
+**M1–M3 — Complete**
+4-signal composite score (Ruby + JS/TS). `--diff-base` / `--only` filter for per-PR output. Per-PR CircleCI integration — stud-finder runs on every PR, posts ranked artifact and PR comment. Non-blocking.
 
-**Phase 2 — JavaScript / TypeScript (in design)**
-JS/TS fan_in via dependency-cruiser. Complexity via ESLint. Unified ranking — Ruby and JS files in one risk list. Graceful degradation when JS tooling is absent. LCOV coverage from Jest supported out of the box.
+**M4 — Next: fan-out, instability, `stud-finder edges`**
+Fan-out (efferent coupling) and instability (`fan_out / (fan_in + fan_out)`) added to every row in the core output. New `stud-finder edges FILE` subcommand emits the actual dependency edge list for a specific file — dependents and dependencies, both sorted by risk score. Shifts the output from "this file scores high" to "here are the specific files in the blast radius."
 
-**Phase 3 — Configurability + any-Rails-repo (complete)**
-Cobertura + LCOV + SimpleCov support. Auto-detect coverage format. Configurable excludes, weights, thresholds. Works against any Ruby project.
+**M5 — Sentry integration**
+Connect to the Sentry REST API. Parse production stack traces, aggregate error frequency by source file. A runtime signal: not structural approximation but observed failure in production. `--sentry-token`, `--sentry-org`, `--sentry-project` flags. Percentile-ranked and added to the composite score.
 
-**Deferred**
-- Sentry / Datadog integration (surface error rate as a 5th signal)
-- Author concentration (knowledge loss risk)
-- Temporal coupling (files that change together)
-- CI/CD integration (fail builds when trunk files lack coverage)
+**M6 — Temporal coupling**
+Co-change frequency from git history: file pairs that change together more often than expected by chance. Surfaces hidden coupling that static analysis cannot see — implicit contracts, shared state, callback side effects. Observed behavior, not structural approximation.
+
+**Pinned — Producer-consumer dependency mapping**
+Explicitly surfacing which components consume data produced by other components, flagging pairs with high temporal coupling but low static coupling as candidates for explicit contract documentation.
+
+**M7 — Merge-to-staging S3 timeline (lowest priority)**
+Full stud-finder run on each merge to the mainline branch → JSON → S3, keyed by timestamp + commit SHA. Durable risk-over-time feed for trend analysis.
+
+**Future — Toward a validated risk estimator**
+Calibrated weights back-tested against bug history. Historical bug density as a direct input metric. Change-scope awareness (per-PR risk = file-risk × change-magnitude × change-type). Test quality beyond line coverage. See `VISION.md` for the full analysis.
 
 ---
 

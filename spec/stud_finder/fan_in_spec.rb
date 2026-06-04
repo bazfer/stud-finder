@@ -14,6 +14,10 @@ RSpec.describe StudFinder::FanIn do
     described_class.new(repo_path: repo_path, files: files).call.counts
   end
 
+  def result(files)
+    described_class.new(repo_path: repo_path, files: files).call
+  end
+
   let(:repo_path) { Dir.mktmpdir('stud-finder-fan-in') }
 
   after do
@@ -182,5 +186,39 @@ RSpec.describe StudFinder::FanIn do
     counts = fan_in(['config/routes.rb', 'app/models/user.rb'])
 
     expect(counts['config/routes.rb']).to eq(0)
+  end
+
+  it 'computes fan_out as the number of known files this file depends on' do
+    write_file('app/models/user.rb', 'class User; end')
+    write_file('app/models/role.rb', 'class Role; end')
+    write_file('app/services/greet_user.rb', 'class GreetUser; User.new; Role.new; end')
+
+    r = result(['app/models/user.rb', 'app/models/role.rb', 'app/services/greet_user.rb'])
+
+    expect(r.fan_out_counts['app/services/greet_user.rb']).to eq(2)
+    expect(r.fan_out_counts['app/models/user.rb']).to eq(0)
+    expect(r.fan_out_counts['app/models/role.rb']).to eq(0)
+  end
+
+  it 'populates dependents and dependencies in edges' do
+    write_file('app/models/user.rb', 'class User; end')
+    write_file('app/services/greet_user.rb', 'class GreetUser; User.new; end')
+
+    r = result(['app/models/user.rb', 'app/services/greet_user.rb'])
+
+    expect(r.edges['app/models/user.rb'][:dependents]).to contain_exactly('app/services/greet_user.rb')
+    expect(r.edges['app/models/user.rb'][:dependencies]).to be_empty
+    expect(r.edges['app/services/greet_user.rb'][:dependents]).to be_empty
+    expect(r.edges['app/services/greet_user.rb'][:dependencies]).to contain_exactly('app/models/user.rb')
+  end
+
+  it 'computes instability as 0.0 for an isolated file' do
+    write_file('app/models/standalone.rb', 'class Standalone; end')
+
+    r = result(['app/models/standalone.rb'])
+
+    expect(r.fan_out_counts['app/models/standalone.rb']).to eq(0)
+    expect(r.edges['app/models/standalone.rb'][:dependents]).to be_empty
+    expect(r.edges['app/models/standalone.rb'][:dependencies]).to be_empty
   end
 end

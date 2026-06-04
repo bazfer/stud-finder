@@ -11,10 +11,11 @@ module StudFinder
     attr_reader :normalized_weights
 
     # rubocop:disable Metrics/ParameterLists
-    def initialize(files:, fan_in:, complexity:, churn:, churn_lines: nil, coverage: nil, weights: DEFAULT_WEIGHTS,
-                   branch_threshold: 50, trunk_threshold: 85)
+    def initialize(files:, fan_in:, fan_out:, complexity:, churn:, churn_lines: nil, coverage: nil,
+                   weights: DEFAULT_WEIGHTS, branch_threshold: 50, trunk_threshold: 85)
       @files = files
       @fan_in = fan_in
+      @fan_out = fan_out
       @complexity = complexity
       @churn = churn
       @churn_lines = churn_lines || churn
@@ -100,12 +101,16 @@ module StudFinder
     end
 
     def result_row(file, score, fan_in_pct, complexity_pct, churn_pct)
+      fi = @fan_in.fetch(file, 0).to_i
+      fo = @fan_out.fetch(file, 0).to_i
       {
         path: file,
         score: score.round(4),
         classification: classification(fan_in_pct.fetch(file)),
-        fan_in: @fan_in.fetch(file, 0).to_i,
+        fan_in: fi,
         fan_in_pct: fan_in_pct.fetch(file).round(4),
+        fan_out: fo,
+        instability: instability(fi, fo),
         complexity: @complexity.fetch(file, 0).to_i,
         complexity_pct: complexity_pct.fetch(file).round(4),
         churn_commits: @churn.fetch(file, 0).to_i,
@@ -113,6 +118,13 @@ module StudFinder
         churn_pct: churn_pct.fetch(file).round(4),
         coverage: coverage_available? ? @coverage.fetch(file, 0.0).round(4) : nil
       }
+    end
+
+    def instability(fan_in, fan_out)
+      total = fan_in + fan_out
+      return 0.0 if total.zero?
+
+      (fan_out.to_f / total).round(4)
     end
 
     def coverage_available?

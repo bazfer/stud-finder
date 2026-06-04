@@ -2,11 +2,16 @@
 
 require 'csv'
 require 'json'
+require 'open3'
 require 'optparse'
+require 'pathname'
+require 'set'
 require 'time'
 require_relative 'churn'
 require_relative 'complexity'
+require_relative 'diff'
 require_relative 'coverage/detector'
+require_relative 'edges'
 require_relative 'fan_in'
 require_relative 'js_fan_in'
 require_relative 'js_complexity'
@@ -19,11 +24,11 @@ module StudFinder
   class CLI
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
     RESULT_COLUMNS = %w[
-      rank language file score class fan_in fan_in_pct complexity complexity_pct churn_commits churn_lines churn_pct
-      coverage
+      rank language file score class fan_in fan_in_pct fan_out instability complexity complexity_pct churn_commits
+      churn_lines churn_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
-      rank language file score class fan_in complexity churn_commits churn_lines churn_pct coverage
+      rank language file score class fan_in fan_out instability complexity churn_commits churn_lines churn_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in complexity churn coverage].freeze
     DEFAULT_OPTIONS = {
@@ -40,11 +45,14 @@ module StudFinder
       ruby_coverage_path: nil,
       js_coverage_path: nil,
       js_timeout: 60,
+      diff_base: nil,
+      only_paths: nil,
+      filter_set: nil,
       cli_warnings: []
     }.freeze
 
-    Analysis = Struct.new(:files, :fan_in, :complexity, :churn_commits, :churn_lines, :coverage, :coverage_available,
-                          :skipped_files, :warnings, :rows, :weights, keyword_init: true)
+    Analysis = Struct.new(:files, :fan_in, :fan_out, :edges, :complexity, :churn_commits, :churn_lines, :coverage,
+                          :coverage_available, :skipped_files, :warnings, :rows, :weights, keyword_init: true)
     Report = Struct.new(:ruby, :javascript, :warnings, keyword_init: true)
 
     class ValidationError < StandardError; end
@@ -61,11 +69,14 @@ module StudFinder
     end
 
     def run
+      return run_edges(@argv[1], @argv[2] || '.') if @argv[0] == 'edges'
+
       parser = option_parser
       parser.parse!(@argv)
       path = @argv.shift || '.'
       raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
 
+      @repo_path = File.expand_path(path)
       validate_options!
 
       result = FileCollector.new(
@@ -76,12 +87,30 @@ module StudFinder
       ).collect
       progress("collecting files... #{result.files.length} found")
 
-      analysis = analyze(File.expand_path(path), result.files, result.languages)
-      emit_results(File.expand_path(path), result, analysis)
+      @options[:filter_set] = resolve_filter_set(@repo_path)
+
+      analysis = analyze(@repo_path, result.files, result.languages)
+      analysis = warn_if_no_scored_files(analysis)
+      emit_results(@repo_path, result, analysis)
       0
     rescue OptionParser::InvalidOption, OptionParser::MissingArgument, OptionParser::InvalidArgument, ValidationError,
            FileCollector::Error, Churn::Error, Complexity::Error, Coverage::Cobertura::Error, Coverage::Detector::Error,
-           Coverage::Lcov::Error, Coverage::Resultset::Error, Scorer::ValidationError => e
+           Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Scorer::ValidationError => e
+      @stderr.puts e.message
+      1
+    end
+
+    def run_edges(target, path)
+      @repo_path = File.expand_path(path)
+      result = FileCollector.new(path: path, excludes: @options[:excludes],
+                                 min_files: @options[:min_files], stderr: @stderr).collect
+      progress("collecting files... #{result.files.length} found")
+      analysis = analyze(@repo_path, result.files, result.languages)
+      all_rows = analysis.ruby.rows + analysis.javascript.rows
+      all_edges = analysis.ruby.edges.merge(analysis.javascript.edges)
+      Edges.new(target: target, rows: all_rows, edges: all_edges,
+                stdout: @stdout, stderr: @stderr).call
+    rescue FileCollector::Error, Churn::Error, Complexity::Error, Scorer::ValidationError => e
       @stderr.puts e.message
       1
     end
@@ -137,6 +166,14 @@ module StudFinder
         opts.on('--top N', Integer, 'Emit only the top N results') do |value|
           @options[:top] = value
         end
+        opts.on('--diff-base REF',
+                'Score the full repo but emit only files changed vs REF (merge-base), e.g. origin/staging') do |value|
+          @options[:diff_base] = value
+        end
+        opts.on('--only PATHS',
+                'Emit only these comma-separated repo-relative paths (still scored against the full repo)') do |value|
+          @options[:only_paths] = value.split(',').map(&:strip).reject(&:empty?)
+        end
         opts.on('--verbose', 'Print suppressed per-file warnings to stderr') do
           @options[:verbose] = true
         end
@@ -186,15 +223,31 @@ module StudFinder
       raise ValidationError, 'Error: --min-files must be positive.' if @options[:min_files] <= 0
       raise ValidationError, 'Error: --top must be positive.' if @options[:top] && @options[:top] <= 0
       raise ValidationError, 'Error: --churn-days must be positive.' if @options[:churn_days] <= 0
+      raise ValidationError, 'Error: --js-timeout must be positive.' if @options[:js_timeout] <= 0
+
+      validate_coverage_paths!
+      validate_filter_options!
+      validate_weights! if @options[:custom_weights]
+    end
+
+    def validate_coverage_paths!
       if @options[:ruby_coverage_path] && !File.file?(@options[:ruby_coverage_path])
         raise ValidationError, "Error: coverage file not found: #{@options[:ruby_coverage_path]}"
       end
-      if @options[:js_coverage_path] && !File.file?(@options[:js_coverage_path])
-        raise ValidationError, "Error: JS coverage file not found: #{@options[:js_coverage_path]}"
-      end
-      raise ValidationError, 'Error: --js-timeout must be positive.' if @options[:js_timeout] <= 0
+      return unless @options[:js_coverage_path] && !File.file?(@options[:js_coverage_path])
 
-      validate_weights! if @options[:custom_weights]
+      raise ValidationError, "Error: JS coverage file not found: #{@options[:js_coverage_path]}"
+    end
+
+    def validate_filter_options!
+      if @options[:diff_base] && @options[:only_paths]
+        raise ValidationError, 'Error: --diff-base and --only are mutually exclusive.'
+      end
+      return unless @options[:diff_base] && @repo_path
+
+      Diff.new(repo_path: @repo_path, base_ref: @options[:diff_base]).validate_ref!
+    rescue Diff::Error => e
+      raise ValidationError, e.message
     end
 
     def validate_threshold!(name)
@@ -233,7 +286,7 @@ module StudFinder
     end
 
     def analyze_ruby(path, files)
-      progress('computing Ruby fan_in (rubocop-ast)...')
+      progress('computing Ruby fan_in + fan_out (rubocop-ast)...')
       fan_in_result = FanIn.new(repo_path: path, files: files).call
 
       progress('computing Ruby complexity (rubocop)...')
@@ -244,30 +297,33 @@ module StudFinder
       churn_result = Churn.new(repo_path: path, files: analysis_files, days: @options[:churn_days],
                                stderr: @stderr).call
 
-      score_group(analysis_files, fan_in_result.counts, complexity_result.counts, churn_result,
-                  complexity_result.skipped_files, ruby_coverage(path, analysis_files),
+      score_group(analysis_files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
+                  complexity_result.counts, churn_result, complexity_result.skipped_files,
+                  ruby_coverage(path, analysis_files),
                   language_by_file: analysis_files.to_h { |file| [file, :ruby] })
     end
 
     def analyze_javascript(path, files, languages)
-      progress('computing JavaScript fan_in (dependency-cruiser)...')
+      progress('computing JavaScript fan_in + fan_out (dependency-cruiser)...')
       fan_in_result = JsFanIn.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
                                   stderr: @stderr).call
       progress('computing JavaScript complexity (eslint)...')
       complexity_result = JsComplexity.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
                                            stderr: @stderr).call
       churn_result = Churn.new(repo_path: path, files: files, days: @options[:churn_days], stderr: @stderr).call
-      score_group(files, fan_in_result.counts, complexity_result.counts, churn_result, [], js_coverage(path, files),
+      score_group(files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
+                  complexity_result.counts, churn_result, [], js_coverage(path, files),
                   language_by_file: languages, extra_warnings: fan_in_result.warnings + complexity_result.warnings)
     end
 
     # rubocop:disable Metrics/ParameterLists
-    def score_group(files, fan_in, complexity, churn_result, skipped_files, coverage_payload, language_by_file: {},
-                    extra_warnings: [])
+    def score_group(files, fan_in, fan_out, edges, complexity, churn_result, skipped_files, coverage_payload,
+                    language_by_file: {}, extra_warnings: [])
       progress("normalizing + scoring #{files.length} files...")
       coverage_result, coverage_parser = coverage_payload
-      scorer = Scorer.new(files: files, fan_in: fan_in, complexity: complexity, churn: churn_result.counts,
-                          churn_lines: churn_result.line_counts, coverage: coverage_result, weights: @options[:weights],
+      scorer = Scorer.new(files: files, fan_in: fan_in, fan_out: fan_out, complexity: complexity,
+                          churn: churn_result.counts, churn_lines: churn_result.line_counts,
+                          coverage: coverage_result, weights: @options[:weights],
                           branch_threshold: @options[:branch_threshold], trunk_threshold: @options[:trunk_threshold])
       warnings = extra_warnings.dup
       warnings << 'coverage_unavailable' unless coverage_result
@@ -277,10 +333,11 @@ module StudFinder
       warnings << 'small_repo' if files.length < @options[:min_files]
       emit_scoring_note(scorer, coverage_result)
       Analysis.new(
-        files: files, fan_in: fan_in, complexity: complexity, churn_commits: churn_result.churn_commits,
-        churn_lines: churn_result.churn_lines, coverage: coverage_result,
-        coverage_available: !coverage_result.nil?, skipped_files: skipped_files, warnings: warnings.uniq,
-        rows: scorer.call.map { |row| with_language(row, language_by_file) }, weights: scorer.normalized_weights
+        files: files, fan_in: fan_in, fan_out: fan_out, edges: edges, complexity: complexity,
+        churn_commits: churn_result.churn_commits, churn_lines: churn_result.churn_lines,
+        coverage: coverage_result, coverage_available: !coverage_result.nil?, skipped_files: skipped_files,
+        warnings: warnings.uniq, rows: scorer.call.map { |row| with_language(row, language_by_file) },
+        weights: scorer.normalized_weights
       )
     end
     # rubocop:enable Metrics/ParameterLists
@@ -327,13 +384,88 @@ module StudFinder
       end
     end
 
+    # Resolves the optional output filter to a Set of repo-relative paths, or nil.
+    # The filter is applied at emit time only (see #limited_rows) so the full repo
+    # is still scored — fan_in counts and percentiles stay correct.
+    def resolve_filter_set(path)
+      paths =
+        if @options[:diff_base]
+          Diff.new(repo_path: path, base_ref: @options[:diff_base]).changed_paths
+        else
+          @options[:only_paths]
+        end
+      return nil unless paths
+
+      # Diff (and documented --only) paths are repo-root-relative, but row paths are
+      # relative to the analysis root (FileCollector). Rebase so they compare equal
+      # when PATH is a subdirectory; a no-op when PATH is the repo root.
+      paths = rebase_to_analysis_root(paths, path)
+
+      if paths.empty?
+        @stderr.puts 'Note: diff contains no changed files. Nothing to filter.'
+        @options[:cli_warnings] << 'diff_filter_empty'
+      end
+      Set.new(paths)
+    end
+
+    # Strips the analysis-root prefix from repo-root-relative filter paths and drops
+    # any path outside the analysis root. Returns paths unchanged when the analysis
+    # root is the repo root (or the toplevel can't be resolved).
+    def rebase_to_analysis_root(paths, analysis_path)
+      toplevel = git_toplevel(analysis_path)
+      return paths if toplevel.nil?
+
+      # realpath on both sides so symlinked roots (e.g. macOS /var -> /private/var)
+      # don't defeat the prefix comparison.
+      analysis_abs = File.realpath(analysis_path)
+      return paths if analysis_abs == toplevel
+
+      prefix = Pathname.new(analysis_abs).relative_path_from(Pathname.new(toplevel)).to_s
+      return paths if prefix.empty? || prefix == '.' || prefix.start_with?('..')
+
+      prefix += '/'
+      paths.select { |p| p.start_with?(prefix) }.map { |p| p.delete_prefix(prefix) }
+    rescue Errno::ENOENT
+      paths
+    end
+
+    def git_toplevel(analysis_path)
+      stdout, _stderr, status = Open3.capture3(
+        'git', '-C', File.expand_path(analysis_path), 'rev-parse', '--show-toplevel'
+      )
+      status.success? ? File.realpath(stdout.strip) : nil
+    end
+
+    def warn_if_no_scored_files(analysis)
+      return analysis unless @options[:filter_set] && !@options[:filter_set].empty?
+
+      scored = Set.new(analysis.ruby.files + analysis.javascript.files)
+      return analysis if @options[:filter_set].intersect?(scored)
+
+      @stderr.puts 'Note: no scored files matched the diff. ' \
+                   'The PR may only touch unscorable files (docs, config, migrations, etc.).'
+      Report.new(ruby: analysis.ruby, javascript: analysis.javascript,
+                 warnings: (analysis.warnings + ['diff_no_scored_files']).uniq)
+    end
+
     def limited_rows(rows)
-      @options[:top] ? rows.first(@options[:top]) : rows
+      filtered = @options[:filter_set] ? rows.select { |row| @options[:filter_set].include?(row[:path]) } : rows
+      @options[:top] ? filtered.first(@options[:top]) : filtered
+    end
+
+    def filter_note
+      return unless @options[:filter_set]
+
+      if @options[:diff_base]
+        "Filtered to files changed vs #{@options[:diff_base]} (ranks are against the full repo)."
+      else
+        'Filtered to --only paths (ranks are against the full repo).'
+      end
     end
 
     def empty_analysis
-      Analysis.new(files: [], fan_in: {}, complexity: {}, churn_commits: {}, churn_lines: {}, coverage: nil,
-                   coverage_available: false, skipped_files: [], warnings: [], rows: [], weights: nil)
+      Analysis.new(files: [], fan_in: {}, fan_out: {}, edges: {}, complexity: {}, churn_commits: {}, churn_lines: {},
+                   coverage: nil, coverage_available: false, skipped_files: [], warnings: [], rows: [], weights: nil)
     end
 
     def emit_markdown_section(title, rows)
@@ -348,7 +480,7 @@ module StudFinder
     def emit_table_section(title, rows)
       @stdout.puts title
       @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
-                   'complexity  churn_commits  churn_lines  churn_pct  coverage'
+                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  coverage'
       rows.each { |row| @stdout.puts table_row(row) }
       @stdout.puts
     end
@@ -370,7 +502,7 @@ module StudFinder
     end
 
     def json_meta(path, analysis)
-      {
+      meta = {
         repo: path,
         analyzed_at: Time.now.utc.iso8601,
         churn_days: @options[:churn_days],
@@ -380,6 +512,10 @@ module StudFinder
         weights: json_weights(analysis.ruby.weights || analysis.javascript.weights),
         warnings: analysis.warnings
       }
+      meta[:filtered] = true if @options[:filter_set]
+      meta[:diff_base] = @options[:diff_base] if @options[:diff_base]
+      meta[:only_paths] = @options[:only_paths] if @options[:only_paths]
+      meta
     end
 
     def emit_markdown(analysis, ruby_rows, javascript_rows)
@@ -388,6 +524,11 @@ module StudFinder
       file_count = analysis.ruby.files.length + analysis.javascript.files.length
       @stdout.puts "> #{report_coverage_available?(analysis) ? '4-factor score' : '3-factor score (no coverage)'}. " \
                    "Churn window: #{@options[:churn_days]} days. #{file_count} files analyzed."
+      note = filter_note
+      if note
+        @stdout.puts
+        @stdout.puts "> #{note}"
+      end
       emit_markdown_section('Ruby', ruby_rows)
       emit_markdown_section('JavaScript/TypeScript', javascript_rows)
       @stdout.puts
@@ -397,8 +538,8 @@ module StudFinder
     def markdown_row(row)
       values = [
         row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:fan_in],
-        row[:complexity], row[:churn_commits], row[:churn_lines], format_score(row[:churn_pct]),
-        format_coverage(row[:coverage])
+        row[:fan_out], format_score(row[:instability]), row[:complexity], row[:churn_commits], row[:churn_lines],
+        format_score(row[:churn_pct]), format_coverage(row[:coverage])
       ]
       "| #{values.join(' | ')} |"
     end
@@ -411,6 +552,8 @@ module StudFinder
         @stdout.puts scoring_note(weights: analysis.ruby.weights || analysis.javascript.weights,
                                   stderr: false)
       end
+      note = filter_note
+      @stdout.puts note if note
       @stdout.puts
       emit_table_section('Ruby', ruby_rows)
       emit_table_section('JavaScript/TypeScript', javascript_rows)
@@ -429,6 +572,8 @@ module StudFinder
         class: row[:classification],
         fan_in: row[:fan_in],
         fan_in_pct: row[:fan_in_pct],
+        fan_out: row[:fan_out],
+        instability: row[:instability],
         complexity: row[:complexity],
         complexity_pct: row[:complexity_pct],
         churn_commits: row[:churn_commits],
@@ -447,6 +592,8 @@ module StudFinder
         row[:classification],
         row[:fan_in],
         format_score(row[:fan_in_pct]),
+        row[:fan_out],
+        format_score(row[:instability]),
         row[:complexity],
         format_score(row[:complexity_pct]),
         row[:churn_commits],
@@ -504,9 +651,11 @@ module StudFinder
 
     def table_row(row)
       format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
-             '%<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  %<churn_pct>9s  %<coverage>8s',
+             '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
+             '%<churn_pct>9s  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
-             classification: row[:classification], fan_in: row[:fan_in], complexity: row[:complexity],
+             classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
+             instability: format_score(row[:instability]), complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
              churn_pct: format_score(row[:churn_pct]), coverage: format_coverage(row[:coverage]))
     end

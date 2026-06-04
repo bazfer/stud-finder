@@ -6,6 +6,7 @@ require 'stud_finder/scorer'
 RSpec.describe StudFinder::Scorer do
   let(:files) { %w[a.rb b.rb c.rb d.rb] }
   let(:fan_in) { { 'a.rb' => 3, 'b.rb' => 2, 'c.rb' => 1, 'd.rb' => 0 } }
+  let(:fan_out) { { 'a.rb' => 0, 'b.rb' => 1, 'c.rb' => 2, 'd.rb' => 0 } }
   let(:complexity) { { 'a.rb' => 1, 'b.rb' => 10, 'c.rb' => 0, 'd.rb' => 0 } }
   let(:churn) { { 'a.rb' => 0, 'b.rb' => 1, 'c.rb' => 10, 'd.rb' => 0 } }
 
@@ -13,6 +14,7 @@ RSpec.describe StudFinder::Scorer do
     options = {
       files: files,
       fan_in: fan_in,
+      fan_out: fan_out,
       complexity: complexity,
       churn: churn,
       weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.0 },
@@ -112,6 +114,7 @@ end
 RSpec.describe StudFinder::Scorer, 'with coverage' do
   let(:files) { %w[a.rb b.rb] }
   let(:fan_in) { { 'a.rb' => 1, 'b.rb' => 0 } }
+  let(:fan_out) { { 'a.rb' => 0, 'b.rb' => 1 } }
   let(:complexity) { { 'a.rb' => 0, 'b.rb' => 1 } }
   let(:churn) { { 'a.rb' => 0, 'b.rb' => 0 } }
   let(:coverage) { { 'a.rb' => 1.0, 'b.rb' => 0.0 } }
@@ -120,6 +123,7 @@ RSpec.describe StudFinder::Scorer, 'with coverage' do
     scorer = described_class.new(
       files: files,
       fan_in: fan_in,
+      fan_out: fan_out,
       complexity: complexity,
       churn: churn,
       coverage: coverage,
