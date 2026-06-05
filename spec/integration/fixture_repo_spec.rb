@@ -50,8 +50,9 @@ RSpec.describe 'fixture repo integration' do
     expect(files.map { |file| file['score'] }).to all(be_between(0.0, 1.0).inclusive)
     expect(files.map { |file| file['score'] }).to eq(files.map { |file| file['score'] }.sort.reverse)
     expect(files.first.keys).to include('rank', 'language', 'path', 'score', 'class', 'fan_in', 'fan_in_pct',
+                                        'fan_out', 'fan_out_pct', 'instability', 'instability_pct',
                                         'complexity', 'complexity_pct', 'churn_commits', 'churn_lines', 'churn_pct',
-                                        'coverage')
+                                        'max_coupling', 'coupling_partners', 'coupling_pct', 'coverage')
   end
 
   it 'emits JSON output with Cobertura coverage integrated' do
@@ -66,7 +67,7 @@ RSpec.describe 'fixture repo integration' do
     expect(files['app/services/auth_service.rb']['score']).to be > files['app/services/post_service.rb']['score']
   end
 
-  it 'scores files absent from a partial Cobertura report with the four-factor formula' do
+  it 'scores files absent from a partial Cobertura report with the five-factor formula' do
     coverage_path = File.join(repo_path, 'coverage/coverage.xml')
     coverage_xml = File.read(coverage_path)
     File.write(coverage_path, coverage_xml.sub(%r{\s*<class filename="app/models/post\.rb" line-rate="0\.95" />}, ''))
@@ -77,9 +78,9 @@ RSpec.describe 'fixture repo integration' do
     expect(status).to be_success, stderr
     files = payload['ruby'].to_h { |file| [file['path'], file] }
     expect(files['app/models/post.rb']['coverage']).to eq(0.0)
-    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.4611)
+    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.3944)
     expect(files['app/models/profile.rb']['coverage']).to eq(0.75)
-    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.3097)
+    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.2542)
   end
 
   it 'emits markdown output' do
