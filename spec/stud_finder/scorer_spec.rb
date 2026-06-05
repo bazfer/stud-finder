@@ -139,25 +139,37 @@ RSpec.describe StudFinder::Scorer do
 
   it 'emits coupling fields from the coupling hash' do
     coupling = {
-      'a.rb' => { max_coupling: 0.8, partners: 3 },
-      'b.rb' => { max_coupling: 0.2, partners: 1 }
+      'a.rb' => { max_coupling: 0.8, max_coupling_partner: 'b.rb', partners: 3 },
+      'b.rb' => { max_coupling: 0.2, max_coupling_partner: 'a.rb', partners: 1 }
     }
     rows = scorer(coupling: coupling).call.to_h { |row| [row[:path], row] }
 
     expect(rows['a.rb'][:max_coupling]).to eq(0.8)
+    expect(rows['a.rb'][:max_coupling_partner]).to eq('b.rb')
     expect(rows['a.rb'][:coupling_partners]).to eq(3)
     expect(rows['a.rb'][:coupling_pct]).to eq(1.0)
     expect(rows['b.rb'][:max_coupling]).to eq(0.2)
+    expect(rows['b.rb'][:max_coupling_partner]).to eq('a.rb')
     expect(rows['b.rb'][:coupling_partners]).to eq(1)
-    # files absent from the hash are treated as 0.0 / 0
+    # files absent from the hash are treated as 0.0 / 0 / empty partner
     expect(rows['c.rb'][:max_coupling]).to eq(0.0)
+    expect(rows['c.rb'][:max_coupling_partner]).to eq('')
     expect(rows['c.rb'][:coupling_partners]).to eq(0)
+  end
+
+  it 'defaults max_coupling_partner to an empty string when a partner path is missing' do
+    coupling = { 'a.rb' => { max_coupling: 0.5, partners: 2 } }
+    rows = scorer(coupling: coupling).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['a.rb'][:max_coupling]).to eq(0.5)
+    expect(rows['a.rb'][:max_coupling_partner]).to eq('')
   end
 
   it 'zeroes coupling fields when no coupling data is supplied' do
     rows = scorer.call.to_h { |row| [row[:path], row] }
 
     expect(rows['a.rb'][:max_coupling]).to eq(0.0)
+    expect(rows['a.rb'][:max_coupling_partner]).to eq('')
     expect(rows['a.rb'][:coupling_partners]).to eq(0)
     expect(rows['a.rb'][:coupling_pct]).to eq(0.0)
   end

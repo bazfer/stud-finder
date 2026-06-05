@@ -26,11 +26,12 @@ module StudFinder
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
     RESULT_COLUMNS = %w[
       rank language file score class fan_in fan_in_pct fan_out fan_out_pct instability instability_pct complexity
-      complexity_pct churn_commits churn_lines churn_pct max_coupling coupling_partners coupling_pct coverage
+      complexity_pct churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners
+      coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
       rank language file score class fan_in fan_out fan_out_pct instability complexity churn_commits churn_lines
-      churn_pct max_coupling coupling_partners coupling_pct coverage
+      churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
     DEFAULT_OPTIONS = {
@@ -320,8 +321,9 @@ module StudFinder
 
     # Computes temporal coupling once over the full collected file set (all languages
     # together, so cross-language co-change is captured) and aggregates each file's
-    # partners into { file => { max_coupling: Float, partners: Integer } }. Files with
-    # no qualifying pairs are simply absent from the hash (scorer treats them as 0).
+    # partners into { file => { max_coupling: Float, max_coupling_partner: String, partners: Integer } }.
+    # max_coupling_partner is the path of the partner that produced max_coupling. Files
+    # with no qualifying pairs are simply absent from the hash (scorer treats them as 0).
     def compute_coupling(path, files)
       progress("computing temporal coupling (git log, #{@options[:churn_days]} days)...")
       result = TemporalCoupling.new(
@@ -331,9 +333,25 @@ module StudFinder
         min_co_changes: @options[:coupling_min_commits],
         coupling_threshold: @options[:coupling_threshold]
       ).call
-      result.pairs.transform_values do |partners|
-        { max_coupling: partners.map { |entry| entry[:coupling] }.max || 0.0, partners: partners.length }
-      end
+      result.pairs.transform_values { |partners| aggregate_partners(partners) }
+    end
+
+    # Reduces a file's partner entries to its strongest-coupling partner.
+    # Tie-break is deterministic: highest :coupling, then highest :co_changes,
+    # then alphabetical :path — so identical inputs always pick the same partner.
+    def aggregate_partners(partners)
+      top = partners.max_by { |entry| [entry[:coupling], entry[:co_changes], invert_path(entry[:path])] }
+      {
+        max_coupling: top ? top[:coupling] : 0.0,
+        max_coupling_partner: top ? top[:path] : nil,
+        partners: partners.length
+      }
+    end
+
+    # Inverts each byte so that max_by's "larger is better" ordering picks the
+    # alphabetically-FIRST path on ties (lexicographically smaller string wins).
+    def invert_path(path)
+      path.bytes.map(&:-@)
     end
 
     def analyze(path, files, languages, coupling = nil)
@@ -546,7 +564,7 @@ module StudFinder
       @stdout.puts title
       @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
                    'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  max_coupling  ' \
-                   'coupling_partners  coverage'
+                   'max_coupling_partner                      coupling_partners  coverage'
       rows.each { |row| @stdout.puts table_row(row) }
       @stdout.puts
     end
@@ -606,7 +624,8 @@ module StudFinder
         row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:fan_in],
         row[:fan_out], format_score(row[:fan_out_pct]), format_score(row[:instability]), row[:complexity],
         row[:churn_commits], row[:churn_lines], format_score(row[:churn_pct]), format_score(row[:max_coupling]),
-        row[:coupling_partners], format_score(row[:coupling_pct]), format_coverage(row[:coverage])
+        row[:max_coupling_partner], row[:coupling_partners], format_score(row[:coupling_pct]),
+        format_coverage(row[:coverage])
       ]
       "| #{values.join(' | ')} |"
     end
@@ -649,6 +668,7 @@ module StudFinder
         churn_lines: row[:churn_lines],
         churn_pct: row[:churn_pct],
         max_coupling: row[:max_coupling],
+        max_coupling_partner: row[:max_coupling_partner],
         coupling_partners: row[:coupling_partners],
         coupling_pct: row[:coupling_pct],
         coverage: row[:coverage]
@@ -674,6 +694,7 @@ module StudFinder
         row[:churn_lines],
         format_score(row[:churn_pct]),
         format_score(row[:max_coupling]),
+        row[:max_coupling_partner],
         row[:coupling_partners],
         format_score(row[:coupling_pct]),
         row[:coverage] || ''
@@ -730,13 +751,25 @@ module StudFinder
     def table_row(row)
       format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
              '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
-             '%<churn_pct>9s  %<max_coupling>12s  %<coupling_partners>17d  %<coverage>8s',
+             '%<churn_pct>9s  %<max_coupling>12s  %<max_coupling_partner>-40s  %<coupling_partners>17d  ' \
+             '%<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
              classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
              instability: format_score(row[:instability]), complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
              churn_pct: format_score(row[:churn_pct]), max_coupling: format_score(row[:max_coupling]),
+             max_coupling_partner: truncate_partner(row[:max_coupling_partner]),
              coupling_partners: row[:coupling_partners], coverage: format_coverage(row[:coverage]))
+    end
+
+    # Keeps the partner path readable in the fixed-width table. The partner name is
+    # the actionable info, so on overflow we keep the rightmost ~40 chars (the
+    # basename and nearest parent dirs) with a leading ellipsis marker.
+    def truncate_partner(partner)
+      partner = partner.to_s
+      return partner if partner.length <= 40
+
+      "...#{partner[-37..]}"
     end
   end
   # rubocop:enable Metrics/ClassLength

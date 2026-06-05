@@ -327,7 +327,7 @@ RSpec.describe StudFinder::CLI do
       )
       expect(rows.last).to eq(
         ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '0.0000', '0.0000', '7', '1.0000',
-         '3', '15', '1.0000', '0.0000', '0', '0.0000', '']
+         '3', '15', '1.0000', '0.0000', '', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
     end
@@ -356,7 +356,50 @@ RSpec.describe StudFinder::CLI do
       coupled.each do |row|
         expect(row['max_coupling'].to_f).to be > 0.0
         expect(row['coupling_partners'].to_i).to be >= 1
+        expect(row['max_coupling_partner']).not_to be_empty
       end
+      # The two files co-change only with each other, so each names the other as its partner.
+      by_file = coupled.to_h { |row| [row['file'], row['max_coupling_partner']] }
+      expect(by_file['app/models/model_0.rb']).to eq('app/models/model_1.rb')
+      expect(by_file['app/models/model_1.rb']).to eq('app/models/model_0.rb')
+    end
+  end
+
+  describe '#aggregate_partners (max_coupling_partner tie-break)' do
+    def aggregate(partners)
+      described_class.new([]).send(:aggregate_partners, partners)
+    end
+
+    it 'breaks ties by highest coupling, then co_changes, then alphabetical path' do
+      partners = [
+        { path: 'z.rb', coupling: 0.5, co_changes: 9, own_changes: 12 },
+        # same coupling as z but more co_changes -> wins on the second key
+        { path: 'm.rb', coupling: 0.5, co_changes: 20, own_changes: 40 },
+        # higher coupling than everything -> should NOT win because m has more weight? no: coupling is first key
+        { path: 'a.rb', coupling: 0.5, co_changes: 20, own_changes: 40 }
+      ]
+      # coupling ties across all three; co_changes ties m and a at 20; alphabetical => a.rb
+      result = aggregate(partners)
+      expect(result[:max_coupling]).to eq(0.5)
+      expect(result[:max_coupling_partner]).to eq('a.rb')
+      expect(result[:partners]).to eq(3)
+    end
+
+    it 'prefers the strictly-higher coupling regardless of co_changes or path' do
+      partners = [
+        { path: 'a.rb', coupling: 0.9, co_changes: 1, own_changes: 1 },
+        { path: 'b.rb', coupling: 0.4, co_changes: 99, own_changes: 200 }
+      ]
+      result = aggregate(partners)
+      expect(result[:max_coupling]).to eq(0.9)
+      expect(result[:max_coupling_partner]).to eq('a.rb')
+    end
+
+    it 'returns nil partner and zero coupling for an empty partner list' do
+      result = aggregate([])
+      expect(result[:max_coupling]).to eq(0.0)
+      expect(result[:max_coupling_partner]).to be_nil
+      expect(result[:partners]).to eq(0)
     end
   end
 
