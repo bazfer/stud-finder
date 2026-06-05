@@ -8,6 +8,7 @@ require 'pathname'
 require 'set'
 require 'time'
 require_relative 'churn'
+require_relative 'temporal_coupling'
 require_relative 'complexity'
 require_relative 'diff'
 require_relative 'coverage/detector'
@@ -48,6 +49,8 @@ module StudFinder
       diff_base: nil,
       only_paths: nil,
       filter_set: nil,
+      coupling_threshold: 0.30,
+      coupling_min_commits: 5,
       cli_warnings: []
     }.freeze
 
@@ -69,9 +72,20 @@ module StudFinder
     end
 
     def run
-      return run_edges(@argv[1], @argv[2] || '.') if @argv[0] == 'edges'
-
       parser = option_parser
+
+      if @argv[0] == 'edges'
+        @argv.shift
+        parser.parse!(@argv)
+        target = @argv.shift
+        path = @argv.shift || '.'
+        raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
+
+        @repo_path = File.expand_path(path)
+        validate_options!
+        return run_edges(target, path)
+      end
+
       parser.parse!(@argv)
       path = @argv.shift || '.'
       raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
@@ -108,8 +122,24 @@ module StudFinder
       analysis = analyze(@repo_path, result.files, result.languages)
       all_rows = analysis.ruby.rows + analysis.javascript.rows
       all_edges = analysis.ruby.edges.merge(analysis.javascript.edges)
-      Edges.new(target: target, rows: all_rows, edges: all_edges,
-                stdout: @stdout, stderr: @stderr).call
+
+      progress("computing temporal coupling (git log, #{@options[:churn_days]} days)...")
+      coupling_result = TemporalCoupling.new(
+        repo_path: @repo_path,
+        files: result.files,
+        days: @options[:churn_days],
+        min_co_changes: @options[:coupling_min_commits],
+        coupling_threshold: @options[:coupling_threshold]
+      ).call
+
+      Edges.new(
+        target: target, rows: all_rows, edges: all_edges,
+        coupling: coupling_result.pairs,
+        churn_days: @options[:churn_days],
+        coupling_min_commits: @options[:coupling_min_commits],
+        coupling_threshold: @options[:coupling_threshold],
+        stdout: @stdout, stderr: @stderr
+      ).call
     rescue FileCollector::Error, Churn::Error, Complexity::Error, Scorer::ValidationError => e
       @stderr.puts e.message
       1
@@ -174,6 +204,14 @@ module StudFinder
                 'Emit only these comma-separated repo-relative paths (still scored against the full repo)') do |value|
           @options[:only_paths] = value.split(',').map(&:strip).reject(&:empty?)
         end
+        opts.on('--coupling-threshold FLOAT', Float,
+                'Minimum coupling ratio for edges output (default: 0.30)') do |value|
+          @options[:coupling_threshold] = value
+        end
+        opts.on('--coupling-min-commits N', Integer,
+                'Minimum co-change count for edges output (default: 5)') do |value|
+          @options[:coupling_min_commits] = value
+        end
         opts.on('--verbose', 'Print suppressed per-file warnings to stderr') do
           @options[:verbose] = true
         end
@@ -224,6 +262,11 @@ module StudFinder
       raise ValidationError, 'Error: --top must be positive.' if @options[:top] && @options[:top] <= 0
       raise ValidationError, 'Error: --churn-days must be positive.' if @options[:churn_days] <= 0
       raise ValidationError, 'Error: --js-timeout must be positive.' if @options[:js_timeout] <= 0
+
+      raise ValidationError, 'Error: --coupling-min-commits must be positive.' if @options[:coupling_min_commits] <= 0
+      unless (0.0..1.0).cover?(@options[:coupling_threshold])
+        raise ValidationError, 'Error: --coupling-threshold must be between 0.0 and 1.0.'
+      end
 
       validate_coverage_paths!
       validate_filter_options!

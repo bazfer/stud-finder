@@ -15,6 +15,9 @@ Metrics/BlockLength:
 Gemspec/DevelopmentDependencies:
   Enabled: false
 
+Metrics/ParameterLists:
+  CountKeywordArgs: false
+
 Metrics/MethodLength:
   Max: 45
 

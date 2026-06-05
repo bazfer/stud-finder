@@ -425,4 +425,81 @@ RSpec.describe StudFinder::CLI do
       expect(stderr).not_to include('coverage weight must be 0.0')
     end
   end
+
+  describe 'edges subcommand' do
+    it 'emits the edges report for a scored file' do
+      make_repo(file_count: 5) do |root|
+        status, stdout, stderr = run_cli(['edges', 'app/models/model_0.rb', root, '--min-files', '5'])
+
+        expect(status).to eq(0), stderr
+        expect(stdout).to include('stud-finder edges — app/models/model_0.rb')
+        expect(stdout).to include('Temporal Coupling')
+      end
+    end
+
+    # Regression: the edges subcommand used to return before option parsing ran,
+    # so these flags were silently ignored (and the first flag was eaten as PATH).
+    it 'honors --coupling-min-commits, --coupling-threshold, and --churn-days' do
+      make_repo(file_count: 5) do |root|
+        status, stdout, stderr = run_cli([
+                                           'edges', 'app/models/model_0.rb', root, '--min-files', '5',
+                                           '--coupling-min-commits', '1', '--coupling-threshold', '0.50',
+                                           '--churn-days', '30'
+                                         ])
+
+        expect(status).to eq(0), stderr
+        expect(stdout).to include('30-day window, min 1 co-changes, threshold 0.50')
+      end
+    end
+
+    it 'does not consume a flag as the PATH argument when flags precede it' do
+      make_repo(file_count: 5) do |root|
+        status, stdout, stderr = run_cli(['edges', 'app/models/model_0.rb', '--min-files', '5', root])
+
+        expect(status).to eq(0), stderr
+        expect(stdout).to include('stud-finder edges — app/models/model_0.rb')
+        expect(stderr).not_to include('does not exist')
+      end
+    end
+
+    it 'keeps temporal coupling partners when analyzing a subdirectory' do
+      make_repo(file_count: 5) do |root|
+        2.times do |i|
+          File.open(File.join(root, 'app/models/model_0.rb'), 'a') { |file| file.puts "# model 0 change #{i}" }
+          File.open(File.join(root, 'app/models/model_1.rb'), 'a') { |file| file.puts "# model 1 change #{i}" }
+          system('git', '-C', root, 'add', '.')
+          system('git', '-C', root, 'commit', '-qm', "couple models #{i}")
+        end
+
+        status, stdout, stderr = run_cli([
+                                           'edges', 'models/model_0.rb', File.join(root, 'app'),
+                                           '--min-files', '5', '--coupling-min-commits', '2',
+                                           '--coupling-threshold', '0.0'
+                                         ])
+
+        expect(status).to eq(0), stderr
+        expect(stdout).to include('stud-finder edges — models/model_0.rb')
+        expect(stdout).to include('models/model_1.rb')
+        expect(stdout).not_to include('(none above threshold)')
+      end
+    end
+
+    it 'rejects a non-positive --coupling-min-commits' do
+      make_repo(file_count: 5) do |root|
+        status, _stdout, stderr = run_cli(['edges', 'app/models/model_0.rb', root, '--coupling-min-commits', '0'])
+
+        expect(status).to eq(1)
+        expect(stderr).to include('--coupling-min-commits must be positive')
+      end
+    end
+
+    it 'rejects an out-of-range --coupling-threshold' do
+      make_repo(file_count: 5) do |root|
+        status, _stdout, stderr = run_cli(['edges', 'app/models/model_0.rb', root, '--coupling-threshold', '1.5'])
+
+        expect(status).to eq(1)
+        expect(stderr).to include('--coupling-threshold must be between 0.0 and 1.0')
+      end
+    end
+  end
 end

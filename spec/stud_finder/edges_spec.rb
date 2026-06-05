@@ -25,10 +25,13 @@ RSpec.describe StudFinder::Edges do
     }
   end
 
-  def edges_output(target)
+  def edges_output(target, coupling: {}, coupling_min_commits: 5, coupling_threshold: 0.30)
     stdout = StringIO.new
     stderr = StringIO.new
     status = described_class.new(target: target, rows: rows, edges: edges,
+                                 coupling: coupling,
+                                 coupling_min_commits: coupling_min_commits,
+                                 coupling_threshold: coupling_threshold,
                                  stdout: stdout, stderr: stderr).call
     [status, stdout.string, stderr.string]
   end
@@ -87,5 +90,48 @@ RSpec.describe StudFinder::Edges do
                         stdout: stdout, stderr: StringIO.new).call
 
     expect(stdout.string).to include('(none in scored file set)')
+  end
+
+  it 'emits a Temporal Coupling section' do
+    _status, stdout, _stderr = edges_output('app/models/user.rb')
+    expect(stdout).to include('Temporal Coupling')
+  end
+
+  it 'shows (none above threshold) when no coupling data exists for target' do
+    _status, stdout, _stderr = edges_output('app/models/user.rb', coupling: {})
+    expect(stdout).to include('(none above threshold)')
+  end
+
+  it 'lists coupling partners sorted by coupling descending' do
+    coupling = {
+      'app/models/user.rb' => [
+        { path: 'app/models/role.rb',    coupling: 0.8750, co_changes: 7, own_changes: 8 },
+        { path: 'app/services/greet.rb', coupling: 0.5000, co_changes: 5, own_changes: 10 }
+      ]
+    }
+    _status, stdout, _stderr = edges_output('app/models/user.rb', coupling: coupling)
+    coupling_section = stdout.split('Temporal Coupling').last
+    role_pos  = coupling_section.index('app/models/role.rb')
+    greet_pos = coupling_section.index('app/services/greet.rb')
+    expect(role_pos).to be < greet_pos
+    expect(stdout).to include('0.8750')
+    expect(stdout).to include('0.5000')
+  end
+
+  it 'includes co_changes count in coupling output' do
+    coupling = {
+      'app/models/user.rb' => [
+        { path: 'app/models/role.rb', coupling: 0.7500, co_changes: 12, own_changes: 16 }
+      ]
+    }
+    _status, stdout, _stderr = edges_output('app/models/user.rb', coupling: coupling)
+    expect(stdout).to include('12')
+  end
+
+  it 'includes coupling threshold and min commits in section header' do
+    _status, stdout, _stderr = edges_output('app/models/user.rb',
+                                            coupling_threshold: 0.40, coupling_min_commits: 8)
+    expect(stdout).to include('threshold 0.40')
+    expect(stdout).to include('min 8 co-changes')
   end
 end

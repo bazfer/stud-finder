@@ -10,7 +10,6 @@ module StudFinder
 
     attr_reader :normalized_weights
 
-    # rubocop:disable Metrics/ParameterLists
     def initialize(files:, fan_in:, fan_out:, complexity:, churn:, churn_lines: nil, coverage: nil,
                    weights: DEFAULT_WEIGHTS, branch_threshold: 50, trunk_threshold: 85)
       @files = files
@@ -26,7 +25,6 @@ module StudFinder
       validate!
       @normalized_weights = normalize_weights
     end
-    # rubocop:enable Metrics/ParameterLists
 
     def call
       fan_in_pct = Normalizer.percentile_rank(@fan_in, @files)
