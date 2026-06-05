@@ -17,7 +17,7 @@ RSpec.describe StudFinder::Scorer do
       fan_out: fan_out,
       complexity: complexity,
       churn: churn,
-      weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.0 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.0 },
       branch_threshold: 50,
       trunk_threshold: 85
     }.merge(overrides)
@@ -25,10 +25,11 @@ RSpec.describe StudFinder::Scorer do
     described_class.new(**options)
   end
 
-  it 'renormalizes Phase 1 active weights to sum to 1.0' do
+  it 'renormalizes active weights (four-factor) to sum to 1.0 without coverage' do
     weights = scorer.normalized_weights
 
-    expect(weights[:fan_in]).to be_within(0.0001).of(0.4118)
+    expect(weights[:fan_in]).to be_within(0.0001).of(0.2941)
+    expect(weights[:fan_out]).to be_within(0.0001).of(0.1176)
     expect(weights[:complexity]).to be_within(0.0001).of(0.2941)
     expect(weights[:churn]).to be_within(0.0001).of(0.2941)
     expect(weights[:coverage]).to be_nil
@@ -49,37 +50,53 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['c.rb'][:classification]).to eq('leaf')
   end
 
-  it 'uses four-factor scoring when coverage is provided' do
+  it 'uses five-factor scoring when coverage is provided' do
     rows = scorer(coverage: { 'a.rb' => 1.0, 'b.rb' => 0.5, 'c.rb' => 0.0, 'd.rb' => 0.25 },
-                  weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
+                  weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
            .to_h { |row| [row[:path], row] }
 
     expect(rows['b.rb'][:score]).to be_within(0.0001).of(0.725)
     expect(rows['b.rb'][:coverage]).to eq(0.5)
   end
 
-  it 'uses four-factor scoring with uncovered coverage for a file absent from coverage data' do
+  it 'uses five-factor scoring with uncovered coverage for a file absent from coverage data' do
     rows = scorer(coverage: { 'a.rb' => 1.0, 'c.rb' => 0.0, 'd.rb' => 0.25 },
-                  weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
+                  weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
            .to_h { |row| [row[:path], row] }
 
     expect(rows['b.rb'][:score]).to be_within(0.0001).of(0.8)
     expect(rows['b.rb'][:coverage]).to eq(0.0)
   end
 
+  it 'a file with higher fan_out outscores an otherwise-identical file' do
+    files = %w[low.rb high.rb x.rb y.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'low.rb' => 1, 'high.rb' => 1, 'x.rb' => 0, 'y.rb' => 2 },
+      fan_out: { 'low.rb' => 0, 'high.rb' => 5, 'x.rb' => 1, 'y.rb' => 2 },
+      complexity: { 'low.rb' => 3, 'high.rb' => 3, 'x.rb' => 0, 'y.rb' => 1 },
+      churn: { 'low.rb' => 4, 'high.rb' => 4, 'x.rb' => 0, 'y.rb' => 1 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.0 }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['high.rb'][:score]).to be > rows['low.rb'][:score]
+  end
+
   it 'does not renormalize weights when coverage is active' do
     weights = scorer(coverage: { 'a.rb' => 1.0, 'b.rb' => 0.5, 'c.rb' => 0.0, 'd.rb' => 0.25 },
-                     weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15 }).normalized_weights
+                     weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25,
+                                coverage: 0.15 }).normalized_weights
 
-    expect(weights).to eq(fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15)
+    expect(weights).to eq(fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15)
     expect(weights.values.sum).to be_within(0.0001).of(1.0)
   end
 
   it 'uses 1.0 minus coverage fraction directly instead of percentile ranking coverage' do
     scorer_with_coverage = scorer(coverage: { 'a.rb' => 0.0, 'c.rb' => 1.0, 'd.rb' => 1.0 },
-                                  weights: { fan_in: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0 })
+                                  weights: { fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0 })
 
-    expect(scorer_with_coverage.normalized_weights).to eq(fan_in: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0)
+    expect(scorer_with_coverage.normalized_weights)
+      .to eq(fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0)
     rows = scorer_with_coverage.call.to_h { |row| [row[:path], row] }
 
     expect(rows['a.rb'][:score]).to eq(1.0)
@@ -109,6 +126,41 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['b.rb'][:churn_pct]).to eq(0.3333)
     expect(rows['c.rb'][:churn_pct]).to eq(0.5)
   end
+
+  it 'percentile-ranks per-file instability into instability_pct' do
+    rows = scorer.call.to_h { |row| [row[:path], row] }
+
+    # instability(fi, fo): a=0/3=0.0, b=1/3=0.3333, c=2/3=0.6667, d=0.0
+    expect(rows['c.rb'][:instability]).to eq(0.6667)
+    expect(rows['c.rb'][:instability_pct]).to eq(1.0)
+    expect(rows['b.rb'][:instability_pct]).to eq(0.6667)
+    expect(rows['a.rb'][:instability_pct]).to eq(0.0)
+  end
+
+  it 'emits coupling fields from the coupling hash' do
+    coupling = {
+      'a.rb' => { max_coupling: 0.8, partners: 3 },
+      'b.rb' => { max_coupling: 0.2, partners: 1 }
+    }
+    rows = scorer(coupling: coupling).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['a.rb'][:max_coupling]).to eq(0.8)
+    expect(rows['a.rb'][:coupling_partners]).to eq(3)
+    expect(rows['a.rb'][:coupling_pct]).to eq(1.0)
+    expect(rows['b.rb'][:max_coupling]).to eq(0.2)
+    expect(rows['b.rb'][:coupling_partners]).to eq(1)
+    # files absent from the hash are treated as 0.0 / 0
+    expect(rows['c.rb'][:max_coupling]).to eq(0.0)
+    expect(rows['c.rb'][:coupling_partners]).to eq(0)
+  end
+
+  it 'zeroes coupling fields when no coupling data is supplied' do
+    rows = scorer.call.to_h { |row| [row[:path], row] }
+
+    expect(rows['a.rb'][:max_coupling]).to eq(0.0)
+    expect(rows['a.rb'][:coupling_partners]).to eq(0)
+    expect(rows['a.rb'][:coupling_pct]).to eq(0.0)
+  end
 end
 
 RSpec.describe StudFinder::Scorer, 'with coverage' do
@@ -119,7 +171,7 @@ RSpec.describe StudFinder::Scorer, 'with coverage' do
   let(:churn) { { 'a.rb' => 0, 'b.rb' => 0 } }
   let(:coverage) { { 'a.rb' => 1.0, 'b.rb' => 0.0 } }
 
-  it 'uses the 4-factor formula without renormalizing weights' do
+  it 'uses the 5-factor formula without renormalizing weights' do
     scorer = described_class.new(
       files: files,
       fan_in: fan_in,
@@ -127,12 +179,13 @@ RSpec.describe StudFinder::Scorer, 'with coverage' do
       complexity: complexity,
       churn: churn,
       coverage: coverage,
-      weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15 }
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }
     )
 
-    expect(scorer.normalized_weights).to eq(fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15)
+    expect(scorer.normalized_weights).to eq(fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15)
     rows = scorer.call.to_h { |row| [row[:path], row] }
-    expect(rows['b.rb'][:score]).to eq(0.4) # complexity 1.0 plus uncovered coverage term 1.0
+    # b.rb: fan_out 1.0 (0.10) + complexity 1.0 (0.25) + uncovered coverage 1.0 (0.15) = 0.5
+    expect(rows['b.rb'][:score]).to eq(0.5)
     expect(rows['a.rb'][:coverage]).to eq(1.0)
   end
 end

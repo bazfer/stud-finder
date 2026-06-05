@@ -5,6 +5,10 @@ require 'spec_helper'
 require 'stud_finder/cli'
 
 RSpec.describe StudFinder::CLI do
+  full_weights = 'fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15'
+
+  define_method(:full_weights) { full_weights }
+
   def run_cli(argv)
     stdout = StringIO.new
     stderr = StringIO.new
@@ -118,24 +122,24 @@ RSpec.describe StudFinder::CLI do
   end
 
   it 'validates weights that do not sum to 1.0' do
-    status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.4,complexity:0.3,churn:0.1,coverage:0.0'])
+    status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.4,fan_out:0.0,complexity:0.3,churn:0.1,coverage:0.0'])
 
     expect(status).to eq(1)
     expect(stderr).to include('actual sum is 0.8000')
   end
 
   it 'rejects coverage weight in Phase 1' do
-    status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.35,complexity:0.25,churn:0.25,coverage:0.15'])
+    status, _stdout, stderr = run_cli(['--weights', full_weights])
 
     expect(status).to eq(1)
     expect(stderr).to include('coverage weight must be 0.0 when no coverage data is provided')
   end
 
-  it 'requires all weight keys' do
+  it 'requires all weight keys including fan_out' do
     status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.5,complexity:0.3,churn:0.2'])
 
     expect(status).to eq(1)
-    expect(stderr).to include('weights must include fan_in, complexity, churn, and coverage')
+    expect(stderr).to include('weights must include fan_in, fan_out, complexity, churn, and coverage')
   end
 
   it 'reports a missing coverage file' do
@@ -160,7 +164,7 @@ RSpec.describe StudFinder::CLI do
       status, stdout, stderr = run_cli([
                                          root,
                                          '--min-files', '5',
-                                         '--weights', 'fan_in:0.35,complexity:0.25,churn:0.25,coverage:0.15',
+                                         '--weights', full_weights,
                                          '--coverage', coverage,
                                          '--output', 'json'
                                        ])
@@ -241,7 +245,8 @@ RSpec.describe StudFinder::CLI do
       status, stdout, stderr = run_cli([root, '--min-files', '5'])
 
       expect(status).to eq(0)
-      expect(stderr).to include('Score uses 3-factor formula')
+      expect(stderr).to include('Score uses 4-factor formula')
+      expect(stderr).to include('computing temporal coupling (git log, 180 days)...')
       expect(stdout).to include('JavaScript/TypeScript')
       expect(stdout).to include('5 files analyzed')
       expect(stdout).to match(/rank\s+language\s+file\s+score/)
@@ -311,7 +316,7 @@ RSpec.describe StudFinder::CLI do
       rows = CSV.parse(stdout, nil_value: '')
 
       expect(status).to eq(0)
-      expect(stderr).to include('Score uses 3-factor formula')
+      expect(stderr).to include('Score uses 4-factor formula')
       expect(lines.length).to eq(2)
       expect(lines.first).to eq(
         "#{StudFinder::CLI::RESULT_COLUMNS.join(',')}\n"
@@ -321,9 +326,37 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '7', '1.0000', '3', '15', '1.0000', '']
+        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '0.0000', '0.0000', '7', '1.0000',
+         '3', '15', '1.0000', '0.0000', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
+    end
+  end
+
+  it 'computes temporal coupling in the main scan and emits nonzero coupling columns' do
+    make_repo(file_count: 5) do |root|
+      # Co-change model_0 and model_1 together repeatedly so they cross the threshold.
+      3.times do |i|
+        File.open(File.join(root, 'app/models/model_0.rb'), 'a') { |file| file.puts "# m0 change #{i}" }
+        File.open(File.join(root, 'app/models/model_1.rb'), 'a') { |file| file.puts "# m1 change #{i}" }
+        system('git', '-C', root, 'add', '.')
+        system('git', '-C', root, 'commit', '-qm', "couple #{i}")
+      end
+
+      status, stdout, stderr = run_cli([
+                                         root, '--min-files', '5', '--output', 'csv',
+                                         '--coupling-min-commits', '2', '--coupling-threshold', '0.0'
+                                       ])
+
+      expect(status).to eq(0), stderr
+      expect(stderr).to include('computing temporal coupling (git log, 180 days)...')
+      rows = CSV.parse(stdout, nil_value: '', headers: true)
+      coupled = rows.select { |row| %w[app/models/model_0.rb app/models/model_1.rb].include?(row['file']) }
+      expect(coupled.length).to eq(2)
+      coupled.each do |row|
+        expect(row['max_coupling'].to_f).to be > 0.0
+        expect(row['coupling_partners'].to_i).to be >= 1
+      end
     end
   end
 
@@ -418,7 +451,7 @@ RSpec.describe StudFinder::CLI do
 
       status, _stdout, stderr = run_cli([
                                           root, '--min-files', '5', '--coverage', coverage_path,
-                                          '--weights', 'fan_in:0.35,complexity:0.25,churn:0.25,coverage:0.15'
+                                          '--weights', full_weights
                                         ])
 
       expect(status).to eq(0), stderr

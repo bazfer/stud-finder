@@ -25,17 +25,18 @@ module StudFinder
   class CLI
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
     RESULT_COLUMNS = %w[
-      rank language file score class fan_in fan_in_pct fan_out instability complexity complexity_pct churn_commits
-      churn_lines churn_pct coverage
+      rank language file score class fan_in fan_in_pct fan_out fan_out_pct instability instability_pct complexity
+      complexity_pct churn_commits churn_lines churn_pct max_coupling coupling_partners coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
-      rank language file score class fan_in fan_out instability complexity churn_commits churn_lines churn_pct coverage
+      rank language file score class fan_in fan_out fan_out_pct instability complexity churn_commits churn_lines
+      churn_pct max_coupling coupling_partners coupling_pct coverage
     ].freeze
-    WEIGHT_KEYS = %i[fan_in complexity churn coverage].freeze
+    WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
     DEFAULT_OPTIONS = {
       output: 'table',
       churn_days: 180,
-      weights: { fan_in: 0.35, complexity: 0.25, churn: 0.25, coverage: 0.15 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 },
       custom_weights: false,
       trunk_threshold: 85,
       branch_threshold: 50,
@@ -103,7 +104,8 @@ module StudFinder
 
       @options[:filter_set] = resolve_filter_set(@repo_path)
 
-      analysis = analyze(@repo_path, result.files, result.languages)
+      coupling = compute_coupling(@repo_path, result.files)
+      analysis = analyze(@repo_path, result.files, result.languages, coupling)
       analysis = warn_if_no_scored_files(analysis)
       emit_results(@repo_path, result, analysis)
       0
@@ -161,7 +163,7 @@ module StudFinder
         opts.on('--churn-days N', Integer, 'Commit lookback window in days (default: 180)') do |value|
           @options[:churn_days] = value
         end
-        opts.on('--weights WEIGHTS', 'fan_in:F,complexity:C,churn:H,coverage:V') do |value|
+        opts.on('--weights WEIGHTS', 'fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V') do |value|
           @options[:weights] = parse_weights(value)
           @options[:custom_weights] = true
         end
@@ -242,7 +244,7 @@ module StudFinder
       extra = weights.keys - WEIGHT_KEYS
       unless missing.empty? && extra.empty?
         raise ValidationError,
-              'Error: weights must include fan_in, complexity, churn, and coverage.'
+              'Error: weights must include fan_in, fan_out, complexity, churn, and coverage.'
       end
 
       out_of_range = weights.any? { |_key, weight| weight.negative? || weight > 1.0 }
@@ -316,19 +318,37 @@ module StudFinder
       raise ValidationError, format('Error: weights must sum to 1.0; actual sum is %.4f.', active_sum)
     end
 
-    def analyze(path, files, languages)
+    # Computes temporal coupling once over the full collected file set (all languages
+    # together, so cross-language co-change is captured) and aggregates each file's
+    # partners into { file => { max_coupling: Float, partners: Integer } }. Files with
+    # no qualifying pairs are simply absent from the hash (scorer treats them as 0).
+    def compute_coupling(path, files)
+      progress("computing temporal coupling (git log, #{@options[:churn_days]} days)...")
+      result = TemporalCoupling.new(
+        repo_path: path,
+        files: files,
+        days: @options[:churn_days],
+        min_co_changes: @options[:coupling_min_commits],
+        coupling_threshold: @options[:coupling_threshold]
+      ).call
+      result.pairs.transform_values do |partners|
+        { max_coupling: partners.map { |entry| entry[:coupling] }.max || 0.0, partners: partners.length }
+      end
+    end
+
+    def analyze(path, files, languages, coupling = nil)
       ruby_files = files.select { |file| languages[file] == :ruby }
       js_files = files.select { |file| %i[javascript typescript].include?(languages[file]) }
 
-      ruby_analysis = ruby_files.empty? ? empty_analysis : analyze_ruby(path, ruby_files)
-      javascript_analysis = js_files.empty? ? empty_analysis : analyze_javascript(path, js_files, languages)
+      ruby_analysis = ruby_files.empty? ? empty_analysis : analyze_ruby(path, ruby_files, coupling)
+      javascript_analysis = js_files.empty? ? empty_analysis : analyze_javascript(path, js_files, languages, coupling)
 
       progress('done')
       Report.new(ruby: ruby_analysis, javascript: javascript_analysis,
                  warnings: (ruby_analysis.warnings + javascript_analysis.warnings + @options[:cli_warnings]).uniq)
     end
 
-    def analyze_ruby(path, files)
+    def analyze_ruby(path, files, coupling = nil)
       progress('computing Ruby fan_in + fan_out (rubocop-ast)...')
       fan_in_result = FanIn.new(repo_path: path, files: files).call
 
@@ -343,10 +363,10 @@ module StudFinder
       score_group(analysis_files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
                   complexity_result.counts, churn_result, complexity_result.skipped_files,
                   ruby_coverage(path, analysis_files),
-                  language_by_file: analysis_files.to_h { |file| [file, :ruby] })
+                  language_by_file: analysis_files.to_h { |file| [file, :ruby] }, coupling: coupling)
     end
 
-    def analyze_javascript(path, files, languages)
+    def analyze_javascript(path, files, languages, coupling = nil)
       progress('computing JavaScript fan_in + fan_out (dependency-cruiser)...')
       fan_in_result = JsFanIn.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
                                   stderr: @stderr).call
@@ -356,18 +376,20 @@ module StudFinder
       churn_result = Churn.new(repo_path: path, files: files, days: @options[:churn_days], stderr: @stderr).call
       score_group(files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
                   complexity_result.counts, churn_result, [], js_coverage(path, files),
-                  language_by_file: languages, extra_warnings: fan_in_result.warnings + complexity_result.warnings)
+                  language_by_file: languages, extra_warnings: fan_in_result.warnings + complexity_result.warnings,
+                  coupling: coupling)
     end
 
     # rubocop:disable Metrics/ParameterLists
     def score_group(files, fan_in, fan_out, edges, complexity, churn_result, skipped_files, coverage_payload,
-                    language_by_file: {}, extra_warnings: [])
+                    language_by_file: {}, extra_warnings: [], coupling: nil)
       progress("normalizing + scoring #{files.length} files...")
       coverage_result, coverage_parser = coverage_payload
       scorer = Scorer.new(files: files, fan_in: fan_in, fan_out: fan_out, complexity: complexity,
                           churn: churn_result.counts, churn_lines: churn_result.line_counts,
                           coverage: coverage_result, weights: @options[:weights],
-                          branch_threshold: @options[:branch_threshold], trunk_threshold: @options[:trunk_threshold])
+                          branch_threshold: @options[:branch_threshold], trunk_threshold: @options[:trunk_threshold],
+                          coupling: coupling)
       warnings = extra_warnings.dup
       warnings << 'coverage_unavailable' unless coverage_result
       warnings << 'coverage_partial' if coverage_parser&.missing_files&.any?
@@ -405,7 +427,7 @@ module StudFinder
 
     def emit_scoring_note(scorer, coverage_result)
       if coverage_result
-        @stderr.puts 'Note: coverage data available. Score uses 4-factor formula.'
+        @stderr.puts 'Note: coverage data available. Score uses 5-factor formula.'
       else
         @stderr.puts scoring_note(weights: scorer.normalized_weights, stderr: true)
       end
@@ -523,7 +545,8 @@ module StudFinder
     def emit_table_section(title, rows)
       @stdout.puts title
       @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
-                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  coverage'
+                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  max_coupling  ' \
+                   'coupling_partners  coverage'
       rows.each { |row| @stdout.puts table_row(row) }
       @stdout.puts
     end
@@ -551,7 +574,7 @@ module StudFinder
         churn_days: @options[:churn_days],
         file_count: analysis.ruby.files.length + analysis.javascript.files.length,
         files_skipped: analysis.ruby.skipped_files.length + analysis.javascript.skipped_files.length,
-        formula: report_coverage_available?(analysis) ? '4-factor' : '3-factor (no coverage)',
+        formula: report_coverage_available?(analysis) ? '5-factor' : '4-factor (no coverage)',
         weights: json_weights(analysis.ruby.weights || analysis.javascript.weights),
         warnings: analysis.warnings
       }
@@ -565,7 +588,7 @@ module StudFinder
       @stdout.puts "## stud-finder — #{Time.now.utc.strftime('%Y-%m-%d')}"
       @stdout.puts
       file_count = analysis.ruby.files.length + analysis.javascript.files.length
-      @stdout.puts "> #{report_coverage_available?(analysis) ? '4-factor score' : '3-factor score (no coverage)'}. " \
+      @stdout.puts "> #{report_coverage_available?(analysis) ? '5-factor score' : '4-factor score (no coverage)'}. " \
                    "Churn window: #{@options[:churn_days]} days. #{file_count} files analyzed."
       note = filter_note
       if note
@@ -581,15 +604,16 @@ module StudFinder
     def markdown_row(row)
       values = [
         row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:fan_in],
-        row[:fan_out], format_score(row[:instability]), row[:complexity], row[:churn_commits], row[:churn_lines],
-        format_score(row[:churn_pct]), format_coverage(row[:coverage])
+        row[:fan_out], format_score(row[:fan_out_pct]), format_score(row[:instability]), row[:complexity],
+        row[:churn_commits], row[:churn_lines], format_score(row[:churn_pct]), format_score(row[:max_coupling]),
+        row[:coupling_partners], format_score(row[:coupling_pct]), format_coverage(row[:coverage])
       ]
       "| #{values.join(' | ')} |"
     end
 
     def emit_table(path, result, analysis, ruby_rows, javascript_rows)
       coverage_available = report_coverage_available?(analysis)
-      formula = coverage_available ? '4-factor score' : '3-factor score'
+      formula = coverage_available ? '5-factor score' : '4-factor score'
       @stdout.puts "stud-finder — #{path} (#{@options[:churn_days]}-day churn, #{formula})"
       unless coverage_available
         @stdout.puts scoring_note(weights: analysis.ruby.weights || analysis.javascript.weights,
@@ -616,12 +640,17 @@ module StudFinder
         fan_in: row[:fan_in],
         fan_in_pct: row[:fan_in_pct],
         fan_out: row[:fan_out],
+        fan_out_pct: row[:fan_out_pct],
         instability: row[:instability],
+        instability_pct: row[:instability_pct],
         complexity: row[:complexity],
         complexity_pct: row[:complexity_pct],
         churn_commits: row[:churn_commits],
         churn_lines: row[:churn_lines],
         churn_pct: row[:churn_pct],
+        max_coupling: row[:max_coupling],
+        coupling_partners: row[:coupling_partners],
+        coupling_pct: row[:coupling_pct],
         coverage: row[:coverage]
       }
     end
@@ -636,12 +665,17 @@ module StudFinder
         row[:fan_in],
         format_score(row[:fan_in_pct]),
         row[:fan_out],
+        format_score(row[:fan_out_pct]),
         format_score(row[:instability]),
+        format_score(row[:instability_pct]),
         row[:complexity],
         format_score(row[:complexity_pct]),
         row[:churn_commits],
         row[:churn_lines],
         format_score(row[:churn_pct]),
+        format_score(row[:max_coupling]),
+        row[:coupling_partners],
+        format_score(row[:coupling_pct]),
         row[:coverage] || ''
       ]
     end
@@ -653,6 +687,7 @@ module StudFinder
     def json_weights(weights)
       {
         fan_in: weights[:fan_in].round(4),
+        fan_out: weights[:fan_out].round(4),
         complexity: weights[:complexity].round(4),
         churn: weights[:churn].round(4),
         coverage: weights[:coverage]&.round(4)
@@ -661,11 +696,11 @@ module StudFinder
 
     def scoring_note(weights:, stderr:)
       if stderr
-        format('Note: coverage data not available. Score uses 3-factor formula (fan_in %<fan_in>.2f, ' \
-               'complexity %<complexity>.2f, churn %<churn>.2f).', **weights)
+        format('Note: coverage data not available. Score uses 4-factor formula (fan_in %<fan_in>.2f, ' \
+               'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f).', **weights)
       else
-        format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, complexity %<complexity>.2f, ' \
-               'churn %<churn>.2f.', **weights)
+        format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
+               'complexity %<complexity>.2f, churn %<churn>.2f.', **weights)
       end
     end
 
@@ -695,12 +730,13 @@ module StudFinder
     def table_row(row)
       format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
              '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
-             '%<churn_pct>9s  %<coverage>8s',
+             '%<churn_pct>9s  %<max_coupling>12s  %<coupling_partners>17d  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
              classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
              instability: format_score(row[:instability]), complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
-             churn_pct: format_score(row[:churn_pct]), coverage: format_coverage(row[:coverage]))
+             churn_pct: format_score(row[:churn_pct]), max_coupling: format_score(row[:max_coupling]),
+             coupling_partners: row[:coupling_partners], coverage: format_coverage(row[:coverage]))
     end
   end
   # rubocop:enable Metrics/ClassLength

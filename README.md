@@ -7,11 +7,11 @@ A code risk scoring CLI for Ruby and JavaScript/TypeScript codebases. Ranks ever
 ```
 $ bundle exec bin/stud-finder ./my-rails-app
 
-RANK  LANGUAGE  FILE                              SCORE  CLASS   FAN_IN  COMPLEXITY  CHURN_COMMITS  CHURN_LINES  COVERAGE
-1     ruby      app/models/proficiency.rb         0.91   trunk   223     85          11             842          0.99
-2     ruby      app/services/payment_service.rb   0.84   trunk   78      91          42             1240         0.22
-3     ruby      app/controllers/orders_controller 0.73   branch  61      65          74             910          0.31
-4     js        src/components/Dashboard.tsx      0.68   branch  44      56          18             612          —
+RANK  LANGUAGE  FILE                              SCORE  CLASS   FAN_IN  FAN_OUT  COMPLEXITY  CHURN_COMMITS  MAX_COUPLING  COUPLING_PARTNERS  COVERAGE
+1     ruby      app/models/proficiency.rb         0.91   trunk   223     4        85          11             0.62          3                  0.99
+2     ruby      app/services/payment_service.rb   0.84   trunk   78      12       91          42             0.71          5                  0.22
+3     ruby      app/controllers/orders_controller 0.73   branch  61      9        65          74             0.48          2                  0.31
+4     js        src/components/Dashboard.tsx      0.68   branch  44      18       56          18             0.00          0                  —
 ...
 ```
 
@@ -51,7 +51,7 @@ bundle exec bin/stud-finder ./my-rails-app --output csv > risk.csv
 # Top 50 highest-risk files, markdown for a PR comment
 bundle exec bin/stud-finder ./my-rails-app --top 50 --output markdown
 
-# With coverage signals (4-factor scoring)
+# With coverage signals (5-factor scoring)
 bundle exec bin/stud-finder ./my-rails-app \
   --ruby-coverage ./coverage/resultset.json \
   --js-coverage ./coverage/lcov.info
@@ -59,18 +59,26 @@ bundle exec bin/stud-finder ./my-rails-app \
 
 ---
 
-## The Four Signals
+## The Five Signals
 
-Each file is scored on up to four independently measured signals. See [PRODUCT.md](PRODUCT.md) for the full theory and weighting math.
+Each file is scored on up to five independently measured signals. See [PRODUCT.md](PRODUCT.md) for the full theory and weighting math.
 
 | Signal | What it measures | Weight |
 |--------|------------------|--------|
-| **fan_in** | How many other files depend on this one (blast radius) | 35% |
+| **fan_in** | How many other files depend on this one (blast radius) | 25% |
+| **fan_out** | How many other files this one depends on (its own coupling burden) | 10% |
 | **complexity** | Cyclomatic complexity of the hardest method in the file | 25% |
 | **churn** | Commit frequency + line volume over a 180-day window | 25% |
 | **coverage** | Inverse of line coverage (lower coverage = higher risk) | 15% |
 
-When coverage isn't available, the remaining three signals re-normalize to 100% automatically (3-factor mode).
+When coverage isn't available, the remaining four signals (fan_in, fan_out, complexity, churn) re-normalize to 100% automatically (4-factor mode).
+
+### Informational columns (not scored)
+
+These ride alongside the score to give reviewers extra context, but do not contribute to it:
+
+- **instability** / **instability_pct** — `fan_out / (fan_in + fan_out)`, and its percentile rank across the repo. High instability = depends on a lot while little depends on it.
+- **max_coupling** / **coupling_partners** / **coupling_pct** — temporal coupling from git history: the strongest co-change ratio with any partner file, how many partners cross the threshold, and the percentile rank of `max_coupling`. Computed once over the full file set in the main scan (one extra `git log` pass), so cross-language co-change is captured. Same thresholds as the `edges` subcommand (`--coupling-threshold`, `--coupling-min-commits`).
 
 Files are classified into three labels based on their **fan_in percentile** (not the total score):
 
@@ -108,7 +116,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--coverage PATH` | Deprecated alias for `--ruby-coverage` |
 | `--js-timeout N` | dependency-cruiser timeout in seconds (default: 60) |
 | `--churn-days N` | Commit lookback window in days (default: 180) |
-| `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:0.35,complexity:0.25,churn:0.25,coverage:0.15`. Defaults shown. |
+| `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15`. Defaults shown. All five keys are required. |
 | `--trunk-threshold N` | fan_in percentile cutoff for trunk classification (default: 85) |
 | `--branch-threshold N` | fan_in percentile cutoff for branch classification (default: 50) |
 | `--exclude PATTERN` | Exclude glob pattern (repeatable). `spec/` and `test/` excluded by default. |
