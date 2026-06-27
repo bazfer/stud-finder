@@ -256,6 +256,10 @@ RSpec.describe StudFinder::CLI do
       expect(stdout).to include('churn_commits')
       expect(stdout).to include('churn_lines')
       expect(stdout).to include('churn_pct')
+      header = stdout.lines.find { |line| line.match?(/rank\s+language\s+file\s+score/) }
+      expect(header).to match(/coupling_partners\s+coupling_pct\s+coverage/)
+      row = stdout.lines.find { |line| line.match?(%r{^\s*1\s+ruby\s+app/models/model_}) }
+      expect(row).to match(%r{\s0\s+0\.0000\s+n/a$})
     end
   end
 

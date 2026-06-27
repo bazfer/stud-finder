@@ -558,7 +558,7 @@ module StudFinder
       @stdout.puts title
       @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
                    'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  max_coupling  ' \
-                   'max_coupling_partner                      coupling_partners  coverage'
+                   'max_coupling_partner                      coupling_partners  coupling_pct  coverage'
       rows.each { |row| @stdout.puts table_row(row) }
       @stdout.puts
     end
@@ -746,14 +746,15 @@ module StudFinder
       format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
              '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
              '%<churn_pct>9s  %<max_coupling>12s  %<max_coupling_partner>-40s  %<coupling_partners>17d  ' \
-             '%<coverage>8s',
+             '%<coupling_pct>12s  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
              classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
              instability: format_score(row[:instability]), complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
              churn_pct: format_score(row[:churn_pct]), max_coupling: format_score(row[:max_coupling]),
              max_coupling_partner: truncate_partner(row[:max_coupling_partner]),
-             coupling_partners: row[:coupling_partners], coverage: format_coverage(row[:coverage]))
+             coupling_partners: row[:coupling_partners], coupling_pct: format_score(row[:coupling_pct]),
+             coverage: format_coverage(row[:coverage]))
     end
 
     # Keeps the partner path readable in the fixed-width table. The partner name is
