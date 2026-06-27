@@ -150,7 +150,7 @@ Co-change frequency from git history: file pairs that change together more often
 **Pinned — Producer-consumer dependency mapping**
 Explicitly surfacing which components consume data produced by other components, flagging pairs with high temporal coupling but low static coupling as candidates for explicit contract documentation.
 
-**M7 — Complete: scored fan-out + merge-to-staging S3 timeline**
+**M7 — Complete: scored fan-out + rankings**
 Scored fan-out introduced as the fifth risk signal with a 10% default weight.
 
 **M7 follow-up — Merge-to-staging S3 timeline (lowest priority)**

@@ -290,7 +290,7 @@ Range: [0.0, 1.0]. 1.0 = A and B always change together relative to the less-act
 
 ### Step 8 — Normalization
 
-For each signal `s` in `{fan_in, complexity, churn}`:
+For each signal `s` in `{fan_in, fan_out, complexity, churn}`:
 
 Lower-bound percentile:
 ```
