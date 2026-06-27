@@ -395,6 +395,18 @@ RSpec.describe StudFinder::CLI do
       expect(result[:max_coupling_partner]).to eq('a.rb')
     end
 
+    it 'uses ascending path comparison for prefix-path ties' do
+      partners = [
+        { path: 'app/foo.jsx', coupling: 0.8, co_changes: 7, own_changes: 10 },
+        { path: 'app/foo.js', coupling: 0.8, co_changes: 7, own_changes: 10 }
+      ]
+
+      result = aggregate(partners)
+
+      expect(result[:max_coupling]).to eq(0.8)
+      expect(result[:max_coupling_partner]).to eq('app/foo.js')
+    end
+
     it 'returns nil partner and zero coupling for an empty partner list' do
       result = aggregate([])
       expect(result[:max_coupling]).to eq(0.0)

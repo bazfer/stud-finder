@@ -338,20 +338,14 @@ module StudFinder
 
     # Reduces a file's partner entries to its strongest-coupling partner.
     # Tie-break is deterministic: highest :coupling, then highest :co_changes,
-    # then alphabetical :path — so identical inputs always pick the same partner.
+    # then ascending alphabetical :path — so identical inputs always pick the same partner.
     def aggregate_partners(partners)
-      top = partners.max_by { |entry| [entry[:coupling], entry[:co_changes], invert_path(entry[:path])] }
+      top = partners.min_by { |entry| [-entry[:coupling], -entry[:co_changes], entry[:path]] }
       {
         max_coupling: top ? top[:coupling] : 0.0,
         max_coupling_partner: top ? top[:path] : nil,
         partners: partners.length
       }
-    end
-
-    # Inverts each byte so that max_by's "larger is better" ordering picks the
-    # alphabetically-FIRST path on ties (lexicographically smaller string wins).
-    def invert_path(path)
-      path.bytes.map(&:-@)
     end
 
     def analyze(path, files, languages, coupling = nil)
