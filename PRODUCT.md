@@ -36,9 +36,9 @@ Three labels, one decision framework:
 
 ---
 
-## The Four Signals
+## The Five Signals
 
-Each file is scored on up to four independently measured signals, each grounded in decades of software engineering research.
+Each file is scored on up to five independently measured signals, each grounded in decades of software engineering research. M7 introduced scored `fan_out`, so the composite now considers both incoming blast radius and outgoing coupling burden.
 
 ### 1. Fan-in — Blast Radius
 
@@ -48,9 +48,17 @@ Rooted in Robert Martin's **afferent coupling (Ca)** metric (1994) and graph the
 
 stud-finder builds the dependency graph via static analysis — Zeitwerk constant mapping for Rails, falling back to AST scanning. No runtime instrumentation required.
 
-**Weight: 35% of total score** (highest signal — coupling is the multiplier that makes every other risk worse)
+**Weight: 25% of total score**
 
-### 2. Complexity — Cognitive Load
+### 2. Fan-out — Coupling Burden
+
+*"How many files does this one depend on?"*
+
+Rooted in Robert Martin's **efferent coupling (Ce)** metric. A high `fan_out` file has more direct dependencies to understand, coordinate, and mock in tests. In M7, fan-out moved from an informational column into the scored model.
+
+**Weight: 10% of total score**
+
+### 3. Complexity — Cognitive Load
 
 *"How hard is this file to reason about?"*
 
@@ -60,7 +68,7 @@ Computed via RuboCop's static analysis engine. No manual annotation.
 
 **Weight: 25% of total score**
 
-### 3. Churn — Change Velocity
+### 4. Churn — Change Velocity
 
 *"How often is this file being touched, and how much?"*
 
@@ -70,15 +78,15 @@ Computed from git history over a configurable window (default: 180 days). Langua
 
 **Weight: 25% of total score**
 
-### 4. Coverage — Safety Net
+### 5. Coverage — Safety Net
 
 *"If this file breaks, will tests catch it?"*
 
-Low coverage on a high-risk file is compounded danger — no blast-radius detection, no complexity safety net, no test catch. Coverage is measured as an inverse (0% coverage = maximum penalty), and files absent from the coverage report are handled via 3-factor fallback rather than penalized falsely.
+Low coverage on a high-risk file is compounded danger — no blast-radius detection, no complexity safety net, no test catch. Coverage is measured as an inverse (0% coverage = maximum penalty), and files absent from the coverage report are handled via coverage fallback rather than penalized falsely.
 
 Supports Cobertura XML (RSpec + SimpleCov), LCOV (Jest, lcov), and SimpleCov JSON resultsets. Auto-detected by file extension.
 
-**Weight: 15% of total score** (optional — runs as 3-factor model when no coverage report provided)
+**Weight: 15% of total score** (optional — runs as 4-factor model when no coverage report provided)
 
 ---
 
@@ -88,14 +96,14 @@ Each signal is percentile-ranked across the full codebase — so scores are alwa
 
 The composite score (0.0–1.0) weights the signals and produces the ranked output. Classification thresholds are configurable.
 
-**3-factor formula (no coverage):**
+**4-factor formula (no coverage):**
 ```
-score = 0.41 × fan_in_pct + 0.29 × complexity_pct + 0.29 × churn_pct
+score = 0.2941 × fan_in_pct + 0.1176 × fan_out_pct + 0.2941 × complexity_pct + 0.2941 × churn_pct
 ```
 
-**4-factor formula (with coverage):**
+**5-factor formula (with coverage):**
 ```
-score = 0.35 × fan_in_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 × (1 − coverage)
+score = 0.25 × fan_in_pct + 0.10 × fan_out_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 × (1 − coverage)
 ```
 
 ---
@@ -128,9 +136,9 @@ score = 0.35 × fan_in_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 �
 ## Roadmap
 
 **M1–M3 — Complete**
-4-signal composite score (Ruby + JS/TS). `--diff-base` / `--only` filter for per-PR output. Per-PR CircleCI integration — stud-finder runs on every PR, posts ranked artifact and PR comment. Non-blocking.
+Initial composite score (Ruby + JS/TS). `--diff-base` / `--only` filter for per-PR output. Per-PR CircleCI integration — stud-finder runs on every PR, posts ranked artifact and PR comment. Non-blocking.
 
-**M4 — Next: fan-out, instability, `stud-finder edges`**
+**M4 — Complete: fan-out, instability, `stud-finder edges`**
 Fan-out (efferent coupling) and instability (`fan_out / (fan_in + fan_out)`) added to every row in the core output. New `stud-finder edges FILE` subcommand emits the actual dependency edge list for a specific file — dependents and dependencies, both sorted by risk score. Shifts the output from "this file scores high" to "here are the specific files in the blast radius."
 
 **M5 — Sentry integration**
@@ -142,7 +150,10 @@ Co-change frequency from git history: file pairs that change together more often
 **Pinned — Producer-consumer dependency mapping**
 Explicitly surfacing which components consume data produced by other components, flagging pairs with high temporal coupling but low static coupling as candidates for explicit contract documentation.
 
-**M7 — Merge-to-staging S3 timeline (lowest priority)**
+**M7 — Complete: scored fan-out + rankings**
+Scored fan-out introduced as the fifth risk signal with a 10% default weight.
+
+**M7 follow-up — Merge-to-staging S3 timeline (lowest priority)**
 Full stud-finder run on each merge to the mainline branch → JSON → S3, keyed by timestamp + commit SHA. Durable risk-over-time feed for trend analysis.
 
 **Future — Toward a validated risk estimator**
