@@ -52,7 +52,8 @@ RSpec.describe 'fixture repo integration' do
     expect(files.first.keys).to include('rank', 'language', 'path', 'score', 'class', 'fan_in', 'fan_in_pct',
                                         'fan_out', 'fan_out_pct', 'instability', 'instability_pct',
                                         'complexity', 'complexity_pct', 'churn_commits', 'churn_lines', 'churn_pct',
-                                        'max_coupling', 'coupling_partners', 'coupling_pct', 'coverage')
+                                        'max_coupling', 'max_coupling_partner', 'coupling_partners',
+                                        'coupling_pct', 'coverage')
   end
 
   it 'emits JSON output with Cobertura coverage integrated' do

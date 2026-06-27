@@ -131,6 +131,7 @@ module StudFinder
       partner = @coupling&.fetch(file, nil)
       {
         max_coupling: partner ? partner.fetch(:max_coupling, 0.0).to_f.round(4) : 0.0,
+        max_coupling_partner: partner ? partner.fetch(:max_coupling_partner, nil).to_s : '',
         coupling_partners: partner ? partner.fetch(:partners, 0).to_i : 0,
         coupling_pct: pcts[:coupling].fetch(file, 0.0).round(4)
       }
