@@ -2,7 +2,7 @@
 
 ## Overview
 
-`stud-finder` is a Ruby gem CLI that analyzes a Rails codebase and outputs a ranked file risk list. It combines static coupling, complexity, churn, and optionally coverage into a composite risk score per file. It also provides a dependency edge explorer (`stud-finder edges`) for blast-radius analysis.
+`stud-finder` is a Ruby gem CLI that analyzes a Rails codebase and outputs a ranked file risk list. It combines static fan-in, fan-out, complexity, churn, and optionally coverage into a composite risk score per file. It also provides a dependency edge explorer (`stud-finder edges`) for blast-radius analysis.
 
 **Repo:** `CovalentNetworks/stud-finder` (source) · `bazfer/stud-finder` (fork)
 
@@ -10,23 +10,25 @@
 
 | Signal | Default weight | Source |
 |--------|---------------|--------|
-| fan_in | 0.35 | rubocop-ast (Ruby) / dependency-cruiser (JS) static analysis |
+| fan_in | 0.25 | rubocop-ast (Ruby) / dependency-cruiser (JS) static analysis |
+| fan_out | 0.10 | rubocop-ast (Ruby) / dependency-cruiser (JS) static analysis |
 | complexity | 0.25 | rubocop Metrics/CyclomaticComplexity (Ruby) / eslint complexity rule (JS) |
 | churn | 0.25 | git log commit + line frequency |
 | coverage | 0.15 | SimpleCov / lcov / cobertura report (optional) |
 
-**Score formula (4-factor, when coverage is available):**
+**Score formula (5-factor, when coverage is available):**
 ```
-risk_score = w_fan_in × fan_in_pct + w_complexity × complexity_pct + w_churn × churn_pct + w_coverage × (1 − coverage_fraction)
+risk_score = w_fan_in × fan_in_pct + w_fan_out × fan_out_pct + w_complexity × complexity_pct + w_churn × churn_pct + w_coverage × (1 − coverage_fraction)
 ```
+Default: `0.25 × fan_in_pct + 0.10 × fan_out_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 × (1 − coverage_fraction)`.
 
-**Score formula (3-factor, no coverage — default):**
-The coverage weight is dropped and the remaining three weights are renormalized to sum to 1.0:
+**Score formula (4-factor, no coverage — default):**
+The coverage weight is dropped and the remaining four weights are renormalized to sum to 1.0:
 ```
-w′_x = w_x / (w_fan_in + w_complexity + w_churn)
-risk_score = w′_fan_in × fan_in_pct + w′_complexity × complexity_pct + w′_churn × churn_pct
+w′_x = w_x / (w_fan_in + w_fan_out + w_complexity + w_churn)
+risk_score = w′_fan_in × fan_in_pct + w′_fan_out × fan_out_pct + w′_complexity × complexity_pct + w′_churn × churn_pct
 ```
-Default renormalized: fan_in ≈ 0.41, complexity ≈ 0.29, churn ≈ 0.29.
+Default renormalized: fan_in ≈ 0.2941, fan_out ≈ 0.1176, complexity ≈ 0.2941, churn ≈ 0.2941. M7 introduced scored fan_out as the fifth signal.
 
 All percentile inputs are normalized to [0.0, 1.0]. Result: [0.0, 1.0], rounded to 4 decimal places.
 
@@ -36,7 +38,6 @@ churn_pct[file] = 0.5 × commit_count_pct[file] + 0.5 × changed_lines_pct[file]
 ```
 
 **Additional per-file metrics (not in score formula):**
-- `fan_out` — efferent coupling: how many files in the scored set this file depends on
 - `instability` — Robert Martin's I metric: `fan_out / (fan_in + fan_out)`. Range [0.0, 1.0]. 0.0 = maximally stable; 1.0 = maximally unstable. Isolated files (fan_in = fan_out = 0) get 0.0.
 
 ---
@@ -61,13 +62,13 @@ stud-finder [PATH] [OPTIONS]
 --churn-days N
     Commit lookback window in days. Default: 180.
 
---weights fan_in:F,complexity:C,churn:H,coverage:V
-    Override all four weights. Values are floats in [0.0, 1.0].
-    All four keys must be present. Values must sum to 1.0 (±0.001 tolerance).
+--weights fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V
+    Override all five weights. Values are floats in [0.0, 1.0].
+    All five keys must be present. Values must sum to 1.0 (±0.001 tolerance).
     When no coverage data is provided, coverage must be 0.0 — non-zero
     exits 1 with: "Error: coverage weight must be 0.0 when no coverage data is provided."
-    Example (no coverage): --weights fan_in:0.5,complexity:0.3,churn:0.2,coverage:0.0
-    Example (with coverage): --weights fan_in:0.4,complexity:0.2,churn:0.2,coverage:0.2
+    Example (no coverage): --weights fan_in:0.3,fan_out:0.1,complexity:0.3,churn:0.3,coverage:0.0
+    Example (with coverage): --weights fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15
 
 --ruby-coverage PATH
     Path to a Ruby coverage report (.xml cobertura, .info lcov, .json resultset).
@@ -328,8 +329,8 @@ Sort by `risk_score` descending (stable — ties preserve discovery order). Appl
 ### Table (default)
 
 ```
-stud-finder — /path/to/repo (180-day churn, 3-factor score)
-Note: coverage data not available. Score uses fan_in 0.41, complexity 0.29, churn 0.29.
+stud-finder — /path/to/repo (180-day churn, 4-factor score)
+Note: coverage data not available. Score uses fan_in 0.2941, fan_out 0.1176, complexity 0.2941, churn 0.2941.
 Filtered to --only paths (ranks are against the full repo).
 
 Ruby
@@ -394,9 +395,10 @@ Temporal coupling rows are sorted by `coupling` descending. No row cap (unlike s
     "churn_days": "<integer>",
     "file_count": "<integer>",
     "files_skipped": "<integer>",
-    "formula": "<'3-factor (no coverage)' | '4-factor'>",
+    "formula": "<'4-factor (no coverage)' | '5-factor'>",
     "weights": {
       "fan_in": "<float>",
+      "fan_out": "<float>",
       "complexity": "<float>",
       "churn": "<float>",
       "coverage": "<float | null>"
@@ -444,7 +446,7 @@ Temporal coupling rows are sorted by `coupling` descending. No row cap (unlike s
 ```markdown
 ## stud-finder — 2026-06-03
 
-> 3-factor score (no coverage). Churn window: 180 days. 4088 files analyzed.
+> 4-factor score (no coverage). Churn window: 180 days. 4088 files analyzed.
 
 ### Ruby
 
@@ -564,7 +566,7 @@ stud-finder/
 - **`churn_spec.rb`** — NUL-delimited parsing, filenames with spaces, rename deduplication, zero-inflation threshold, commit + line counts
 - **`temporal_coupling_spec.rb`** — commit grouping from `%H`-formatted git log, co-change matrix construction, coupling formula `co_changes / min(changes_A, changes_B)`, min_commits threshold filter, coupling_threshold filter, empty result when no pairs meet threshold
 - **`normalizer_spec.rb`** — lower-bound percentile, tie handling, single-file clamp (0.0), all-same-value (all 0.0)
-- **`scorer_spec.rb`** — 3-factor renormalization, 4-factor formula, instability formula (isolated → 0.0), classification thresholds
+- **`scorer_spec.rb`** — 4-factor renormalization, 5-factor formula, instability formula (isolated → 0.0), classification thresholds
 - **`edges_spec.rb`** — known file output, sort dependents by score desc, header metrics, error for missing file, usage for nil target, none-in-scored-set, temporal coupling section present with mock data, temporal coupling "(none)" when below threshold
 
 ### Integration test
