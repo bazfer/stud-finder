@@ -307,6 +307,40 @@ RSpec.describe StudFinder::FanIn do
       .to contain_exactly('config/concerns_authenticatable.rb')
   end
 
+  it 'resolves declaration identifiers against the surrounding scope, not the class or module being declared' do
+    write_file('app/models/billing.rb', 'class Billing; end')
+    write_file('app/models/billing/billing.rb', <<~RUBY)
+      module Billing
+        class Billing; end
+      end
+    RUBY
+    write_file('app/services/billing_facade.rb', 'module Billing; end')
+
+    r = result(['app/models/billing.rb', 'app/models/billing/billing.rb', 'app/services/billing_facade.rb'])
+
+    expect(r.counts['app/models/billing.rb']).to eq(2)
+    expect(r.counts['app/models/billing/billing.rb']).to eq(0)
+    expect(r.edges['app/services/billing_facade.rb'][:dependencies]).to contain_exactly('app/models/billing.rb')
+  end
+
+  it 'resolves compact declaration identifiers against the surrounding scope' do
+    write_file('app/models/a/b.rb', 'module A::B; end')
+    write_file('app/models/a/b/b.rb', <<~RUBY)
+      module A
+        module B
+          module B; end
+        end
+      end
+    RUBY
+    write_file('app/services/opens_a_b.rb', 'module A::B; end')
+
+    r = result(['app/models/a/b.rb', 'app/models/a/b/b.rb', 'app/services/opens_a_b.rb'])
+
+    expect(r.counts['app/models/a/b.rb']).to eq(2)
+    expect(r.counts['app/models/a/b/b.rb']).to eq(0)
+    expect(r.edges['app/services/opens_a_b.rb'][:dependencies]).to contain_exactly('app/models/a/b.rb')
+  end
+
   it 'resolves superclass constants against the surrounding scope, not the class being declared' do
     write_file('app/models/a/base.rb', 'module A; class Base; end; end')
     write_file('app/models/a/foo/base.rb', 'module A; class Foo; class Base; end; end; end')

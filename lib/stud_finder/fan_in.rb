@@ -108,9 +108,7 @@ module StudFinder
     end
 
     def fan_in_count(file, constant, references)
-      references.count do |source_file, source_refs|
-        source_file != file && source_refs.include?(constant)
-      end
+      references.count { |source_file, source_refs| source_file != file && source_refs.include?(constant) }
     end
 
     def primary_constant(file)
@@ -155,8 +153,7 @@ module StudFinder
     end
 
     def constant_candidates(namespace, name, absolute)
-      return [name] if absolute
-      return [name] if namespace.nil? || namespace.empty?
+      return [name] if absolute || namespace.nil? || namespace.empty?
 
       namespace.length.downto(1).map do |length|
         [namespace.first(length).join('::'), name].join('::')
@@ -164,10 +161,13 @@ module StudFinder
     end
 
     def lexical_namespace(node)
-      superclass_scope = node.parent if node.parent&.class_type? && node.parent.children[1].equal?(node)
+      parent = node.parent
+      declaration_identifier = parent && (parent.class_type? || parent.module_type?) && parent.children[0].equal?(node)
+      superclass_identifier = parent&.class_type? && parent.children[1].equal?(node)
+      scope_to_skip = parent if declaration_identifier || superclass_identifier
 
       node.each_ancestor.filter_map do |ancestor|
-        next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type) && !ancestor.equal?(superclass_scope)
+        next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type) && !ancestor.equal?(scope_to_skip)
 
         constant_name(ancestor.identifier)
       end.reverse
