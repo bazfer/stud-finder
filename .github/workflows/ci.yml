@@ -10,9 +10,19 @@ jobs:
   rspec:
     name: RSpec (${{ matrix.ruby }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
+      fail-fast: false
       matrix:
-        ruby: ['3.2', '3.3']
+        include:
+          - ruby: '3.2'
+            experimental: false
+          - ruby: '3.3'
+            experimental: false
+          - ruby: '3.4'
+            experimental: false
+          - ruby: 'head'
+            experimental: true
     steps:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
