@@ -6,6 +6,7 @@ require 'set'
 module StudFinder
   class FanIn
     Result = Struct.new(:counts, :fan_out_counts, :edges, keyword_init: true)
+    ReferenceCandidate = Struct.new(:namespace, :name, :absolute, :candidates, keyword_init: true)
 
     PATH_ROOTS = %w[app lib test].freeze
     CLASS_OR_MODULE_TYPES = %i[class module].freeze
@@ -58,16 +59,51 @@ module StudFinder
 
     def resolved_reference_sets(source_files, constants)
       known_constants = constants.values.to_set
+      known_namespace_prefixes = namespace_prefixes(known_constants)
 
       source_files.to_h do |file|
-        [file, resolve_references(references_for(file), known_constants)]
+        [file, resolve_references(references_for(file), known_constants, known_namespace_prefixes)]
       end
     end
 
-    def resolve_references(reference_candidates, known_constants)
-      reference_candidates.each_with_object(Set.new) do |candidates, resolved|
-        constant = candidates.find { |candidate| known_constants.include?(candidate) }
+    def resolve_references(reference_candidates, known_constants,
+                           known_namespace_prefixes = namespace_prefixes(known_constants))
+      reference_candidates.each_with_object(Set.new) do |reference, resolved|
+        constant = resolve_reference(reference, known_constants, known_namespace_prefixes)
         resolved << constant if constant
+      end
+    end
+
+    def resolve_reference(reference, known_constants, known_namespace_prefixes)
+      unless reference.is_a?(ReferenceCandidate)
+        return reference.find { |candidate| known_constants.include?(candidate) }
+      end
+
+      return reference.candidates.find(&known_constants.method(:include?)) if reference.absolute
+      return reference.candidates.find(&known_constants.method(:include?)) unless reference.name.include?('::')
+
+      leading, tail = reference.name.split('::', 2)
+
+      constant_candidates(reference.namespace, leading, false).each do |root|
+        next unless known_constants.include?(root) || known_namespace_prefixes.include?(root)
+
+        constant = [root, tail].join('::')
+        return constant if known_constants.include?(constant)
+
+        return nil
+      end
+
+      nil
+    end
+
+    def namespace_prefixes(constants)
+      constants.each_with_object(Set.new) do |constant, prefixes|
+        segments = constant.split('::')
+        next if segments.length < 2
+
+        1.upto(segments.length - 1) do |length|
+          prefixes << segments.first(length).join('::')
+        end
       end
     end
 
@@ -106,7 +142,9 @@ module StudFinder
 
       namespace = lexical_namespace(node)
       absolute = absolute_const_reference?(node)
-      reference_candidate_cache[[namespace, name, absolute]] ||= constant_candidates(namespace, name, absolute)
+      reference_candidate_cache[[namespace, name, absolute]] ||=
+        ReferenceCandidate.new(namespace: namespace, name: name, absolute: absolute,
+                               candidates: constant_candidates(namespace, name, absolute))
     rescue StandardError => e
       @stderr.puts "Warning: fan_in_reference_resolution_failed: #{e.class}: #{e.message}"
       []

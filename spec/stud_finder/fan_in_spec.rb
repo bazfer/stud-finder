@@ -263,7 +263,34 @@ RSpec.describe StudFinder::FanIn do
       .to contain_exactly('config/admin_concerns_authenticatable.rb')
   end
 
-  it 'falls back partially qualified constants to the top level' do
+  it 'does not fall back partially qualified constants after a namespace root match' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('app/models/admin/concerns.rb', <<~RUBY)
+      module Admin
+        module Concerns
+        end
+      end
+    RUBY
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result([
+                 'config/concerns_authenticatable.rb',
+                 'app/models/admin/concerns.rb',
+                 'app/controllers/admin/controller.rb'
+               ])
+
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(0)
+    expect(r.counts['app/models/admin/concerns.rb']).to eq(0)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies]).to be_empty
+  end
+
+  it 'falls back partially qualified constants to the top level when the namespace root is missing' do
     write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
     write_file('app/controllers/admin/controller.rb', <<~RUBY)
       module Admin
