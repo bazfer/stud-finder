@@ -120,20 +120,17 @@ module StudFinder
       return [name] if absolute
       return [name] if namespace.nil? || namespace.empty?
 
-      namespace_parts = namespace.split('::')
-      namespace_parts.length.downto(1).map do |length|
-        [namespace_parts.first(length).join('::'), name].join('::')
+      namespace.length.downto(1).map do |length|
+        [namespace.first(length).join('::'), name].join('::')
       end + [name]
     end
 
     def lexical_namespace(node)
-      namespace_parts = node.each_ancestor.filter_map do |ancestor|
+      node.each_ancestor.filter_map do |ancestor|
         next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type)
 
         constant_name(ancestor.identifier)
-      end
-
-      namespace_parts.reverse.join('::')
+      end.reverse
     end
 
     def absolute_const_reference?(node)

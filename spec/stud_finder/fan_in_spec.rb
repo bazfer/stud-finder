@@ -202,6 +202,22 @@ RSpec.describe StudFinder::FanIn do
     expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/b/c/x.rb')
   end
 
+  it 'does not fall through compact qualified class namespace segments' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/b/c/x.rb', 'module A; module B; module C; class X; end; end; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      class A::B::C::Processor
+        X.new
+      end
+    RUBY
+
+    r = result(['app/models/x.rb', 'app/models/a/b/c/x.rb', 'app/services/a/b/c/processor.rb'])
+
+    expect(r.counts['app/models/x.rb']).to eq(1)
+    expect(r.counts['app/models/a/b/c/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/x.rb')
+  end
+
   it 'falls back through deep bare constant candidates in lexical order' do
     write_file('app/models/x.rb', 'class X; end')
     write_file('app/models/a/x.rb', 'module A; class X; end; end')
