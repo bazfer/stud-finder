@@ -167,7 +167,7 @@ Don't run it as a gate — risk isn't a binary blocker. Run it as input to human
 ## Documentation
 
 - **[PRODUCT.md](PRODUCT.md)** — theory, formulas, and the research behind each signal
-- **[TRD.md](TRD.md)** — technical requirements document
+- **[VISION.md](VISION.md)** — project vision and positioning
 
 ---
 
