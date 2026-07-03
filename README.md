@@ -19,15 +19,29 @@ RANK  LANGUAGE  FILE                              SCORE  CLASS   FAN_IN  FAN_OUT
 
 ## Install
 
-Add to your Gemfile:
+After the gem is published:
+
+```bash
+gem install stud-finder
+```
+
+Or add it to your Gemfile:
+
+```ruby
+gem 'stud-finder'
+```
+
+Then run `bundle install`.
+
+For edge or unreleased changes, install from git:
 
 ```ruby
 gem 'stud-finder', git: 'https://github.com/bazfer/stud-finder'
 ```
 
-Then `bundle install`. Or clone and run directly.
+Or clone and run directly.
 
-**Requirements:** Ruby >= 3.1. For JavaScript support: `dependency-cruiser` and `eslint` installed in the target project (`npm install -D dependency-cruiser eslint`).
+**Requirements:** Ruby >= 3.2. For JavaScript support, install `dependency-cruiser` and `eslint` in the target project (`npm install -D dependency-cruiser eslint`).
 
 ---
 
@@ -153,7 +167,7 @@ Don't run it as a gate — risk isn't a binary blocker. Run it as input to human
 ## Documentation
 
 - **[PRODUCT.md](PRODUCT.md)** — theory, formulas, and the research behind each signal
-- **[TRD.md](TRD.md)** — technical requirements document
+- **[VISION.md](VISION.md)** — project vision and positioning
 
 ---
 
