@@ -103,6 +103,127 @@ RSpec.describe StudFinder::FanIn do
     expect(counts['app/models/user.rb']).to eq(1)
   end
 
+  it 'resolves bare constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/billing/processor.rb', <<~RUBY)
+      module Billing
+        class Processor
+          Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/billing/invoice.rb', 'app/services/billing/processor.rb'])
+
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(1)
+    expect(r.edges['app/models/billing/invoice.rb'][:dependents])
+      .to contain_exactly('app/services/billing/processor.rb')
+    expect(r.edges['app/services/billing/processor.rb'][:dependencies])
+      .to contain_exactly('app/models/billing/invoice.rb')
+  end
+
+  it 'does not resolve bare constants to unrelated namespaces' do
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/shipping/processor.rb', <<~RUBY)
+      module Shipping
+        class Processor
+          Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/billing/invoice.rb', 'app/services/shipping/processor.rb'])
+
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(0)
+    expect(r.edges['app/models/billing/invoice.rb'][:dependents]).to be_empty
+    expect(r.edges['app/services/shipping/processor.rb'][:dependencies]).to be_empty
+  end
+
+  it 'resolves absolute constants from the top level only' do
+    write_file('app/models/invoice.rb', 'class Invoice; end')
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/billing/processor.rb', <<~RUBY)
+      module Billing
+        class Processor
+          ::Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/invoice.rb', 'app/models/billing/invoice.rb', 'app/services/billing/processor.rb'])
+
+    expect(r.counts['app/models/invoice.rb']).to eq(1)
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(0)
+    expect(r.edges['app/models/invoice.rb'][:dependents]).to contain_exactly('app/services/billing/processor.rb')
+    expect(r.edges['app/services/billing/processor.rb'][:dependencies]).to contain_exactly('app/models/invoice.rb')
+  end
+
+  it 'resolves deep bare constants from nearest enclosing namespace outward' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/x.rb', 'module A; class X; end; end')
+    write_file('app/models/a/b/x.rb', 'module A; module B; class X; end; end; end')
+    write_file('app/models/a/b/c/x.rb', 'module A; module B; module C; class X; end; end; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      module A
+        module B
+          module C
+            class Processor
+              X.new
+            end
+          end
+        end
+      end
+    RUBY
+
+    r = result([
+                 'app/models/x.rb',
+                 'app/models/a/x.rb',
+                 'app/models/a/b/x.rb',
+                 'app/models/a/b/c/x.rb',
+                 'app/services/a/b/c/processor.rb'
+               ])
+
+    expect(r.counts['app/models/a/b/c/x.rb']).to eq(1)
+    expect(r.counts['app/models/a/b/x.rb']).to eq(0)
+    expect(r.counts['app/models/a/x.rb']).to eq(0)
+    expect(r.counts['app/models/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/b/c/x.rb')
+  end
+
+  it 'falls back through deep bare constant candidates in lexical order' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/x.rb', 'module A; class X; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      module A
+        module B
+          module C
+            class Processor
+              X.new
+            end
+          end
+        end
+      end
+    RUBY
+
+    r = result(['app/models/x.rb', 'app/models/a/x.rb', 'app/services/a/b/c/processor.rb'])
+
+    expect(r.counts['app/models/a/x.rb']).to eq(1)
+    expect(r.counts['app/models/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/x.rb')
+  end
+
   it 'maps concerns to the constant below the concerns directory' do
     write_file('app/models/concerns/auditable.rb', 'AUDITABLE = true')
     write_file('app/models/user.rb', 'class User; include Auditable; end')

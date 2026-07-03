@@ -17,7 +17,7 @@ module StudFinder
 
     def call
       constants = constant_ownership
-      references = reference_sets(@files)
+      references = resolved_reference_sets(@files, constants)
       reverse_constants = constants.invert
 
       counts = @files.to_h { |file| [file, 0] }
@@ -55,9 +55,18 @@ module StudFinder
       end.to_h
     end
 
-    def reference_sets(source_files)
+    def resolved_reference_sets(source_files, constants)
+      known_constants = constants.values.to_set
+
       source_files.to_h do |file|
-        [file, references_for(file)]
+        [file, resolve_references(references_for(file), known_constants)]
+      end
+    end
+
+    def resolve_references(reference_candidates, known_constants)
+      reference_candidates.each_with_object(Set.new) do |candidates, resolved|
+        constant = candidates.find { |candidate| known_constants.include?(candidate) }
+        resolved << constant if constant
       end
     end
 
@@ -85,9 +94,56 @@ module StudFinder
       ast.each_node(:const).with_object(Set.new) do |node, references|
         next if nested_const_part?(node)
 
-        name = constant_name(node)
-        references << name if name
+        candidates = reference_candidates(node)
+        references << candidates if candidates.any?
       end
+    end
+
+    def reference_candidates(node)
+      name = constant_name(node)
+      return [] unless name
+
+      namespace = lexical_namespace(node)
+      absolute = absolute_const_reference?(node)
+      reference_candidate_cache[[namespace, name, absolute]] ||= constant_candidates(namespace, name, absolute)
+    rescue StandardError
+      []
+    end
+
+    def reference_candidate_cache
+      @reference_candidate_cache ||= {}
+    end
+
+    def constant_candidates(namespace, name, absolute)
+      return [name] if absolute || qualified_constant_name?(name)
+      return [name] if namespace.nil? || namespace.empty?
+
+      namespace_parts = namespace.split('::')
+      namespace_parts.length.downto(1).map do |length|
+        [namespace_parts.first(length).join('::'), name].join('::')
+      end + [name]
+    end
+
+    def lexical_namespace(node)
+      namespace_parts = node.each_ancestor.filter_map do |ancestor|
+        next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type)
+
+        constant_name(ancestor.identifier)
+      end
+
+      namespace_parts.reverse.join('::')
+    end
+
+    def qualified_constant_name?(name)
+      name.include?('::')
+    end
+
+    def absolute_const_reference?(node)
+      parent = node.children.first
+      return false unless parent
+      return true if parent.cbase_type?
+
+      parent.const_type? && absolute_const_reference?(parent)
     end
 
     def parse(file)
