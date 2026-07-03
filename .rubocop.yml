@@ -18,6 +18,10 @@ Gemspec/DevelopmentDependencies:
 Gemspec/RequiredRubyVersion:
   Enabled: false
 
+Naming/FileName:
+  Exclude:
+    - 'lib/stud-finder.rb'
+
 Metrics/ParameterLists:
   CountKeywordArgs: false
 
