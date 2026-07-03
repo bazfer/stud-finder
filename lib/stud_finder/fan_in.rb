@@ -164,8 +164,10 @@ module StudFinder
     end
 
     def lexical_namespace(node)
+      superclass_scope = node.parent if node.parent&.class_type? && node.parent.children[1].equal?(node)
+
       node.each_ancestor.filter_map do |ancestor|
-        next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type)
+        next unless CLASS_OR_MODULE_TYPES.include?(ancestor.type) && !ancestor.equal?(superclass_scope)
 
         constant_name(ancestor.identifier)
       end.reverse

@@ -307,6 +307,23 @@ RSpec.describe StudFinder::FanIn do
       .to contain_exactly('config/concerns_authenticatable.rb')
   end
 
+  it 'resolves superclass constants against the surrounding scope, not the class being declared' do
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo/base.rb', 'module A; class Foo; class Base; end; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo < Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/a/base.rb', 'app/models/a/foo/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/a/foo/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
   it 'resolves superclass constants against the enclosing namespace before top-level constants' do
     write_file('app/models/base.rb', 'class Base; end')
     write_file('app/models/a/base.rb', 'module A; class Base; end; end')
