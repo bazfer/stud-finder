@@ -10,9 +10,10 @@ module StudFinder
     PATH_ROOTS = %w[app lib test].freeze
     CLASS_OR_MODULE_TYPES = %i[class module].freeze
 
-    def initialize(repo_path:, files:)
+    def initialize(repo_path:, files:, stderr: $stderr)
       @repo_path = File.expand_path(repo_path)
       @files = files
+      @stderr = stderr
     end
 
     def call
@@ -106,7 +107,8 @@ module StudFinder
       namespace = lexical_namespace(node)
       absolute = absolute_const_reference?(node)
       reference_candidate_cache[[namespace, name, absolute]] ||= constant_candidates(namespace, name, absolute)
-    rescue StandardError
+    rescue StandardError => e
+      @stderr.puts "Warning: fan_in_reference_resolution_failed: #{e.class}: #{e.message}"
       []
     end
 
@@ -115,7 +117,7 @@ module StudFinder
     end
 
     def constant_candidates(namespace, name, absolute)
-      return [name] if absolute || qualified_constant_name?(name)
+      return [name] if absolute
       return [name] if namespace.nil? || namespace.empty?
 
       namespace_parts = namespace.split('::')
@@ -132,10 +134,6 @@ module StudFinder
       end
 
       namespace_parts.reverse.join('::')
-    end
-
-    def qualified_constant_name?(name)
-      name.include?('::')
     end
 
     def absolute_const_reference?(node)

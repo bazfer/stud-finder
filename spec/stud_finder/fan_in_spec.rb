@@ -224,6 +224,92 @@ RSpec.describe StudFinder::FanIn do
     expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/x.rb')
   end
 
+  it 'resolves partially qualified constants against enclosing namespaces first' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('config/admin_concerns_authenticatable.rb', 'class Admin::Concerns::Authenticatable; end')
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result([
+                 'config/concerns_authenticatable.rb',
+                 'config/admin_concerns_authenticatable.rb',
+                 'app/controllers/admin/controller.rb'
+               ])
+
+    expect(r.counts['config/admin_concerns_authenticatable.rb']).to eq(1)
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(0)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies])
+      .to contain_exactly('config/admin_concerns_authenticatable.rb')
+  end
+
+  it 'falls back partially qualified constants to the top level' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result(['config/concerns_authenticatable.rb', 'app/controllers/admin/controller.rb'])
+
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(1)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies])
+      .to contain_exactly('config/concerns_authenticatable.rb')
+  end
+
+  it 'resolves superclass constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/base.rb', 'class Base; end')
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo < Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/base.rb', 'app/models/a/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  it 'resolves included constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/base.rb', 'class Base; end')
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo
+          include Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/base.rb', 'app/models/a/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  it 'warns and skips a reference when candidate resolution fails' do
+    write_file('app/models/user.rb', 'class User; end')
+    stderr = StringIO.new
+    fan_in = described_class.new(repo_path: repo_path, files: ['app/models/user.rb'], stderr: stderr)
+
+    allow(fan_in).to receive(:lexical_namespace).and_raise(StandardError, 'boom')
+
+    expect { fan_in.call }.not_to raise_error
+    expect(stderr.string).to include('Warning: fan_in_reference_resolution_failed: StandardError: boom')
+  end
+
   it 'maps concerns to the constant below the concerns directory' do
     write_file('app/models/concerns/auditable.rb', 'AUDITABLE = true')
     write_file('app/models/user.rb', 'class User; include Auditable; end')
