@@ -103,6 +103,307 @@ RSpec.describe StudFinder::FanIn do
     expect(counts['app/models/user.rb']).to eq(1)
   end
 
+  it 'resolves bare constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/billing/processor.rb', <<~RUBY)
+      module Billing
+        class Processor
+          Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/billing/invoice.rb', 'app/services/billing/processor.rb'])
+
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(1)
+    expect(r.edges['app/models/billing/invoice.rb'][:dependents])
+      .to contain_exactly('app/services/billing/processor.rb')
+    expect(r.edges['app/services/billing/processor.rb'][:dependencies])
+      .to contain_exactly('app/models/billing/invoice.rb')
+  end
+
+  it 'does not resolve bare constants to unrelated namespaces' do
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/shipping/processor.rb', <<~RUBY)
+      module Shipping
+        class Processor
+          Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/billing/invoice.rb', 'app/services/shipping/processor.rb'])
+
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(0)
+    expect(r.edges['app/models/billing/invoice.rb'][:dependents]).to be_empty
+    expect(r.edges['app/services/shipping/processor.rb'][:dependencies]).to be_empty
+  end
+
+  it 'resolves absolute constants from the top level only' do
+    write_file('app/models/invoice.rb', 'class Invoice; end')
+    write_file('app/models/billing/invoice.rb', <<~RUBY)
+      module Billing
+        class Invoice; end
+      end
+    RUBY
+    write_file('app/services/billing/processor.rb', <<~RUBY)
+      module Billing
+        class Processor
+          ::Invoice.new
+        end
+      end
+    RUBY
+
+    r = result(['app/models/invoice.rb', 'app/models/billing/invoice.rb', 'app/services/billing/processor.rb'])
+
+    expect(r.counts['app/models/invoice.rb']).to eq(1)
+    expect(r.counts['app/models/billing/invoice.rb']).to eq(0)
+    expect(r.edges['app/models/invoice.rb'][:dependents]).to contain_exactly('app/services/billing/processor.rb')
+    expect(r.edges['app/services/billing/processor.rb'][:dependencies]).to contain_exactly('app/models/invoice.rb')
+  end
+
+  it 'resolves deep bare constants from nearest enclosing namespace outward' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/x.rb', 'module A; class X; end; end')
+    write_file('app/models/a/b/x.rb', 'module A; module B; class X; end; end; end')
+    write_file('app/models/a/b/c/x.rb', 'module A; module B; module C; class X; end; end; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      module A
+        module B
+          module C
+            class Processor
+              X.new
+            end
+          end
+        end
+      end
+    RUBY
+
+    r = result([
+                 'app/models/x.rb',
+                 'app/models/a/x.rb',
+                 'app/models/a/b/x.rb',
+                 'app/models/a/b/c/x.rb',
+                 'app/services/a/b/c/processor.rb'
+               ])
+
+    expect(r.counts['app/models/a/b/c/x.rb']).to eq(1)
+    expect(r.counts['app/models/a/b/x.rb']).to eq(0)
+    expect(r.counts['app/models/a/x.rb']).to eq(0)
+    expect(r.counts['app/models/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/b/c/x.rb')
+  end
+
+  it 'does not fall through compact qualified class namespace segments' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/b/c/x.rb', 'module A; module B; module C; class X; end; end; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      class A::B::C::Processor
+        X.new
+      end
+    RUBY
+
+    r = result(['app/models/x.rb', 'app/models/a/b/c/x.rb', 'app/services/a/b/c/processor.rb'])
+
+    expect(r.counts['app/models/x.rb']).to eq(1)
+    expect(r.counts['app/models/a/b/c/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/x.rb')
+  end
+
+  it 'falls back through deep bare constant candidates in lexical order' do
+    write_file('app/models/x.rb', 'class X; end')
+    write_file('app/models/a/x.rb', 'module A; class X; end; end')
+    write_file('app/services/a/b/c/processor.rb', <<~RUBY)
+      module A
+        module B
+          module C
+            class Processor
+              X.new
+            end
+          end
+        end
+      end
+    RUBY
+
+    r = result(['app/models/x.rb', 'app/models/a/x.rb', 'app/services/a/b/c/processor.rb'])
+
+    expect(r.counts['app/models/a/x.rb']).to eq(1)
+    expect(r.counts['app/models/x.rb']).to eq(0)
+    expect(r.edges['app/services/a/b/c/processor.rb'][:dependencies]).to contain_exactly('app/models/a/x.rb')
+  end
+
+  it 'resolves partially qualified constants against enclosing namespaces first' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('config/admin_concerns_authenticatable.rb', 'class Admin::Concerns::Authenticatable; end')
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result([
+                 'config/concerns_authenticatable.rb',
+                 'config/admin_concerns_authenticatable.rb',
+                 'app/controllers/admin/controller.rb'
+               ])
+
+    expect(r.counts['config/admin_concerns_authenticatable.rb']).to eq(1)
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(0)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies])
+      .to contain_exactly('config/admin_concerns_authenticatable.rb')
+  end
+
+  it 'does not fall back partially qualified constants after a namespace root match' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('app/models/admin/concerns.rb', <<~RUBY)
+      module Admin
+        module Concerns
+        end
+      end
+    RUBY
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result([
+                 'config/concerns_authenticatable.rb',
+                 'app/models/admin/concerns.rb',
+                 'app/controllers/admin/controller.rb'
+               ])
+
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(0)
+    expect(r.counts['app/models/admin/concerns.rb']).to eq(0)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies]).to be_empty
+  end
+
+  it 'falls back partially qualified constants to the top level when the namespace root is missing' do
+    write_file('config/concerns_authenticatable.rb', 'class Concerns::Authenticatable; end')
+    write_file('app/controllers/admin/controller.rb', <<~RUBY)
+      module Admin
+        class Controller
+          include Concerns::Authenticatable
+        end
+      end
+    RUBY
+
+    r = result(['config/concerns_authenticatable.rb', 'app/controllers/admin/controller.rb'])
+
+    expect(r.counts['config/concerns_authenticatable.rb']).to eq(1)
+    expect(r.edges['app/controllers/admin/controller.rb'][:dependencies])
+      .to contain_exactly('config/concerns_authenticatable.rb')
+  end
+
+  it 'resolves declaration identifiers against the surrounding scope, not the class or module being declared' do
+    write_file('app/models/billing.rb', 'class Billing; end')
+    write_file('app/models/billing/billing.rb', <<~RUBY)
+      module Billing
+        class Billing; end
+      end
+    RUBY
+    write_file('app/services/billing_facade.rb', 'module Billing; end')
+
+    r = result(['app/models/billing.rb', 'app/models/billing/billing.rb', 'app/services/billing_facade.rb'])
+
+    expect(r.counts['app/models/billing.rb']).to eq(2)
+    expect(r.counts['app/models/billing/billing.rb']).to eq(0)
+    expect(r.edges['app/services/billing_facade.rb'][:dependencies]).to contain_exactly('app/models/billing.rb')
+  end
+
+  it 'resolves compact declaration identifiers against the surrounding scope' do
+    write_file('app/models/a/b.rb', 'module A::B; end')
+    write_file('app/models/a/b/b.rb', <<~RUBY)
+      module A
+        module B
+          module B; end
+        end
+      end
+    RUBY
+    write_file('app/services/opens_a_b.rb', 'module A::B; end')
+
+    r = result(['app/models/a/b.rb', 'app/models/a/b/b.rb', 'app/services/opens_a_b.rb'])
+
+    expect(r.counts['app/models/a/b.rb']).to eq(2)
+    expect(r.counts['app/models/a/b/b.rb']).to eq(0)
+    expect(r.edges['app/services/opens_a_b.rb'][:dependencies]).to contain_exactly('app/models/a/b.rb')
+  end
+
+  it 'resolves superclass constants against the surrounding scope, not the class being declared' do
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo/base.rb', 'module A; class Foo; class Base; end; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo < Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/a/base.rb', 'app/models/a/foo/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/a/foo/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  it 'resolves superclass constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/base.rb', 'class Base; end')
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo < Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/base.rb', 'app/models/a/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  it 'resolves included constants against the enclosing namespace before top-level constants' do
+    write_file('app/models/base.rb', 'class Base; end')
+    write_file('app/models/a/base.rb', 'module A; class Base; end; end')
+    write_file('app/models/a/foo.rb', <<~RUBY)
+      module A
+        class Foo
+          include Base
+        end
+      end
+    RUBY
+
+    r = result(['app/models/base.rb', 'app/models/a/base.rb', 'app/models/a/foo.rb'])
+
+    expect(r.counts['app/models/a/base.rb']).to eq(1)
+    expect(r.counts['app/models/base.rb']).to eq(0)
+    expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  it 'warns and skips a reference when candidate resolution fails' do
+    write_file('app/models/user.rb', 'class User; end')
+    stderr = StringIO.new
+    fan_in = described_class.new(repo_path: repo_path, files: ['app/models/user.rb'], stderr: stderr)
+
+    allow(fan_in).to receive(:lexical_namespace).and_raise(StandardError, 'boom')
+
+    expect { fan_in.call }.not_to raise_error
+    expect(stderr.string).to include('Warning: fan_in_reference_resolution_failed: StandardError: boom')
+  end
+
   it 'maps concerns to the constant below the concerns directory' do
     write_file('app/models/concerns/auditable.rb', 'AUDITABLE = true')
     write_file('app/models/user.rb', 'class User; include Auditable; end')
