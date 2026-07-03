@@ -10,19 +10,10 @@ jobs:
   rspec:
     name: RSpec (${{ matrix.ruby }})
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - ruby: '3.2'
-            experimental: false
-          - ruby: '3.3'
-            experimental: false
-          - ruby: '3.4'
-            experimental: false
-          - ruby: 'head'
-            experimental: true
+        ruby: ['3.2', '3.3', '3.4']
     steps:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
@@ -30,6 +21,25 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
       - run: bundle exec rspec
+
+  rspec-head:
+    name: RSpec (head, optional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: setup-ruby
+        uses: ruby/setup-ruby@v1
+        continue-on-error: true
+        with:
+          ruby-version: head
+          bundler-cache: true
+      - if: steps.setup-ruby.outcome == 'success'
+        run: |
+          if ! bundle exec rspec; then
+            echo "::warning::Ruby head RSpec failed; stable Ruby jobs remain required."
+          fi
+      - if: steps.setup-ruby.outcome != 'success'
+        run: echo "::warning::Ruby head setup failed; stable Ruby jobs remain required."
 
   rubocop:
     name: RuboCop
