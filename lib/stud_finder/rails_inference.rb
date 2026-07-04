@@ -55,12 +55,9 @@ module StudFinder
     end
 
     def string_constant_inference(node)
-      receiver, method_name, *args = *node
-      if STRING_CONSTANTIZERS.include?(method_name)
-        literal = terminal_string_literal(receiver)
-        return reference(node, literal) if literal
-      elsif method_name == :const_get
-        literal = string_literal(args.first)
+      receiver, method_name, = *node
+      if STRING_CONSTANTIZERS.include?(method_name) || method_name == :const_get
+        literal = string_literal(receiver)
         return reference(node, literal) if literal
       end
 
@@ -118,12 +115,6 @@ module StudFinder
       return node.value if node&.str_type?
 
       nil
-    end
-
-    def terminal_string_literal(node)
-      current = node
-      current = current.receiver while current&.send_type?
-      string_literal(current)
     end
 
     def inferred_association_class(name, collection:)

@@ -408,6 +408,34 @@ RSpec.describe StudFinder::FanIn do
       FileUtils.cp_r(Dir.glob(File.join(source_fixture, '*')), repo_path)
     end
 
+    it 'infers direct string literal constantize references' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/services/loader.rb', <<~RUBY)
+        class Loader
+          "User".constantize
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/services/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(1)
+      expect(r.edges['app/models/user.rb'][:dependents]).to include('app/services/loader.rb')
+    end
+
+    it 'does not infer transformed string literal constantize chains' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/services/loader.rb', <<~RUBY)
+        class Loader
+          "User".downcase.constantize
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/services/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(0)
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/services/loader.rb')
+    end
+
     it 'counts belongs_to association references in the fixture app' do
       File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
         # frozen_string_literal: true
