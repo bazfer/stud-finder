@@ -79,7 +79,34 @@ RSpec.describe StudFinder::CLI do
     expect(stdout.string).to include('--ruby-coverage')
     expect(stdout.string).to include('--js-coverage')
     expect(stdout.string).to include('--js-timeout')
+    expect(stdout.string).to include('--no-rails-inference')
     expect(stdout.string).to include('--coverage')
+  end
+
+  it 'disables Rails inference with --no-rails-inference' do
+    Dir.mktmpdir do |root|
+      system('git', 'init', '-q', root)
+      system('git', '-C', root, 'config', 'user.email', 'stud-finder@example.test')
+      system('git', '-C', root, 'config', 'user.name', 'Stud Finder')
+      FileUtils.mkdir_p(File.join(root, 'app/models'))
+      File.write(File.join(root, 'app/models/user.rb'), "class User\nend\n")
+      File.write(File.join(root, 'app/models/post.rb'), "class Post\n  belongs_to :user\nend\n")
+      3.times do |index|
+        File.write(File.join(root, "app/models/filler_#{index}.rb"), "class Filler#{index}\nend\n")
+      end
+      system('git', '-C', root, 'add', '.')
+      system('git', '-C', root, 'commit', '-qm', 'initial')
+
+      status, stdout, = run_cli([root, '--min-files', '1', '--output', 'json'])
+      expect(status).to eq(0)
+      default_user = JSON.parse(stdout).fetch('ruby').find { |row| row['path'] == 'app/models/user.rb' }
+      expect(default_user.fetch('fan_in')).to eq(1)
+
+      status, stdout, = run_cli([root, '--min-files', '1', '--output', 'json', '--no-rails-inference'])
+      expect(status).to eq(0)
+      disabled_user = JSON.parse(stdout).fetch('ruby').find { |row| row['path'] == 'app/models/user.rb' }
+      expect(disabled_user.fetch('fan_in')).to eq(0)
+    end
   end
 
   it 'prints version' do

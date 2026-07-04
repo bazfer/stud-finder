@@ -18,6 +18,14 @@ RSpec.describe StudFinder::FanIn do
     described_class.new(repo_path: repo_path, files: files).call
   end
 
+  def result_without_rails_inference(files)
+    described_class.new(repo_path: repo_path, files: files, rails_inference: false).call
+  end
+
+  def fixture_files
+    Dir.chdir(repo_path) { Dir['{app,lib,spec}/**/*.rb'].sort }
+  end
+
   let(:repo_path) { Dir.mktmpdir('stud-finder-fan-in') }
 
   after do
@@ -391,6 +399,110 @@ RSpec.describe StudFinder::FanIn do
     expect(r.counts['app/models/a/base.rb']).to eq(1)
     expect(r.counts['app/models/base.rb']).to eq(0)
     expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  describe 'Rails inference' do
+    let(:source_fixture) { File.expand_path('../fixtures/sample_app', __dir__) }
+
+    before do
+      FileUtils.cp_r(Dir.glob(File.join(source_fixture, '*')), repo_path)
+    end
+
+    it 'counts belongs_to association references in the fixture app' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :user
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/user.rb']).to eq(9)
+      expect(r.edges['app/models/user.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'infers has_many association references with heuristic singularization' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          has_many :comments
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/comment.rb']).to eq(1)
+      expect(r.edges['app/models/comment.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'lets string class_name override the association symbol' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :author, class_name: 'Profile'
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/profile.rb']).to eq(2)
+      expect(r.edges['app/models/profile.rb'][:dependents]).to include('app/models/post.rb')
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/models/post.rb')
+    end
+
+    it 'ignores dynamic class_name values without falling back to the symbol' do
+      write_file('app/models/thing.rb', 'class Thing; end')
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          suffix = 'Thing'
+          belongs_to :thing, class_name: "Dynamic\#{suffix}"
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/thing.rb']).to eq(0)
+      expect(r.warnings).not_to include('fan_in_rails_inference_failed')
+    end
+
+    it 'resolves namespaced associations against the enclosing scope before top-level constants' do
+      write_file('app/models/item.rb', 'class Item; end')
+      write_file('app/models/store/item.rb', 'module Store; class Item; end; end')
+      write_file('app/models/store/order.rb', <<~RUBY)
+        module Store
+          class Order
+            belongs_to :item
+          end
+        end
+      RUBY
+
+      r = result(['app/models/item.rb', 'app/models/store/item.rb', 'app/models/store/order.rb'])
+
+      expect(r.counts['app/models/store/item.rb']).to eq(1)
+      expect(r.counts['app/models/item.rb']).to eq(0)
+      expect(r.edges['app/models/store/item.rb'][:dependents]).to contain_exactly('app/models/store/order.rb')
+    end
+
+    it 'can disable Rails inference' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :user
+        end
+      RUBY
+
+      r = result_without_rails_inference(fixture_files)
+
+      expect(r.counts['app/models/user.rb']).to eq(8)
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/models/post.rb')
+    end
   end
 
   it 'warns and skips a reference when candidate resolution fails' do

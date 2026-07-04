@@ -2,6 +2,7 @@
 
 require 'rubocop'
 require 'set'
+require_relative 'rails_inference'
 
 module StudFinder
   # rubocop:disable Metrics/ClassLength
@@ -12,10 +13,11 @@ module StudFinder
     PATH_ROOTS = %w[app lib test].freeze
     CLASS_OR_MODULE_TYPES = %i[class module].freeze
 
-    def initialize(repo_path:, files:, stderr: $stderr)
+    def initialize(repo_path:, files:, stderr: $stderr, rails_inference: true)
       @repo_path = File.expand_path(repo_path)
       @files = files
       @stderr = stderr
+      @rails_inference = rails_inference
     end
 
     def call
@@ -137,15 +139,32 @@ module StudFinder
 
         candidates = reference_candidates(node)
         references << candidates if candidates.any?
+      end.merge(rails_reference_candidates(ast))
+    end
+
+    def rails_reference_candidates(ast)
+      return Set.new unless @rails_inference
+
+      RailsInference.new(ast).call.each_with_object(Set.new) do |inference, references|
+        candidates = reference_candidate(inference.node, inference.name, inference.absolute)
+        references << candidates if candidates.any?
       end
+    rescue StandardError => e
+      code = 'fan_in_rails_inference_failed'
+      @warnings << code unless @warnings.include?(code)
+      @stderr.puts "Warning: #{code}: #{e.class}: #{e.message}"
+      Set.new
     end
 
     def reference_candidates(node)
       name = constant_name(node)
       return [] unless name
 
+      reference_candidate(node, name, absolute_const_reference?(node))
+    end
+
+    def reference_candidate(node, name, absolute)
       namespace = lexical_namespace(node)
-      absolute = absolute_const_reference?(node)
       candidates = name.include?('::') && !absolute ? [] : constant_candidates(namespace, name, absolute)
       reference_candidate_cache[[namespace, name, absolute]] ||=
         ReferenceCandidate.new(namespace: namespace, name: name, absolute: absolute,
