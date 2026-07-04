@@ -48,6 +48,7 @@ module StudFinder
       ruby_coverage_path: nil,
       js_coverage_path: nil,
       js_timeout: 60,
+      rails_inference: true,
       diff_base: nil,
       only_paths: nil,
       filter_set: nil,
@@ -181,6 +182,9 @@ module StudFinder
         end
         opts.on('--js-timeout N', Integer, 'dependency-cruiser timeout in seconds (default: 60)') do |value|
           @options[:js_timeout] = value
+        end
+        opts.on('--no-rails-inference', 'Disable Rails association/string fan-in inference') do
+          @options[:rails_inference] = false
         end
         opts.on('--trunk-threshold N', Integer,
                 'fan_in percentile cutoff for trunk classification (default: 85)') do |value|
@@ -362,7 +366,8 @@ module StudFinder
 
     def analyze_ruby(path, files, coupling = nil)
       progress('computing Ruby fan_in + fan_out (rubocop-ast)...')
-      fan_in_result = FanIn.new(repo_path: path, files: files).call
+      fan_in_result = FanIn.new(repo_path: path, files: files, stderr: @stderr,
+                                rails_inference: @options[:rails_inference]).call
 
       progress('computing Ruby complexity (rubocop)...')
       complexity_result = Complexity.new(repo_path: path, files: files, stderr: @stderr).call

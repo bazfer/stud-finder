@@ -18,6 +18,14 @@ RSpec.describe StudFinder::FanIn do
     described_class.new(repo_path: repo_path, files: files).call
   end
 
+  def result_without_rails_inference(files)
+    described_class.new(repo_path: repo_path, files: files, rails_inference: false).call
+  end
+
+  def fixture_files
+    Dir.chdir(repo_path) { Dir['{app,lib,spec}/**/*.rb'].sort }
+  end
+
   let(:repo_path) { Dir.mktmpdir('stud-finder-fan-in') }
 
   after do
@@ -391,6 +399,242 @@ RSpec.describe StudFinder::FanIn do
     expect(r.counts['app/models/a/base.rb']).to eq(1)
     expect(r.counts['app/models/base.rb']).to eq(0)
     expect(r.edges['app/models/a/foo.rb'][:dependencies]).to contain_exactly('app/models/a/base.rb')
+  end
+
+  describe 'Rails inference' do
+    let(:source_fixture) { File.expand_path('../fixtures/sample_app', __dir__) }
+
+    before do
+      FileUtils.cp_r(Dir.glob(File.join(source_fixture, '*')), repo_path)
+    end
+
+    it 'infers direct string literal constantize references' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/services/loader.rb', <<~RUBY)
+        class Loader
+          "User".constantize
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/services/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(1)
+      expect(r.edges['app/models/user.rb'][:dependents]).to include('app/services/loader.rb')
+    end
+
+    it 'resolves direct string literal constantize references from the top level' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/models/tenant/user.rb', 'module Tenant; class User; end; end')
+      write_file('app/services/tenant/loader.rb', <<~RUBY)
+        module Tenant
+          class Loader
+            "User".constantize
+          end
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/models/tenant/user.rb', 'app/services/tenant/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(1)
+      expect(r.counts['app/models/tenant/user.rb']).to eq(0)
+      expect(r.edges['app/services/tenant/loader.rb'][:dependencies]).to contain_exactly('app/models/user.rb')
+    end
+
+    it 'does not infer transformed string literal constantize chains' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/services/loader.rb', <<~RUBY)
+        class Loader
+          "User".downcase.constantize
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/services/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(0)
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/services/loader.rb')
+    end
+
+    it 'counts belongs_to association references in the fixture app' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :user
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/user.rb']).to eq(9)
+      expect(r.edges['app/models/user.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'infers has_many association references with heuristic singularization' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          has_many :comments
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/comment.rb']).to eq(1)
+      expect(r.edges['app/models/comment.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'keeps inferring parent-side polymorphic has_many associations' do
+      write_file('app/models/comment.rb', 'class Comment; end')
+      write_file('app/models/post.rb', <<~RUBY)
+        class Post
+          has_many :comments, as: :commentable
+        end
+      RUBY
+
+      r = result(['app/models/comment.rb', 'app/models/post.rb'])
+
+      expect(r.counts['app/models/comment.rb']).to eq(1)
+      expect(r.edges['app/models/comment.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'does not infer literal polymorphic belongs_to associations' do
+      write_file('app/models/commentable.rb', 'module Commentable; end')
+      write_file('app/models/comment.rb', <<~RUBY)
+        class Comment
+          belongs_to :commentable, polymorphic: true
+        end
+      RUBY
+
+      r = result(['app/models/commentable.rb', 'app/models/comment.rb'])
+
+      expect(r.counts['app/models/commentable.rb']).to eq(0)
+      expect(r.edges['app/models/commentable.rb'][:dependents]).not_to include('app/models/comment.rb')
+      expect(r.edges['app/models/comment.rb'][:dependencies]).not_to include('app/models/commentable.rb')
+    end
+
+    it 'does not infer dynamic polymorphic belongs_to associations' do
+      write_file('app/models/commentable.rb', 'module Commentable; end')
+      write_file('app/models/comment.rb', <<~RUBY)
+        class Comment
+          polymorphic_association = true
+          belongs_to :commentable, polymorphic: polymorphic_association
+        end
+      RUBY
+
+      r = result(['app/models/commentable.rb', 'app/models/comment.rb'])
+
+      expect(r.counts['app/models/commentable.rb']).to eq(0)
+      expect(r.edges['app/models/commentable.rb'][:dependents]).not_to include('app/models/comment.rb')
+      expect(r.edges['app/models/comment.rb'][:dependencies]).not_to include('app/models/commentable.rb')
+    end
+
+    it 'lets string class_name override the association symbol' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :author, class_name: 'Profile'
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/profile.rb']).to eq(2)
+      expect(r.edges['app/models/profile.rb'][:dependents]).to include('app/models/post.rb')
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/models/post.rb')
+    end
+
+    it 'ignores dynamic class_name values without falling back to the symbol' do
+      write_file('app/models/thing.rb', 'class Thing; end')
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          suffix = 'Thing'
+          belongs_to :thing, class_name: "Dynamic\#{suffix}"
+        end
+      RUBY
+
+      r = result(fixture_files)
+
+      expect(r.counts['app/models/thing.rb']).to eq(0)
+      expect(r.warnings).not_to include('fan_in_rails_inference_failed')
+    end
+
+    it 'resolves namespaced associations against the enclosing scope before top-level constants' do
+      write_file('app/models/item.rb', 'class Item; end')
+      write_file('app/models/store/item.rb', 'module Store; class Item; end; end')
+      write_file('app/models/store/order.rb', <<~RUBY)
+        module Store
+          class Order
+            belongs_to :item
+          end
+        end
+      RUBY
+
+      r = result(['app/models/item.rb', 'app/models/store/item.rb', 'app/models/store/order.rb'])
+
+      expect(r.counts['app/models/store/item.rb']).to eq(1)
+      expect(r.counts['app/models/item.rb']).to eq(0)
+      expect(r.edges['app/models/store/item.rb'][:dependents]).to contain_exactly('app/models/store/order.rb')
+    end
+
+    it 'infers namespaced associations inside with_options class-body wrappers' do
+      write_file('app/models/comment.rb', 'class Comment; end')
+      write_file('app/models/store/comment.rb', 'module Store; class Comment; end; end')
+      write_file('app/models/store/post.rb', <<~RUBY)
+        module Store
+          class Post
+            with_options dependent: :destroy do
+              has_many :comments
+            end
+          end
+        end
+      RUBY
+
+      r = result(['app/models/comment.rb', 'app/models/store/comment.rb', 'app/models/store/post.rb'])
+
+      expect(r.counts['app/models/store/comment.rb']).to eq(1)
+      expect(r.counts['app/models/comment.rb']).to eq(0)
+      expect(r.edges['app/models/store/comment.rb'][:dependents]).to contain_exactly('app/models/store/post.rb')
+    end
+
+    it 'infers associations inside included concern wrappers' do
+      write_file('app/models/account.rb', 'class Account; end')
+      write_file('app/models/concerns/commentable.rb', <<~RUBY)
+        module Commentable
+          included do
+            belongs_to :account
+          end
+        end
+      RUBY
+      write_file('app/models/user.rb', <<~RUBY)
+        class User
+          include Commentable
+        end
+      RUBY
+
+      r = result(['app/models/account.rb', 'app/models/concerns/commentable.rb', 'app/models/user.rb'])
+
+      expect(r.counts['app/models/account.rb']).to eq(1)
+      expect(r.edges['app/models/account.rb'][:dependents]).to contain_exactly('app/models/concerns/commentable.rb')
+    end
+
+    it 'can disable Rails inference' do
+      File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
+        # frozen_string_literal: true
+
+        class Post
+          belongs_to :user
+        end
+      RUBY
+
+      r = result_without_rails_inference(fixture_files)
+
+      expect(r.counts['app/models/user.rb']).to eq(8)
+      expect(r.edges['app/models/user.rb'][:dependents]).not_to include('app/models/post.rb')
+    end
   end
 
   it 'warns and skips a reference when candidate resolution fails' do

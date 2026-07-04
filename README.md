@@ -111,6 +111,10 @@ The total score still drives the ranking. The class label is a separate coupling
 - complexity via RuboCop
 - coverage: SimpleCov resultset JSON, Cobertura XML
 
+### Rails inference
+
+Ruby fan-in includes conservative Rails-style implicit references by default. Association calls such as `belongs_to :user`, `has_one :profile`, `has_many :comments`, and `has_and_belongs_to_many :tags` are treated as references to their likely model constants. Literal `class_name: 'Foo::Bar'` overrides the symbol; dynamic `class_name:` values are ignored rather than guessed. Disable this with `--no-rails-inference`.
+
 **JavaScript / TypeScript (.js, .jsx, .ts, .tsx):**
 - fan_in via `dependency-cruiser` (must be installed in the target project)
 - complexity via `eslint` (`--rule '{"complexity":["error",0]}'`)
@@ -129,6 +133,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--js-coverage PATH` | JavaScript coverage report (LCOV `.info`) |
 | `--coverage PATH` | Deprecated alias for `--ruby-coverage` |
 | `--js-timeout N` | dependency-cruiser timeout in seconds (default: 60) |
+| `--no-rails-inference` | Disable Rails association/string fan-in inference |
 | `--churn-days N` | Commit lookback window in days (default: 180) |
 | `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15`. Defaults shown. All five keys are required. |
 | `--trunk-threshold N` | fan_in percentile cutoff for trunk classification (default: 85) |
