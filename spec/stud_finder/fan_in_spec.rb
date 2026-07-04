@@ -400,7 +400,10 @@ RSpec.describe StudFinder::FanIn do
 
     allow(fan_in).to receive(:lexical_namespace).and_raise(StandardError, 'boom')
 
-    expect { fan_in.call }.not_to raise_error
+    result = nil
+    expect { result = fan_in.call }.not_to raise_error
+
+    expect(result.warnings).to eq(['fan_in_reference_resolution_failed'])
     expect(stderr.string).to include('Warning: fan_in_reference_resolution_failed: StandardError: boom')
   end
 

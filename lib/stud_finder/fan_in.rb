@@ -4,8 +4,9 @@ require 'rubocop'
 require 'set'
 
 module StudFinder
+  # rubocop:disable Metrics/ClassLength
   class FanIn
-    Result = Struct.new(:counts, :fan_out_counts, :edges, keyword_init: true)
+    Result = Struct.new(:counts, :fan_out_counts, :edges, :warnings, keyword_init: true)
     ReferenceCandidate = Struct.new(:namespace, :name, :absolute, :candidates, keyword_init: true)
 
     PATH_ROOTS = %w[app lib test].freeze
@@ -18,6 +19,7 @@ module StudFinder
     end
 
     def call
+      @warnings = []
       constants = constant_ownership
       references = resolved_reference_sets(@files, constants)
       reverse_constants = constants.invert
@@ -45,7 +47,7 @@ module StudFinder
         [file, { dependents: dependents[file].uniq, dependencies: dependencies[file].uniq }]
       end
 
-      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges)
+      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: @warnings)
     end
 
     private
@@ -90,6 +92,10 @@ module StudFinder
         constant = [root, tail].join('::')
         return constant if known_constants.include?(constant)
 
+        # Ruby locks qualified lookup into the first matching namespace root. If
+        # the tail is absent, it raises instead of falling back to an outer
+        # constant; incomplete ownership can rarely undercount, but avoids
+        # non-Ruby overcounts.
         return nil
       end
 
@@ -140,11 +146,14 @@ module StudFinder
 
       namespace = lexical_namespace(node)
       absolute = absolute_const_reference?(node)
+      candidates = name.include?('::') && !absolute ? [] : constant_candidates(namespace, name, absolute)
       reference_candidate_cache[[namespace, name, absolute]] ||=
         ReferenceCandidate.new(namespace: namespace, name: name, absolute: absolute,
-                               candidates: constant_candidates(namespace, name, absolute))
+                               candidates: candidates)
     rescue StandardError => e
-      @stderr.puts "Warning: fan_in_reference_resolution_failed: #{e.class}: #{e.message}"
+      code = 'fan_in_reference_resolution_failed'
+      @warnings << code unless @warnings.include?(code)
+      @stderr.puts "Warning: #{code}: #{e.class}: #{e.message}"
       []
     end
 
@@ -240,4 +249,5 @@ module StudFinder
       root == 'app' ? remaining[1..] : remaining
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end
