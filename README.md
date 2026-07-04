@@ -92,7 +92,7 @@ When coverage isn't available, the remaining four signals (fan_in, fan_out, comp
 These ride alongside the score to give reviewers extra context, but do not contribute to it:
 
 - **instability** / **instability_pct** — `fan_out / (fan_in + fan_out)`, and its percentile rank across the repo. High instability = depends on a lot while little depends on it.
-- **max_coupling** / **max_coupling_partner** / **coupling_partners** / **coupling_pct** — temporal coupling from git history: the strongest co-change ratio with any partner file, the path of that strongest partner, how many partners cross the threshold, and the percentile rank of `max_coupling`. The analysis produces co-change pairs; each file's row keeps the strongest pair's ratio (`max_coupling`), that partner's path (`max_coupling_partner`), and the count of pairs (`coupling_partners`). On ties the strongest partner is chosen deterministically: highest coupling, then highest co-change count, then alphabetical path; `max_coupling_partner` is an empty string when a file has no qualifying partners. Computed once over the full file set in the main scan (one extra `git log` pass), so cross-language co-change is captured. Same thresholds as the `edges` subcommand (`--coupling-threshold`, `--coupling-min-commits`).
+- **max_coupling** / **max_coupling_partner** / **coupling_partners** / **coupling_pct** — temporal coupling from git history: the strongest co-change ratio with any partner file, the path of that strongest partner, how many partners cross the threshold, and the percentile rank of `max_coupling`. The analysis produces co-change pairs; each file's row keeps the strongest pair's ratio (`max_coupling`), that partner's path (`max_coupling_partner`), and the count of pairs (`coupling_partners`). On ties the strongest partner is chosen deterministically: highest coupling, then highest co-change count, then alphabetical path; `max_coupling_partner` is an empty string when a file has no qualifying partners. Computed once over the full file set in the main scan (one extra `git log` pass), so cross-language co-change is captured. By default, commits touching more than 50 scored files are skipped as bulk commits; use `--coupling-max-commit-files 0` for unlimited/legacy behavior. Same thresholds as the `edges` subcommand (`--coupling-threshold`, `--coupling-min-commits`).
 
 Files are classified into three labels based on their **fan_in percentile** (not the total score):
 
@@ -134,7 +134,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--coverage PATH` | Deprecated alias for `--ruby-coverage` |
 | `--js-timeout N` | dependency-cruiser timeout in seconds (default: 60) |
 | `--no-rails-inference` | Disable Rails association/string fan-in inference |
-| `--churn-days N` | Commit lookback window in days (default: 180) |
+| `--churn-days N` | Commit lookback window in days (default: 180). Churn uses git rename detection; within the window, rename commits are attributed to the new path when git pairs the rename. History before that paired rename stays with the old path unless it is also paired within the window. |
 | `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15`. Defaults shown. All five keys are required. |
 | `--trunk-threshold N` | fan_in percentile cutoff for trunk classification (default: 85) |
 | `--branch-threshold N` | fan_in percentile cutoff for branch classification (default: 50) |
@@ -143,6 +143,9 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--diff-base REF` | Score the whole repo but emit only the files changed on `HEAD` vs the merge-base with `REF` (e.g. `origin/staging`). Ranks and scores stay relative to the full repo. Ideal for per-PR runs. |
 | `--only PATHS` | Emit only these comma-separated repo-relative paths. Like `--diff-base` but with an explicit list instead of a git diff. Mutually exclusive with `--diff-base`. |
 | `--min-files N` | Advisory minimum file count to trust percentiles (default: 20) |
+| `--coupling-threshold FLOAT` | Minimum temporal-coupling ratio for edges output and main-scan coupling columns (default: 0.30) |
+| `--coupling-min-commits N` | Minimum co-change count for temporal-coupling edges/columns (default: 5) |
+| `--coupling-max-commit-files N` | Skip temporal-coupling commits touching more than N scored files (default: 50; `0` = unlimited) |
 | `--verbose` | Print suppressed per-file warnings to stderr |
 | `--version`, `--help` | Self-explanatory |
 
