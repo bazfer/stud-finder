@@ -422,6 +422,24 @@ RSpec.describe StudFinder::FanIn do
       expect(r.edges['app/models/user.rb'][:dependents]).to include('app/services/loader.rb')
     end
 
+    it 'resolves direct string literal constantize references from the top level' do
+      write_file('app/models/user.rb', 'class User; end')
+      write_file('app/models/tenant/user.rb', 'module Tenant; class User; end; end')
+      write_file('app/services/tenant/loader.rb', <<~RUBY)
+        module Tenant
+          class Loader
+            "User".constantize
+          end
+        end
+      RUBY
+
+      r = result(['app/models/user.rb', 'app/models/tenant/user.rb', 'app/services/tenant/loader.rb'])
+
+      expect(r.counts['app/models/user.rb']).to eq(1)
+      expect(r.counts['app/models/tenant/user.rb']).to eq(0)
+      expect(r.edges['app/services/tenant/loader.rb'][:dependencies]).to contain_exactly('app/models/user.rb')
+    end
+
     it 'does not infer transformed string literal constantize chains' do
       write_file('app/models/user.rb', 'class User; end')
       write_file('app/services/loader.rb', <<~RUBY)
@@ -515,6 +533,47 @@ RSpec.describe StudFinder::FanIn do
       expect(r.counts['app/models/store/item.rb']).to eq(1)
       expect(r.counts['app/models/item.rb']).to eq(0)
       expect(r.edges['app/models/store/item.rb'][:dependents]).to contain_exactly('app/models/store/order.rb')
+    end
+
+    it 'infers namespaced associations inside with_options class-body wrappers' do
+      write_file('app/models/comment.rb', 'class Comment; end')
+      write_file('app/models/store/comment.rb', 'module Store; class Comment; end; end')
+      write_file('app/models/store/post.rb', <<~RUBY)
+        module Store
+          class Post
+            with_options dependent: :destroy do
+              has_many :comments
+            end
+          end
+        end
+      RUBY
+
+      r = result(['app/models/comment.rb', 'app/models/store/comment.rb', 'app/models/store/post.rb'])
+
+      expect(r.counts['app/models/store/comment.rb']).to eq(1)
+      expect(r.counts['app/models/comment.rb']).to eq(0)
+      expect(r.edges['app/models/store/comment.rb'][:dependents]).to contain_exactly('app/models/store/post.rb')
+    end
+
+    it 'infers associations inside included concern wrappers' do
+      write_file('app/models/account.rb', 'class Account; end')
+      write_file('app/models/concerns/commentable.rb', <<~RUBY)
+        module Commentable
+          included do
+            belongs_to :account
+          end
+        end
+      RUBY
+      write_file('app/models/user.rb', <<~RUBY)
+        class User
+          include Commentable
+        end
+      RUBY
+
+      r = result(['app/models/account.rb', 'app/models/concerns/commentable.rb', 'app/models/user.rb'])
+
+      expect(r.counts['app/models/account.rb']).to eq(1)
+      expect(r.edges['app/models/account.rb'][:dependents]).to contain_exactly('app/models/concerns/commentable.rb')
     end
 
     it 'can disable Rails inference' do

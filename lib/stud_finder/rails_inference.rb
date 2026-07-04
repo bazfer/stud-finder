@@ -8,6 +8,7 @@ module StudFinder
     ASSOCIATIONS = %i[belongs_to has_one has_many has_and_belongs_to_many].freeze
     COLLECTION_ASSOCIATIONS = %i[has_many has_and_belongs_to_many].freeze
     STRING_CONSTANTIZERS = %i[constantize safe_constantize].freeze
+    SAFE_CLASS_BODY_WRAPPERS = %i[with_options included class_eval class_exec].freeze
     IRREGULAR_SINGULARS = {
       'people' => 'person',
       'children' => 'child',
@@ -56,24 +57,27 @@ module StudFinder
 
     def string_constant_inference(node)
       receiver, method_name, = *node
-      if STRING_CONSTANTIZERS.include?(method_name) || method_name == :const_get
-        literal = string_literal(receiver)
-        return reference(node, literal) if literal
-      end
+      literal = string_literal(receiver)
+      return unless literal
 
-      nil
+      if STRING_CONSTANTIZERS.include?(method_name)
+        reference(node, literal, absolute: true)
+      elsif method_name == :const_get
+        reference(node, literal)
+      end
     end
 
-    def reference(node, name)
-      absolute = name.start_with?('::')
-      Inference.new(node: node, name: absolute ? name.delete_prefix('::') : name, absolute: absolute)
+    def reference(node, name, absolute: nil)
+      absolute = name.start_with?('::') if absolute.nil?
+      Inference.new(node: node, name: name.delete_prefix('::'), absolute: absolute)
     end
 
     def class_body_call?(node)
       seen_class_or_module = false
 
       node.each_ancestor do |ancestor|
-        return false if ancestor.def_type? || ancestor.defs_type? || ancestor.block_type?
+        return false if ancestor.def_type? || ancestor.defs_type?
+        return false if ancestor.block_type? && !safe_class_body_wrapper?(ancestor)
 
         if ancestor.class_type? || ancestor.module_type?
           seen_class_or_module = true
@@ -82,6 +86,11 @@ module StudFinder
       end
 
       seen_class_or_module
+    end
+
+    def safe_class_body_wrapper?(node)
+      send_node = node.send_node
+      send_node && SAFE_CLASS_BODY_WRAPPERS.include?(send_node.method_name)
     end
 
     def implicit_receiver?(receiver)
