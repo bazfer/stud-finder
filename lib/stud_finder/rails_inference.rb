@@ -38,15 +38,7 @@ module StudFinder
       return unless implicit_receiver?(node.receiver)
 
       if ASSOCIATIONS.include?(method_name)
-        association_name = symbol_name(args.first)
-        return unless association_name
-
-        explicit_class = class_name_option(args)
-        return if explicit_class == :dynamic
-
-        collection = COLLECTION_ASSOCIATIONS.include?(method_name)
-        name = explicit_class || inferred_association_class(association_name, collection: collection)
-        return reference(node, name) if name
+        return association_reference(node, method_name, args)
       elsif method_name == :composed_of
         explicit_class = class_name_option(args)
         return reference(node, explicit_class) if explicit_class.is_a?(String)
@@ -65,6 +57,19 @@ module StudFinder
       elsif method_name == :const_get
         reference(node, literal)
       end
+    end
+
+    def association_reference(node, method_name, args)
+      association_name = symbol_name(args.first)
+      return unless association_name
+      return if method_name == :belongs_to && polymorphic_belongs_to?(args)
+
+      explicit_class = class_name_option(args)
+      return if explicit_class == :dynamic
+
+      collection = COLLECTION_ASSOCIATIONS.include?(method_name)
+      name = explicit_class || inferred_association_class(association_name, collection: collection)
+      reference(node, name) if name
     end
 
     def reference(node, name, absolute: nil)
@@ -104,13 +109,24 @@ module StudFinder
     end
 
     def class_name_option(args)
-      hash = args.find(&:hash_type?)
-      return unless hash
-
-      pair = hash.pairs.find { |candidate| hash_key_name(candidate.key) == 'class_name' }
+      pair = option_pair(args, 'class_name')
       return unless pair
 
       string_literal(pair.value) || :dynamic
+    end
+
+    def polymorphic_belongs_to?(args)
+      pair = option_pair(args, 'polymorphic')
+      return false unless pair
+
+      !pair.value&.false_type?
+    end
+
+    def option_pair(args, name)
+      hash = args.find(&:hash_type?)
+      return unless hash
+
+      hash.pairs.find { |candidate| hash_key_name(candidate.key) == name }
     end
 
     def hash_key_name(node)

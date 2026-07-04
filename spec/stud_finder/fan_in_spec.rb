@@ -484,6 +484,51 @@ RSpec.describe StudFinder::FanIn do
       expect(r.edges['app/models/comment.rb'][:dependents]).to include('app/models/post.rb')
     end
 
+    it 'keeps inferring parent-side polymorphic has_many associations' do
+      write_file('app/models/comment.rb', 'class Comment; end')
+      write_file('app/models/post.rb', <<~RUBY)
+        class Post
+          has_many :comments, as: :commentable
+        end
+      RUBY
+
+      r = result(['app/models/comment.rb', 'app/models/post.rb'])
+
+      expect(r.counts['app/models/comment.rb']).to eq(1)
+      expect(r.edges['app/models/comment.rb'][:dependents]).to include('app/models/post.rb')
+    end
+
+    it 'does not infer literal polymorphic belongs_to associations' do
+      write_file('app/models/commentable.rb', 'module Commentable; end')
+      write_file('app/models/comment.rb', <<~RUBY)
+        class Comment
+          belongs_to :commentable, polymorphic: true
+        end
+      RUBY
+
+      r = result(['app/models/commentable.rb', 'app/models/comment.rb'])
+
+      expect(r.counts['app/models/commentable.rb']).to eq(0)
+      expect(r.edges['app/models/commentable.rb'][:dependents]).not_to include('app/models/comment.rb')
+      expect(r.edges['app/models/comment.rb'][:dependencies]).not_to include('app/models/commentable.rb')
+    end
+
+    it 'does not infer dynamic polymorphic belongs_to associations' do
+      write_file('app/models/commentable.rb', 'module Commentable; end')
+      write_file('app/models/comment.rb', <<~RUBY)
+        class Comment
+          polymorphic_association = true
+          belongs_to :commentable, polymorphic: polymorphic_association
+        end
+      RUBY
+
+      r = result(['app/models/commentable.rb', 'app/models/comment.rb'])
+
+      expect(r.counts['app/models/commentable.rb']).to eq(0)
+      expect(r.edges['app/models/commentable.rb'][:dependents]).not_to include('app/models/comment.rb')
+      expect(r.edges['app/models/comment.rb'][:dependencies]).not_to include('app/models/commentable.rb')
+    end
+
     it 'lets string class_name override the association symbol' do
       File.write(File.join(repo_path, 'app/models/post.rb'), <<~RUBY)
         # frozen_string_literal: true
