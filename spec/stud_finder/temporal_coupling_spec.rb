@@ -7,10 +7,10 @@ RSpec.describe StudFinder::TemporalCoupling do
   let(:repo_path) { '/fake/repo' }
   let(:files) { %w[app/models/user.rb app/models/role.rb app/services/auth.rb app/controllers/users_controller.rb] }
 
-  def make_coupling(git_output, files: self.files, min_co_changes: 2, coupling_threshold: 0.30)
+  def make_coupling(git_output, files: self.files, min_co_changes: 2, coupling_threshold: 0.30, max_commit_files: 50)
     tc = described_class.new(
       repo_path: repo_path, files: files, days: 90,
-      min_co_changes: min_co_changes, coupling_threshold: coupling_threshold
+      min_co_changes: min_co_changes, coupling_threshold: coupling_threshold, max_commit_files: max_commit_files
     )
     allow(tc).to receive(:git_log).and_return([git_output, '', double(success?: true)])
     tc.call
@@ -104,6 +104,56 @@ RSpec.describe StudFinder::TemporalCoupling do
     expect(partners).not_to be_nil
     couplings = partners.map { |p| p[:coupling] }
     expect(couplings).to eq(couplings.sort.reverse)
+  end
+
+  it 'skips bulk commits from pairs and own changes' do
+    bulk_files = (0...60).map { |i| "app/models/bulk_#{i}.rb" }
+    scoped_files = files + bulk_files
+    output = git_log_output(
+      bulk_files + ['app/models/user.rb', 'app/models/role.rb'],
+      ['app/models/user.rb', 'app/models/role.rb'],
+      ['app/models/user.rb', 'app/models/role.rb'],
+      ['app/models/user.rb'],
+      ['app/models/role.rb']
+    )
+
+    result = make_coupling(
+      output, files: scoped_files, min_co_changes: 2, coupling_threshold: 0.0, max_commit_files: 50
+    )
+    partner = result.pairs['app/models/user.rb'].find { |p| p[:path] == 'app/models/role.rb' }
+
+    expect(partner[:co_changes]).to eq(2)
+    expect(partner[:own_changes]).to eq(3)
+    expect(result.pairs.keys.grep(%r{app/models/bulk_})).to be_empty
+  end
+
+  it 'keeps bulk commits when max_commit_files is zero' do
+    bulk_files = (0...60).map { |i| "app/models/bulk_#{i}.rb" }
+    scoped_files = files + bulk_files
+    output = git_log_output(
+      bulk_files + ['app/models/user.rb', 'app/models/role.rb'],
+      ['app/models/user.rb', 'app/models/role.rb']
+    )
+
+    result = make_coupling(output, files: scoped_files, min_co_changes: 1, coupling_threshold: 0.0, max_commit_files: 0)
+    partner = result.pairs['app/models/user.rb'].find { |p| p[:path] == 'app/models/role.rb' }
+
+    expect(partner[:co_changes]).to eq(2)
+    expect(partner[:own_changes]).to eq(2)
+    expect(result.warnings).to be_empty
+  end
+
+  it 'emits a structured warning with the skipped bulk commit count' do
+    bulk_files = (0...60).map { |i| "app/models/bulk_#{i}.rb" }
+    output = git_log_output(bulk_files)
+
+    result = make_coupling(output, files: files + bulk_files, max_commit_files: 50)
+
+    expect(result.warnings).to include(
+      code: 'temporal_coupling_bulk_commits_skipped',
+      count: 1,
+      max_commit_files: 50
+    )
   end
 
   it 'ignores files not in the scored set' do

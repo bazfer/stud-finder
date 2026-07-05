@@ -46,7 +46,7 @@ module StudFinder
         added, deleted, path = line.split("\t", 3)
         next if path.nil?
 
-        relative = normalize_path(path)
+        relative = normalize_path(renamed_path(path))
         next unless file_set[relative]
 
         counts[relative] += 1
@@ -72,6 +72,7 @@ module StudFinder
         '--format=tformat:',
         '--numstat',
         '--no-merges',
+        '--find-renames',
         '--diff-filter=ACDMR'
       )
     end
@@ -83,6 +84,14 @@ module StudFinder
     def normalize_path(path)
       absolute = File.expand_path(path, @repo_path)
       absolute.start_with?("#{@repo_path}/") ? absolute.delete_prefix("#{@repo_path}/") : path
+    end
+
+    def renamed_path(path)
+      return path unless path.include?(' => ')
+
+      path.sub(/\{[^{}]* => ([^{}]*)\}/, '\\1').then do |renamed|
+        renamed == path ? path.split(' => ', 2).last : renamed
+      end
     end
 
     def numeric?(value)

@@ -54,6 +54,7 @@ module StudFinder
       filter_set: nil,
       coupling_threshold: 0.30,
       coupling_min_commits: 5,
+      coupling_max_commit_files: 50,
       cli_warnings: []
     }.freeze
 
@@ -133,7 +134,8 @@ module StudFinder
         files: result.files,
         days: @options[:churn_days],
         min_co_changes: @options[:coupling_min_commits],
-        coupling_threshold: @options[:coupling_threshold]
+        coupling_threshold: @options[:coupling_threshold],
+        max_commit_files: @options[:coupling_max_commit_files]
       ).call
 
       Edges.new(
@@ -219,6 +221,10 @@ module StudFinder
                 'Minimum co-change count for edges output (default: 5)') do |value|
           @options[:coupling_min_commits] = value
         end
+        opts.on('--coupling-max-commit-files N', Integer,
+                'Skip temporal-coupling commits touching more than N files (default: 50, 0 = unlimited)') do |value|
+          @options[:coupling_max_commit_files] = value
+        end
         opts.on('--verbose', 'Print suppressed per-file warnings to stderr') do
           @options[:verbose] = true
         end
@@ -271,6 +277,9 @@ module StudFinder
       raise ValidationError, 'Error: --js-timeout must be positive.' if @options[:js_timeout] <= 0
 
       raise ValidationError, 'Error: --coupling-min-commits must be positive.' if @options[:coupling_min_commits] <= 0
+      if @options[:coupling_max_commit_files].negative?
+        raise ValidationError, 'Error: --coupling-max-commit-files must be zero or positive.'
+      end
       unless (0.0..1.0).cover?(@options[:coupling_threshold])
         raise ValidationError, 'Error: --coupling-threshold must be between 0.0 and 1.0.'
       end
@@ -335,9 +344,22 @@ module StudFinder
         files: files,
         days: @options[:churn_days],
         min_co_changes: @options[:coupling_min_commits],
-        coupling_threshold: @options[:coupling_threshold]
+        coupling_threshold: @options[:coupling_threshold],
+        max_commit_files: @options[:coupling_max_commit_files]
       ).call
+      record_coupling_warnings(result.warnings)
       result.pairs.transform_values { |partners| aggregate_partners(partners) }
+    end
+
+    def record_coupling_warnings(warnings)
+      @options[:cli_warnings].concat(warnings)
+      bulk_warning = warnings.find do |warning|
+        warning.is_a?(Hash) && warning[:code] == 'temporal_coupling_bulk_commits_skipped'
+      end
+      return unless @options[:verbose] && bulk_warning
+
+      @stderr.puts "Temporal coupling: skipped #{bulk_warning[:count]} bulk commits " \
+                   "(> #{bulk_warning[:max_commit_files]} files)."
     end
 
     # Reduces a file's partner entries to its strongest-coupling partner.

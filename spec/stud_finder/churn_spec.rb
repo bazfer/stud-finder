@@ -32,6 +32,36 @@ RSpec.describe StudFinder::Churn do
     )
   end
 
+  it 'attributes brace-form rename churn to the new path' do
+    result = run_churn(
+      stdout: "10\t2\tapp/{models => services}/thing.rb\n",
+      files: ['app/services/thing.rb']
+    )
+
+    expect(result.churn_commits).to eq('app/services/thing.rb' => 1)
+    expect(result.churn_lines).to eq('app/services/thing.rb' => 12)
+  end
+
+  it 'attributes plain rename churn to the new path' do
+    result = run_churn(
+      stdout: "5\t1\told.rb => new.rb\n",
+      files: ['new.rb']
+    )
+
+    expect(result.churn_commits).to eq('new.rb' => 1)
+    expect(result.churn_lines).to eq('new.rb' => 6)
+  end
+
+  it 'leaves normal numstat paths unchanged' do
+    result = run_churn(
+      stdout: "7\t3\tapp/models/user.rb\n",
+      files: ['app/models/user.rb']
+    )
+
+    expect(result.churn_commits).to eq('app/models/user.rb' => 1)
+    expect(result.churn_lines).to eq('app/models/user.rb' => 10)
+  end
+
   it 'counts binary file touches without adding line churn' do
     result = run_churn(stdout: "-\t-\tapp/models/user.rb\n")
 
@@ -48,6 +78,7 @@ RSpec.describe StudFinder::Churn do
       '--format=tformat:',
       '--numstat',
       '--no-merges',
+      '--find-renames',
       '--diff-filter=ACDMR'
     )
   end

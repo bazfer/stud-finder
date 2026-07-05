@@ -81,6 +81,7 @@ RSpec.describe StudFinder::CLI do
     expect(stdout.string).to include('--js-timeout')
     expect(stdout.string).to include('--no-rails-inference')
     expect(stdout.string).to include('--coverage')
+    expect(stdout.string).to include('--coupling-max-commit-files N')
   end
 
   it 'disables Rails inference with --no-rails-inference' do
@@ -609,6 +610,15 @@ RSpec.describe StudFinder::CLI do
 
         expect(status).to eq(1)
         expect(stderr).to include('--coupling-min-commits must be positive')
+      end
+    end
+
+    it 'rejects a negative --coupling-max-commit-files' do
+      make_repo(file_count: 5) do |root|
+        status, _stdout, stderr = run_cli(['edges', 'app/models/model_0.rb', root, '--coupling-max-commit-files', '-1'])
+
+        expect(status).to eq(1)
+        expect(stderr).to include('--coupling-max-commit-files must be zero or positive')
       end
     end
 
