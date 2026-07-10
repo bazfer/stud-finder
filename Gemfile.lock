@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    stud-finder (0.1.0)
+    stud-finder (0.2.0)
       csv (>= 3.0, < 4.0)
       rexml (>= 3.0, < 4.0)
       rubocop (>= 1.0, < 2.0)

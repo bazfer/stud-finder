@@ -82,7 +82,7 @@ Computed from git history over a configurable window (default: 180 days). Langua
 
 *"If this file breaks, will tests catch it?"*
 
-Low coverage on a high-risk file is compounded danger — no blast-radius detection, no complexity safety net, no test catch. Coverage is measured as an inverse (0% coverage = maximum penalty), and files absent from the coverage report are handled via coverage fallback rather than penalized falsely.
+Low coverage on a high-risk file is compounded danger — no blast-radius detection, no complexity safety net, no test catch. Coverage is measured as inverse risk (`1 − coverage`) and percentile-ranked with the other scoring signals. Files absent from the coverage report score as maximum coverage risk but render as `—` so missing data is distinct from explicit 0% coverage.
 
 Supports Cobertura XML (RSpec + SimpleCov), LCOV (Jest, lcov), and SimpleCov JSON resultsets. Auto-detected by file extension.
 
@@ -103,7 +103,8 @@ score = 0.2941 × fan_in_pct + 0.1176 × fan_out_pct + 0.2941 × complexity_pct 
 
 **5-factor formula (with coverage):**
 ```
-score = 0.25 × fan_in_pct + 0.10 × fan_out_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 × (1 − coverage)
+coverage_risk_pct = percentile_rank(1 − coverage)
+score = 0.25 × fan_in_pct + 0.10 × fan_out_pct + 0.25 × complexity_pct + 0.25 × churn_pct + 0.15 × coverage_risk_pct
 ```
 
 ---
