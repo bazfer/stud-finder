@@ -672,6 +672,9 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       path: 'app/models/user.rb',
       score: 0.5,
       classification: 'leaf',
+      new_file: false,
+      age_days: 42,
+      escalation: '',
       fan_in: 0,
       fan_in_pct: 0.0,
       fan_out: 1,
@@ -702,6 +705,17 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
     expect(cli.send(:csv_file, row)).to include(12, '0.7500')
     expect(cli.send(:table_row, row)).to include('12', '0.7500')
     expect(cli.send(:markdown_row, row)).not_to include('0.7500')
+  end
+
+  it 'includes age_days in table, markdown, JSON, and CSV output' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS).to include('age_days')
+    expect(described_class::MARKDOWN_COLUMNS).to include('age_days')
+    expect(cli.send(:json_file, row)).to include(age_days: 42)
+    expect(cli.send(:csv_file, row)).to include(42)
+    expect(cli.send(:table_row, row)).to include('42')
+    expect(cli.send(:markdown_row, row)).to include('| false | 42 |')
   end
 
   it 'computes LOC percentiles separately for each language' do

@@ -143,4 +143,47 @@ RSpec.describe StudFinder::Newness do
       expect(result['app/models/new_name.rb'][:escalation]).to eq('recency_floor')
     end
   end
+
+  it 'rebases git-log paths when scanning a subdirectory' do
+    make_repo do |root|
+      file = 'app/models/user.rb'
+      write_file(root, file, "class User\nend\n")
+      commit_at(root, 'add user', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, file), 'a') { |f| f.puts "# change #{i}" }
+        commit_at(root, "touch user #{i}", now - ((80 - i) * 86_400))
+      end
+
+      data = metadata(File.join(root, 'app'), ['models/user.rb'])
+
+      expect(data['models/user.rb'][:total_commits]).to eq(4)
+      expect(data['models/user.rb'][:age_days]).to eq(90)
+      expect(data['models/user.rb'][:new_file]).to be(false)
+    end
+  end
+
+  it 'carries unambiguous git rename history forward to the new path' do
+    make_repo do |root|
+      old_file = 'app/models/old_name.rb'
+      new_file = 'app/models/new_name.rb'
+      write_file(root, old_file, "class OldName\nend\n")
+      commit_at(root, 'add old name', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, old_file), 'a') { |f| f.puts "# change #{i}" }
+        commit_at(root, "touch old name #{i}", now - ((80 - i) * 86_400))
+      end
+      system('git', '-C', root, 'mv', old_file, new_file)
+      commit_at(root, 'rename old name to new name', now - 86_400)
+
+      data = metadata(root, [new_file])
+      result = apply([{ path: new_file, score: 0.01, classification: 'leaf' }],
+                     { new_file => { dependencies: [] } }, data)
+
+      expect(data[new_file][:total_commits]).to eq(5)
+      expect(data[new_file][:age_days]).to eq(90)
+      expect(result[new_file][:new_file]).to be(false)
+      expect(result[new_file][:classification]).to eq('leaf')
+      expect(result[new_file][:escalation]).to eq('')
+    end
+  end
 end

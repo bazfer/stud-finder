@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'open3'
+require 'pathname'
 require 'set'
 
 module StudFinder
@@ -91,13 +92,14 @@ module StudFinder
       wanted = @files.to_set
       first_commit_epoch = {}
       total_commits = Hash.new(0)
+      aliases = {}
       current_epoch = nil
       touched = Set.new
 
       flush_commit = lambda do
         touched.each do |file|
           total_commits[file] += 1
-          first_commit_epoch[file] = current_epoch if current_epoch
+          first_commit_epoch[file] = [first_commit_epoch[file], current_epoch].compact.min if current_epoch
         end
         touched.clear
       end
@@ -110,7 +112,17 @@ module StudFinder
         end
 
         paths_for_status(line).each do |path|
-          touched << path if wanted.include?(path)
+          canonical = canonical_path(path, aliases)
+          touched << canonical if wanted.include?(canonical)
+        end
+
+        old_path, new_path = rename_paths_for_status(line)
+        next unless old_path && new_path
+
+        canonical_new = canonical_path(new_path, aliases)
+        if wanted.include?(canonical_new)
+          touched << canonical_new
+          aliases[old_path] = canonical_new
         end
       end
       flush_commit.call if current_epoch
@@ -124,10 +136,64 @@ module StudFinder
       parts = line.split("\t")
       status = parts.first.to_s
       if status.start_with?('R') || status.start_with?('C')
-        [parts[2]].compact
+        [rebase_to_analysis_root(parts[2])].compact
       else
-        [parts[1]].compact
+        [rebase_to_analysis_root(parts[1])].compact
       end
+    end
+
+    def rename_paths_for_status(line)
+      return [nil, nil] if line.nil? || line.empty?
+
+      parts = line.split("\t")
+      return [nil, nil] unless parts.first.to_s.start_with?('R')
+
+      [rebase_to_analysis_root(parts[1]), rebase_to_analysis_root(parts[2])]
+    end
+
+    def canonical_path(path, aliases)
+      canonical = path
+      seen = Set.new
+      while aliases.key?(canonical) && !seen.include?(canonical)
+        seen << canonical
+        canonical = aliases[canonical]
+      end
+      canonical
+    end
+
+    # git log emits paths relative to the repository root even when -C points at
+    # an analysis subdirectory. Rebase those records to the analysis root so they
+    # can be compared with FileCollector paths (for example, app/models/user.rb
+    # becomes models/user.rb when scanning <repo>/app).
+    def rebase_to_analysis_root(path)
+      return nil if path.nil? || path.empty?
+      return path unless analysis_root_prefix
+
+      path.start_with?(analysis_root_prefix) ? path.delete_prefix(analysis_root_prefix) : nil
+    end
+
+    def analysis_root_prefix
+      return @analysis_root_prefix if defined?(@analysis_root_prefix)
+
+      @analysis_root_prefix = begin
+        toplevel = git_toplevel
+        analysis_abs = File.realpath(@repo_path)
+        if toplevel.nil? || analysis_abs == toplevel
+          nil
+        else
+          prefix = Pathname.new(analysis_abs).relative_path_from(Pathname.new(toplevel)).to_s
+          prefix.empty? || prefix == '.' || prefix.start_with?('..') ? nil : "#{prefix}/"
+        end
+      end
+    rescue Errno::ENOENT
+      nil
+    end
+
+    def git_toplevel
+      return @git_toplevel if defined?(@git_toplevel)
+
+      stdout, _stderr, status = Open3.capture3('git', '-C', @repo_path, 'rev-parse', '--show-toplevel')
+      @git_toplevel = status.success? ? File.realpath(stdout.strip) : nil
     end
 
     def age_days(first_epoch)
