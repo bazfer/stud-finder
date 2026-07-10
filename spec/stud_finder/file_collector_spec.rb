@@ -168,4 +168,16 @@ end
       expect(stderr.string).to include('Warning: only 5 files found')
     end
   end
+
+  it 'treats files with invalid UTF-8 as not auto-generated' do
+    make_repo do |root|
+      path = File.join(root, 'app/models/bad.rb')
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(path, "\xff\xfe not utf-8")
+
+      collector = described_class.new(path: root)
+
+      expect(collector.send(:auto_generated?, path)).to be(false)
+    end
+  end
 end

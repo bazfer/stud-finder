@@ -12,6 +12,7 @@ module StudFinder
 
     COMPLEXITY_COP = 'Metrics/CyclomaticComplexity'
     COMPLEXITY_PATTERN = %r{\[(\d+)/0\]}
+    INVALID_ENCODING_PATTERN = /invalid byte sequence/i
     PARSE_ERROR_COPS = %w[Lint/Syntax].freeze
     BATCH_SIZE = 500
     RUBOCOP_CONFIG = <<~YAML
@@ -88,6 +89,11 @@ module StudFinder
         next unless file_set[relative]
 
         offenses = Array(entry['offenses'])
+        if invalid_encoding_error?(offenses)
+          counts[relative] = 0
+          next
+        end
+
         if parse_error?(offenses)
           skipped << relative
           counts.delete(relative)
@@ -113,6 +119,12 @@ module StudFinder
 
     def parse_error?(offenses)
       offenses.any? { |offense| PARSE_ERROR_COPS.include?(offense['cop_name']) || offense['fatal'] == true }
+    end
+
+    def invalid_encoding_error?(offenses)
+      offenses.any? do |offense|
+        parse_error?([offense]) && offense.fetch('message', '').match?(INVALID_ENCODING_PATTERN)
+      end
     end
 
     def normalize_path(path)

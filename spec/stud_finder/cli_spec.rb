@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'csv'
+require 'open3'
 require 'spec_helper'
 require 'stud_finder/cli'
 
@@ -319,6 +320,23 @@ RSpec.describe StudFinder::CLI do
       expect(stderr).to include("stud-finder → computing Ruby churn (git log, 12 days)...\n")
       expect(stderr).to include("stud-finder → normalizing + scoring 4 files...\n")
       expect(stderr).to include("stud-finder → done\n")
+    end
+  end
+
+  it 'keeps invalid UTF-8 files in JSON output when run through the executable' do
+    make_repo(file_count: 4) do |root|
+      path = File.join(root, 'app/models/bad.rb')
+      File.binwrite(path, "\xff\xfe not utf-8")
+      system('git', '-C', root, 'add', '.')
+      system('git', '-C', root, 'commit', '-qm', 'add invalid utf-8 file')
+
+      stdout, stderr, process_status = Open3.capture3(
+        'bundle', 'exec', 'ruby', File.expand_path('../../bin/stud-finder', __dir__),
+        root, '--min-files', '1', '--output', 'json'
+      )
+
+      expect(process_status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch('ruby').map { |row| row['path'] }).to include('app/models/bad.rb')
     end
   end
 
