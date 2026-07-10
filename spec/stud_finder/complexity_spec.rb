@@ -117,6 +117,7 @@ RSpec.describe StudFinder::Complexity do
       'rubocop',
       '--config', kind_of(String),
       '--format', 'json',
+      '--',
       'app/models/user.rb',
       chdir: '/repo'
     )
@@ -124,6 +125,22 @@ RSpec.describe StudFinder::Complexity do
     expect(captured_config).to include('Metrics/CyclomaticComplexity:')
     expect(captured_config).to include('Enabled: true')
     expect(captured_config).to include('Max: 0')
+  end
+
+  it 'places an option terminator before filenames that start with a dash' do
+    captured_args = nil
+    allow(Open3).to receive(:capture3) do |*args|
+      captured_args = args
+      [rubocop_json([]), '', status(0)]
+    end
+
+    result = described_class.new(repo_path: '/repo', files: ['-legacy.rb']).call
+
+    expect(result.counts).to eq('-legacy.rb' => 0)
+    dash_filename_index = captured_args.index do |arg|
+      arg.is_a?(String) && arg.start_with?('-') && arg.end_with?('.rb')
+    end
+    expect(captured_args.fetch(dash_filename_index - 1)).to eq('--')
   end
 
   it 'runs RuboCop against collected files in relative-path batches' do
@@ -137,7 +154,7 @@ RSpec.describe StudFinder::Complexity do
       end
       batches = []
       allow(Open3).to receive(:capture3) do |*args, **kwargs|
-        batch = args.drop(args.index('--format') + 2)
+        batch = args.drop(args.index('--') + 1)
         batches << [batch, kwargs]
         payload = batch.map.with_index do |file, offset|
           score = file == 'app/models/model_500.rb' ? 3 : (offset % 2) + 1

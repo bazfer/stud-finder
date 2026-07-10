@@ -72,6 +72,7 @@ module StudFinder
           'rubocop',
           '--config', config.path,
           '--format', 'json',
+          '--',
           *batch,
           chdir: @repo_path
         )
