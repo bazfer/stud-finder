@@ -11,6 +11,12 @@ module StudFinder
 
     TOOL_MISSING = 'js_tools_missing'
     TIMEOUT = 'js_depcruise_timeout'
+    DEPCRUISE_NO_CONFIG = 'js_depcruise_no_config'
+    DEPCRUISE_FAILED = 'js_depcruise_failed'
+
+    NO_CONFIG_MESSAGE = 'no dependency-cruiser config found; ran with --no-config. Path aliases ' \
+                        '(tsconfig paths, webpack aliases) will not resolve — JS fan_in may be undercounted. ' \
+                        "Run 'npx depcruise --init' in the target repo for accurate results."
 
     def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr)
       @repo_path = File.expand_path(repo_path)
@@ -25,16 +31,17 @@ module StudFinder
       depcruise = depcruise_binary
       return missing_tools unless depcruise
 
-      stdout, _stderr, status = run_depcruise(depcruise)
-      return missing_tools unless status.success?
+      stdout, stderr, status, warnings = run_depcruise(depcruise)
+      return depcruise_failed(stderr) unless status.success?
 
       counts, fan_out_counts, edges = parse(stdout)
-      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: [])
+      warnings.each { |warning| warn(warning.fetch(:code), warning.fetch(:message)) }
+      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: warnings)
     rescue Timeout::Error
       warn(TIMEOUT)
       Result.new(counts: zero_counts, fan_out_counts: zero_counts, edges: empty_edges, warnings: [TIMEOUT])
-    rescue JSON::ParserError, KeyError, TypeError
-      missing_tools
+    rescue JSON::ParserError, KeyError, TypeError => e
+      depcruise_failed("malformed dependency-cruiser JSON: #{e.message}")
     end
 
     private
@@ -60,7 +67,18 @@ module StudFinder
 
     def run_depcruise(depcruise)
       Timeout.timeout(@js_timeout) do
-        Open3.capture3(depcruise, '--output-type', 'json', '.', chdir: @repo_path)
+        primary_stdout, primary_stderr, primary_status = Open3.capture3(depcruise, '--output-type', 'json', '.',
+                                                                        chdir: @repo_path)
+        return [primary_stdout, primary_stderr, primary_status, []] if primary_status.success?
+
+        retry_stdout, retry_stderr, retry_status = Open3.capture3(
+          depcruise, '--output-type', 'json', '.', '--no-config', chdir: @repo_path
+        )
+        if retry_status.success?
+          [retry_stdout, retry_stderr, retry_status, [{ code: DEPCRUISE_NO_CONFIG, message: NO_CONFIG_MESSAGE }]]
+        else
+          [primary_stdout, primary_stderr, primary_status, []]
+        end
       end
     end
 
@@ -106,6 +124,22 @@ module StudFinder
       Result.new(counts: zero_counts, fan_out_counts: zero_counts, edges: empty_edges, warnings: [TOOL_MISSING])
     end
 
+    def depcruise_failed(stderr)
+      detail = first_line(stderr)
+      message = detail.empty? ? nil : detail
+      warn(DEPCRUISE_FAILED, message)
+      Result.new(
+        counts: zero_counts,
+        fan_out_counts: zero_counts,
+        edges: empty_edges,
+        warnings: [{ code: DEPCRUISE_FAILED, message: message }]
+      )
+    end
+
+    def first_line(text)
+      text.to_s.lines.first.to_s.strip
+    end
+
     def zero_counts
       @files.to_h { |file| [file, 0] }
     end
@@ -114,8 +148,9 @@ module StudFinder
       @files.to_h { |file| [file, { dependents: [], dependencies: [] }] }
     end
 
-    def warn(code)
-      @stderr.puts "Warning: #{code}"
+    def warn(code, message = nil)
+      suffix = message.to_s.empty? ? '' : ": #{message}"
+      @stderr.puts "Warning: #{code}#{suffix}"
     end
   end
 end

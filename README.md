@@ -120,6 +120,14 @@ Ruby fan-in includes conservative Rails-style implicit references by default. As
 - complexity via `eslint` (`--rule '{"complexity":["error",0]}'`)
 - coverage: LCOV (`.info` format)
 
+Stud Finder first runs dependency-cruiser with the target project's normal config so path aliases,
+TypeScript config, and bundler resolution can be honored. If that fails because no usable
+configuration is available, it retries once with `--no-config` and reports
+`js_depcruise_no_config`. The fallback keeps analysis running, but aliases such as
+`tsconfig` paths and webpack aliases will not resolve, so JS/TS `fan_in` may be undercounted.
+For alias-heavy TypeScript projects, run `npx depcruise --init` in the target repo for accurate
+results.
+
 Each language gets its own ranking section in the output — Ruby and JS are not pooled.
 
 ---
