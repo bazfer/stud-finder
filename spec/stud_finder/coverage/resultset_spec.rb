@@ -96,7 +96,7 @@ RSpec.describe StudFinder::Coverage::Resultset do
     )
 
     expect(coverage['app/models/user.rb']).to eq(2.0 / 3.0)
-    expect(coverage['user.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('user.rb')
   end
 
   it 'leaves unmatched absolute SimpleCov paths safely unmapped' do
@@ -111,10 +111,10 @@ RSpec.describe StudFinder::Coverage::Resultset do
       files: ['app/models/user.rb']
     )
 
-    expect(coverage['app/models/user.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('app/models/user.rb')
   end
 
-  it 'maps files absent from the resultset to 0.0 coverage' do
+  it 'omits files absent from the resultset so missingness reaches the scorer' do
     coverage = parse_resultset(
       {
         'RSpec' => {
@@ -125,7 +125,7 @@ RSpec.describe StudFinder::Coverage::Resultset do
       }
     )
 
-    expect(coverage['app/models/post.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('app/models/post.rb')
   end
 
   it 'max-merges line hits from multiple suites' do

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'csv'
 require 'json'
 require 'open3'
 require 'spec_helper'
@@ -68,20 +69,54 @@ RSpec.describe 'fixture repo integration' do
     expect(files['app/services/auth_service.rb']['score']).to be > files['app/services/post_service.rb']['score']
   end
 
-  it 'scores files absent from a partial Cobertura report with the five-factor formula' do
-    coverage_path = File.join(repo_path, 'coverage/coverage.xml')
-    coverage_xml = File.read(coverage_path)
-    File.write(coverage_path, coverage_xml.sub(%r{\s*<class filename="app/models/post\.rb" line-rate="0\.95" />}, ''))
+  it 'renders absent coverage as an em dash in JSON while scoring with max coverage risk' do
+    coverage_path = partial_cobertura_without_post
 
     stdout, stderr, status = run_cli('--min-files', '5', '--output', 'json', '--ruby-coverage', coverage_path)
     payload = JSON.parse(stdout)
 
     expect(status).to be_success, stderr
     files = payload['ruby'].to_h { |file| [file['path'], file] }
-    expect(files['app/models/post.rb']['coverage']).to eq(0.0)
-    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.3944)
+    expect(files['app/models/post.rb']['coverage']).to eq('—')
+    expect(files['app/models/post.rb']['coverage']).not_to eq(0.0)
+    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.3611)
     expect(files['app/models/profile.rb']['coverage']).to eq(0.75)
-    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.2542)
+    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.25)
+  end
+
+  it 'renders absent coverage as an em dash in table output' do
+    coverage_path = partial_cobertura_without_post
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'table', '--ruby-coverage', coverage_path)
+
+    expect(status).to be_success, stderr
+    post_line = stdout.lines.find { |line| line.include?('app/models/post.rb') }
+    expect(post_line).to match(/\s—\s*$/)
+    expect(post_line).not_to match(/\s0(?:\.0+|%)?\s*$/)
+  end
+
+  it 'renders absent coverage as an em dash in markdown output' do
+    coverage_path = partial_cobertura_without_post
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'markdown', '--ruby-coverage', coverage_path)
+
+    expect(status).to be_success, stderr
+    post_line = stdout.lines.find { |line| line.include?('| app/models/post.rb |') }
+    coverage_cell = post_line.split('|').map(&:strip)[-2]
+    expect(coverage_cell).to eq('—')
+    expect(coverage_cell).not_to eq('0.0')
+  end
+
+  it 'renders absent coverage as an em dash in CSV output' do
+    coverage_path = partial_cobertura_without_post
+
+    stdout, stderr, status = run_cli('--min-files', '5', '--output', 'csv', '--ruby-coverage', coverage_path)
+
+    expect(status).to be_success, stderr
+    rows = CSV.parse(stdout, headers: true)
+    post_row = rows.find { |row| row['file'] == 'app/models/post.rb' }
+    expect(post_row['coverage']).to eq('—')
+    expect(post_row['coverage']).not_to eq('0.0')
   end
 
   it 'emits markdown output' do
@@ -179,6 +214,13 @@ RSpec.describe 'fixture repo integration' do
 
   def run_cli(*args)
     Open3.capture3('bundle', 'exec', 'ruby', bin_path, repo_path, *args)
+  end
+
+  def partial_cobertura_without_post
+    coverage_path = File.join(repo_path, 'coverage/coverage.xml')
+    coverage_xml = File.read(coverage_path)
+    File.write(coverage_path, coverage_xml.sub(%r{\s*<class filename="app/models/post\.rb" line-rate="0\.95" />}, ''))
+    coverage_path
   end
 
   def initialize_git_repo

@@ -35,7 +35,8 @@ module StudFinder
         complexity: Normalizer.percentile_rank(@complexity, @files),
         churn: composite_churn_pct,
         instability: instability_pct,
-        coupling: coupling_pct
+        coupling: coupling_pct,
+        coverage: coverage_risk_pct
       }
 
       rows = @files.each_with_index.map do |file, index|
@@ -79,9 +80,8 @@ module StudFinder
     def weighted_score(file, pcts)
       return active_weights_score(file, pcts) unless coverage_available?
 
-      file_coverage = @coverage.fetch(file, 0.0)
       structural_score(@normalized_weights, file, pcts) +
-        (@normalized_weights[:coverage] * (1.0 - file_coverage))
+        (@normalized_weights[:coverage] * pcts[:coverage].fetch(file))
     end
 
     def active_weights_score(file, pcts)
@@ -123,7 +123,7 @@ module StudFinder
         churn_lines: @churn_lines.fetch(file, 0).to_i,
         churn_pct: pcts[:churn].fetch(file).round(4),
         **coupling_fields(file, pcts),
-        coverage: coverage_available? ? @coverage.fetch(file, 0.0).round(4) : nil
+        coverage: coverage_value(file)
       }
     end
 
@@ -155,6 +155,20 @@ module StudFinder
         [file, partner ? partner.fetch(:max_coupling, 0.0).to_f : 0.0]
       end
       Normalizer.percentile_rank(values, @files)
+    end
+
+    def coverage_risk_pct
+      return {} unless coverage_available?
+
+      values = @files.to_h { |file| [file, 1.0 - @coverage.fetch(file, 0.0)] }
+      Normalizer.percentile_rank(values, @files)
+    end
+
+    def coverage_value(file)
+      return nil unless coverage_available?
+      return '—' unless @coverage.key?(file)
+
+      @coverage.fetch(file).round(4)
     end
 
     def coverage_available?

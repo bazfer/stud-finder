@@ -766,6 +766,8 @@ module StudFinder
     def format_coverage(coverage)
       return 'n/a' if coverage.nil?
 
+      return coverage if coverage.is_a?(String)
+
       "#{(coverage * 100).round}%"
     end
 

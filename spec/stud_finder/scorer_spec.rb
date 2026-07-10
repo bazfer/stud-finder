@@ -42,6 +42,13 @@ RSpec.describe StudFinder::Scorer do
     expect(scores).to all(be_between(0.0, 1.0).inclusive)
   end
 
+  it 'keeps the four-factor path unchanged when coverage is unavailable' do
+    rows = scorer.call.to_h { |row| [row[:path], row] }
+
+    expect(rows['b.rb'][:score]).to eq(0.7647)
+    expect(rows['b.rb'][:coverage]).to be_nil
+  end
+
   it 'classifies by fan_in percentile only' do
     rows = scorer.call.to_h { |row| [row[:path], row] }
 
@@ -55,17 +62,19 @@ RSpec.describe StudFinder::Scorer do
                   weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
            .to_h { |row| [row[:path], row] }
 
-    expect(rows['b.rb'][:score]).to be_within(0.0001).of(0.725)
+    expect(rows['b.rb'][:score]).to be_within(0.0001).of(0.7)
     expect(rows['b.rb'][:coverage]).to eq(0.5)
   end
 
-  it 'uses five-factor scoring with uncovered coverage for a file absent from coverage data' do
+  it 'uses maximum coverage risk for scoring but renders an em dash for a file absent from coverage data' do
     rows = scorer(coverage: { 'a.rb' => 1.0, 'c.rb' => 0.0, 'd.rb' => 0.25 },
-                  weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }).call
+                  weights: { fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0 }).call
            .to_h { |row| [row[:path], row] }
 
-    expect(rows['b.rb'][:score]).to be_within(0.0001).of(0.8)
-    expect(rows['b.rb'][:coverage]).to eq(0.0)
+    expect(rows['b.rb'][:score]).to eq(rows['c.rb'][:score])
+    expect(rows['b.rb'][:score]).to be > rows['d.rb'][:score]
+    expect(rows['b.rb'][:coverage]).to eq('—')
+    expect(rows['c.rb'][:coverage]).to eq(0.0)
   end
 
   it 'a file with higher fan_out outscores an otherwise-identical file' do
@@ -91,17 +100,17 @@ RSpec.describe StudFinder::Scorer do
     expect(weights.values.sum).to be_within(0.0001).of(1.0)
   end
 
-  it 'uses 1.0 minus coverage fraction directly instead of percentile ranking coverage' do
-    scorer_with_coverage = scorer(coverage: { 'a.rb' => 0.0, 'c.rb' => 1.0, 'd.rb' => 1.0 },
-                                  weights: { fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0 })
+  it 'percentile-ranks coverage risk so equivalent spreads contribute equivalent scores' do
+    weights = { fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0 }
+    low_coverage_rows = scorer(coverage: { 'a.rb' => 0.2, 'b.rb' => 0.8, 'c.rb' => 1.0, 'd.rb' => 1.0 },
+                               weights: weights).call.to_h { |row| [row[:path], row] }
+    high_coverage_rows = scorer(coverage: { 'a.rb' => 0.85, 'b.rb' => 0.95, 'c.rb' => 1.0, 'd.rb' => 1.0 },
+                                weights: weights).call.to_h { |row| [row[:path], row] }
 
-    expect(scorer_with_coverage.normalized_weights)
-      .to eq(fan_in: 0.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 1.0)
-    rows = scorer_with_coverage.call.to_h { |row| [row[:path], row] }
-
-    expect(rows['a.rb'][:score]).to eq(1.0)
-    expect(rows['b.rb'][:score]).to eq(1.0)
-    expect(rows['d.rb'][:score]).to eq(0.0)
+    expect(low_coverage_rows['a.rb'][:score] - low_coverage_rows['b.rb'][:score])
+      .to eq(high_coverage_rows['a.rb'][:score] - high_coverage_rows['b.rb'][:score])
+    expect(low_coverage_rows['a.rb'][:score]).to eq(1.0)
+    expect(high_coverage_rows['a.rb'][:score]).to eq(1.0)
   end
 
   it 'raises when branch threshold is not less than trunk threshold' do
