@@ -45,14 +45,14 @@ RSpec.describe StudFinder::Coverage::Cobertura do
     expect(coverage['app/models/user.rb']).to eq(0.5)
   end
 
-  it 'maps files absent from the report to 0.0 coverage' do
+  it 'omits files absent from the report so missingness reaches the scorer' do
     coverage = parse(<<~XML)
       <coverage><packages><package><classes>
         <class filename="app/models/user.rb" line-rate="0.75" />
       </classes></package></packages></coverage>
     XML
 
-    expect(coverage['app/models/post.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('app/models/post.rb')
   end
 
   it 'handles multiple packages and classes' do

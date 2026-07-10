@@ -43,7 +43,7 @@ RSpec.describe StudFinder::Coverage::Lcov do
     expect(coverage['app/models/user.rb']).to eq(2.0 / 3.0)
   end
 
-  it 'maps absent files to 0.0 coverage' do
+  it 'omits absent files so missingness reaches the scorer' do
     coverage = parse(<<~LCOV)
       SF:app/models/user.rb
       LF:4
@@ -52,7 +52,7 @@ RSpec.describe StudFinder::Coverage::Lcov do
     LCOV
 
     expect(coverage['app/models/user.rb']).to eq(0.75)
-    expect(coverage['app/models/post.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('app/models/post.rb')
   end
 
   it 'returns 0.0 when a record has no DA lines' do
@@ -96,7 +96,7 @@ RSpec.describe StudFinder::Coverage::Lcov do
     )
 
     expect(coverage['app/models/user.rb']).to eq(2.0 / 3.0)
-    expect(coverage['user.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('user.rb')
   end
 
   it 'leaves unmatched absolute SF paths safely unmapped' do
@@ -107,7 +107,7 @@ RSpec.describe StudFinder::Coverage::Lcov do
       end_of_record
     LCOV
 
-    expect(coverage['app/models/user.rb']).to eq(0.0)
+    expect(coverage).not_to have_key('app/models/user.rb')
   end
 
   it 'strips the target project root from absolute SF paths' do
