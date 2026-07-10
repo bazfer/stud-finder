@@ -11,14 +11,16 @@ module StudFinder
 
     attr_reader :normalized_weights
 
-    def initialize(files:, fan_in:, fan_out:, complexity:, churn:, churn_lines: nil, coverage: nil,
-                   weights: DEFAULT_WEIGHTS, branch_threshold: 50, trunk_threshold: 85, coupling: nil)
+    def initialize(files:, fan_in:, fan_out:, complexity:, churn:, churn_lines: nil, loc: nil, loc_pct: nil,
+                   coverage: nil, weights: DEFAULT_WEIGHTS, branch_threshold: 50, trunk_threshold: 85, coupling: nil)
       @files = files
       @fan_in = fan_in
       @fan_out = fan_out
       @complexity = complexity
       @churn = churn
       @churn_lines = churn_lines || churn
+      @loc = loc || @files.to_h { |file| [file, 0] }
+      @loc_pct = loc_pct
       @coverage = coverage
       @weights = weights
       @branch_threshold = branch_threshold
@@ -34,6 +36,7 @@ module StudFinder
         fan_out: Normalizer.percentile_rank(@fan_out, @files),
         complexity: Normalizer.percentile_rank(@complexity, @files),
         churn: composite_churn_pct,
+        loc: @loc_pct || Normalizer.percentile_rank(@loc, @files),
         instability: instability_pct,
         coupling: coupling_pct,
         coverage: coverage_risk_pct
@@ -122,6 +125,8 @@ module StudFinder
         churn_commits: @churn.fetch(file, 0).to_i,
         churn_lines: @churn_lines.fetch(file, 0).to_i,
         churn_pct: pcts[:churn].fetch(file).round(4),
+        loc: @loc.fetch(file, 0).to_i,
+        loc_pct: pcts[:loc].fetch(file).round(4),
         **coupling_fields(file, pcts),
         coverage: coverage_value(file)
       }

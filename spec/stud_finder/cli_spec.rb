@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'csv'
+require 'open3'
 require 'spec_helper'
 require 'stud_finder/cli'
 
@@ -322,6 +323,23 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  it 'keeps invalid UTF-8 files in JSON output when run through the executable' do
+    make_repo(file_count: 4) do |root|
+      path = File.join(root, 'app/models/bad.rb')
+      File.binwrite(path, "\xff\xfe not utf-8")
+      system('git', '-C', root, 'add', '.')
+      system('git', '-C', root, 'commit', '-qm', 'add invalid utf-8 file')
+
+      stdout, stderr, process_status = Open3.capture3(
+        'bundle', 'exec', 'ruby', File.expand_path('../../bin/stud-finder', __dir__),
+        root, '--min-files', '1', '--output', 'json'
+      )
+
+      expect(process_status.exitstatus).to eq(0), stderr
+      expect(JSON.parse(stdout).fetch('ruby').map { |row| row['path'] }).to include('app/models/bad.rb')
+    end
+  end
+
   it 'emits spreadsheet-ready csv output' do
     make_repo(file_count: 5) do |root|
       comma_path = File.join(root, 'app/models/model,with_comma.rb')
@@ -359,7 +377,7 @@ RSpec.describe StudFinder::CLI do
       )
       expect(rows.last).to eq(
         ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '0.0000', '0.0000', '7', '1.0000',
-         '3', '15', '1.0000', '0.0000', '', '0', '0.0000', '']
+         '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
     end
@@ -507,7 +525,7 @@ RSpec.describe StudFinder::CLI do
   it 'matches changed files when analyzing a subdirectory with --diff-base' do
     make_repo(file_count: 5) do |root|
       system('git', '-C', root, 'branch', 'base')
-      File.write(File.join(root, 'app/models/model_0.rb'), "class Model0\n  def x = 1\nend\n")
+      File.write(File.join(root, 'app/models/model_0.rb'), "class Model0\n  def x\n    1\n  end\nend\n")
       system('git', '-C', root, 'commit', '-qam', 'change model_0')
 
       status, stdout, stderr = run_cli([File.join(root, 'app'), '--min-files', '5',
@@ -630,5 +648,60 @@ RSpec.describe StudFinder::CLI do
         expect(stderr).to include('--coupling-threshold must be between 0.0 and 1.0')
       end
     end
+  end
+end
+
+RSpec.describe StudFinder::CLI, 'LOC output routing' do
+  let(:row) do
+    {
+      rank: 1,
+      language: 'ruby',
+      path: 'app/models/user.rb',
+      score: 0.5,
+      classification: 'leaf',
+      fan_in: 0,
+      fan_in_pct: 0.0,
+      fan_out: 1,
+      fan_out_pct: 1.0,
+      instability: 1.0,
+      instability_pct: 1.0,
+      complexity: 2,
+      complexity_pct: 1.0,
+      churn_commits: 0,
+      churn_lines: 0,
+      churn_pct: 0.0,
+      loc: 12,
+      loc_pct: 0.75,
+      max_coupling: 0.0,
+      max_coupling_partner: '',
+      coupling_partners: 0,
+      coupling_pct: 0.0,
+      coverage: nil
+    }
+  end
+
+  it 'includes LOC in table, JSON, and CSV columns, but excludes markdown' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS).to include('loc', 'loc_pct')
+    expect(described_class::MARKDOWN_COLUMNS).not_to include('loc', 'loc_pct')
+    expect(cli.send(:json_file, row)).to include(loc: 12, loc_pct: 0.75)
+    expect(cli.send(:csv_file, row)).to include(12, '0.7500')
+    expect(cli.send(:table_row, row)).to include('12', '0.7500')
+    expect(cli.send(:markdown_row, row)).not_to include('0.7500')
+  end
+
+  it 'computes LOC percentiles separately for each language' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+    files = %w[small.rb large.rb small.ts large.ts]
+    loc = { 'small.rb' => 1, 'large.rb' => 10, 'small.ts' => 1, 'large.ts' => 10 }
+    languages = { 'small.rb' => :ruby, 'large.rb' => :ruby, 'small.ts' => :typescript, 'large.ts' => :typescript }
+
+    expect(cli.send(:loc_percentiles_by_language, files, loc, languages)).to eq(
+      'small.rb' => 0.0,
+      'large.rb' => 1.0,
+      'small.ts' => 0.0,
+      'large.ts' => 1.0
+    )
   end
 end

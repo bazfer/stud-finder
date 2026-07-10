@@ -145,7 +145,7 @@ module StudFinder
         return line.match?(/\A\s*#\s*This file is auto-generated/i)
       end
       false
-    rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
+    rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError, ArgumentError
       false
     end
   end
