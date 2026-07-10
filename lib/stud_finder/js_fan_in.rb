@@ -14,9 +14,7 @@ module StudFinder
     DEPCRUISE_NO_CONFIG = 'js_depcruise_no_config'
     DEPCRUISE_FAILED = 'js_depcruise_failed'
 
-    NO_CONFIG_MESSAGE = 'no dependency-cruiser config found; ran with --no-config. Path aliases ' \
-                        '(tsconfig paths, webpack aliases) will not resolve — JS fan_in may be undercounted. ' \
-                        "Run 'npx depcruise --init' in the target repo for accurate results."
+    FALLBACK_SUCCESS_MESSAGE = 'configured depcruise failed; retried with --no-config; fan_in may be undercounted'
 
     def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr)
       @repo_path = File.expand_path(repo_path)
@@ -75,7 +73,8 @@ module StudFinder
           depcruise, '--output-type', 'json', '.', '--no-config', chdir: @repo_path
         )
         if retry_status.success?
-          [retry_stdout, retry_stderr, retry_status, [{ code: DEPCRUISE_NO_CONFIG, message: NO_CONFIG_MESSAGE }]]
+          [retry_stdout, retry_stderr, retry_status,
+           [{ code: DEPCRUISE_NO_CONFIG, message: fallback_success_message(primary_stderr) }]]
         else
           [primary_stdout, primary_stderr, primary_status, []]
         end
@@ -134,6 +133,13 @@ module StudFinder
         edges: empty_edges,
         warnings: [{ code: DEPCRUISE_FAILED, message: message }]
       )
+    end
+
+    def fallback_success_message(primary_stderr)
+      detail = first_line(primary_stderr)
+      return FALLBACK_SUCCESS_MESSAGE if detail.empty?
+
+      "#{FALLBACK_SUCCESS_MESSAGE}: #{detail}"
     end
 
     def first_line(text)

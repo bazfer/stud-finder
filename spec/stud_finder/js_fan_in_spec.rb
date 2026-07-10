@@ -162,10 +162,51 @@ RSpec.describe StudFinder::JsFanIn do
         ]
       )
       expect(warning_codes(result.warnings)).to eq(['js_depcruise_no_config'])
-      expect(result.warnings.first.fetch(:message)).to include('Path aliases')
+      expect(result.warnings.first.fetch(:message)).to eq(
+        'configured depcruise failed; retried with --no-config; fan_in may be undercounted: ' \
+        'No dependency-cruiser config found'
+      )
       expect(result.counts).to eq('src/a.js' => 0, 'src/b.js' => 1)
       expect(result.fan_out_counts).to eq('src/a.js' => 1, 'src/b.js' => 0)
-      expect(stderr.string).to include('Warning: js_depcruise_no_config: no dependency-cruiser config found')
+      expect(stderr.string).to include('Warning: js_depcruise_no_config: configured depcruise failed')
+    end
+  end
+
+  it 'warns with the primary dependency-cruiser stderr when fallback after a non-config failure succeeds' do
+    make_repo do |root|
+      files = %w[src/a.js src/b.js]
+      files.each { |file| write_file(root, file) }
+      write_depcruise(root, <<~SH)
+        #!/bin/sh
+        case " $* " in
+          *" --no-config "*)
+            cat <<'JSON'
+        {"modules":[
+          {"source":"./src/a.js","dependencies":[{"resolved":"./src/b.js"}]},
+          {"source":"./src/b.js","dependencies":[]}
+        ]}
+        JSON
+            ;;
+          *)
+            echo "Error: Unexpected token in dependency-cruiser config" >&2
+            echo "second primary line" >&2
+            exit 1
+            ;;
+        esac
+      SH
+      stderr = StringIO.new
+
+      result = call(root, files, stderr: stderr)
+
+      expect(warning_codes(result.warnings)).to eq(['js_depcruise_no_config'])
+      expect(result.warnings.first.fetch(:message)).to eq(
+        'configured depcruise failed; retried with --no-config; fan_in may be undercounted: ' \
+        'Error: Unexpected token in dependency-cruiser config'
+      )
+      expect(result.counts).to eq('src/a.js' => 0, 'src/b.js' => 1)
+      expect(warning_codes(result.warnings)).not_to include('js_depcruise_failed')
+      expect(stderr.string).to include('Error: Unexpected token in dependency-cruiser config')
+      expect(stderr.string).not_to include('second primary line')
     end
   end
 
