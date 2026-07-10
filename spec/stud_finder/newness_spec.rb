@@ -1,0 +1,146 @@
+# frozen_string_literal: true
+
+require 'spec_helper'
+require 'stud_finder/newness'
+
+RSpec.describe StudFinder::Newness do
+  let(:now) { Time.utc(2026, 7, 10, 12, 0, 0) }
+
+  def make_repo
+    Dir.mktmpdir do |dir|
+      system('git', 'init', '-q', dir)
+      system('git', '-C', dir, 'config', 'user.email', 'stud-finder@example.test')
+      system('git', '-C', dir, 'config', 'user.name', 'Stud Finder')
+      yield dir
+    end
+  end
+
+  def write_file(root, path, content)
+    full_path = File.join(root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, content)
+  end
+
+  def commit_at(root, message, date)
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'add', '-A')
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'commit', '-qm', message)
+  end
+
+  def metadata(root, files, **options)
+    described_class.new(repo_path: root, files: files, now: now, **options).call
+  end
+
+  def apply(rows, edges, data)
+    described_class.apply(rows: rows, edges: edges, metadata: data).to_h { |row| [row[:path], row] }
+  end
+
+  it 'floors a file first committed yesterday from leaf to branch without changing its score' do
+    make_repo do |root|
+      write_file(root, 'app/models/new_leaf.rb', "class NewLeaf\nend\n")
+      commit_at(root, 'add new leaf', now - 86_400)
+
+      rows = [{ path: 'app/models/new_leaf.rb', score: 0.01, classification: 'leaf' }]
+      result = apply(rows, { 'app/models/new_leaf.rb' => { dependencies: [] } },
+                     metadata(root, ['app/models/new_leaf.rb']))
+
+      expect(result['app/models/new_leaf.rb'][:score]).to eq(0.01)
+      expect(result['app/models/new_leaf.rb'][:classification]).to eq('branch')
+      expect(result['app/models/new_leaf.rb'][:new_file]).to be(true)
+      expect(result['app/models/new_leaf.rb'][:age_days]).to eq(1)
+      expect(result['app/models/new_leaf.rb'][:escalation]).to eq('recency_floor')
+    end
+  end
+
+  it 'escalates a new file that depends on a structural trunk file to trunk before applying the floor' do
+    make_repo do |root|
+      write_file(root, 'app/models/trunk.rb', "class Trunk\nend\n")
+      write_file(root, 'app/models/new_client.rb', "class NewClient < Trunk\nend\n")
+      commit_at(root, 'add trunk and new client', now - 86_400)
+
+      rows = [
+        { path: 'app/models/trunk.rb', score: 0.9, classification: 'trunk' },
+        { path: 'app/models/new_client.rb', score: 0.01, classification: 'leaf' }
+      ]
+      edges = {
+        'app/models/trunk.rb' => { dependencies: [] },
+        'app/models/new_client.rb' => { dependencies: ['app/models/trunk.rb'] }
+      }
+      result = apply(rows, edges, metadata(root, %w[app/models/trunk.rb app/models/new_client.rb]))
+
+      expect(result['app/models/new_client.rb'][:classification]).to eq('trunk')
+      expect(result['app/models/new_client.rb'][:escalation]).to eq('trunk_adjacent')
+    end
+  end
+
+  it 'leaves an old low-score file as leaf with no escalation' do
+    make_repo do |root|
+      file = 'app/models/old_leaf.rb'
+      write_file(root, file, "class OldLeaf\nend\n")
+      commit_at(root, 'add old leaf', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, file), 'a') { |f| f.puts "# change #{i}" }
+        commit_at(root, "touch old leaf #{i}", now - ((80 - i) * 86_400))
+      end
+
+      result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } },
+                     metadata(root, [file]))
+
+      expect(result[file][:classification]).to eq('leaf')
+      expect(result[file][:new_file]).to be(false)
+      expect(result[file][:escalation]).to eq('')
+    end
+  end
+
+  it 'decays the recency floor once a file ages past the window and reaches the commit floor' do
+    make_repo do |root|
+      file = 'app/models/aged_out.rb'
+      write_file(root, file, "class AgedOut\nend\n")
+      commit_at(root, 'add aged out', now - (31 * 86_400))
+      2.times do |i|
+        File.open(File.join(root, file), 'a') { |f| f.puts "# change #{i}" }
+        commit_at(root, "touch aged out #{i}", now - ((30 - i) * 86_400))
+      end
+
+      data = metadata(root, [file], days: 30, min_commits: 3)
+      result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data)
+
+      expect(data[file][:total_commits]).to eq(3)
+      expect(result[file][:new_file]).to be(false)
+      expect(result[file][:classification]).to eq('leaf')
+      expect(result[file][:escalation]).to eq('')
+    end
+  end
+
+  it 'keeps pre-newness classification behavior when disabled' do
+    rows = [{ path: 'app/models/new_leaf.rb', score: 0.01, classification: 'leaf' }]
+    data = described_class.disabled_metadata(['app/models/new_leaf.rb'])
+
+    result = apply(rows, { 'app/models/new_leaf.rb' => { dependencies: ['app/models/trunk.rb'] } }, data)
+
+    expect(result['app/models/new_leaf.rb'][:classification]).to eq('leaf')
+    expect(result['app/models/new_leaf.rb'][:new_file]).to be(false)
+    expect(result['app/models/new_leaf.rb'][:age_days]).to eq(0)
+    expect(result['app/models/new_leaf.rb'][:escalation]).to eq('')
+  end
+
+  it 'treats delete-add renamed files as new when lineage is ambiguous' do
+    make_repo do |root|
+      write_file(root, 'app/models/old_name.rb', "class OldName\nend\n")
+      commit_at(root, 'add old name', now - (90 * 86_400))
+
+      FileUtils.rm(File.join(root, 'app/models/old_name.rb'))
+      write_file(root, 'app/models/new_name.rb', "class NewName\n  def unrelated = true\nend\n")
+      commit_at(root, 'replace old name with new name', now - 86_400)
+
+      data = metadata(root, ['app/models/new_name.rb'])
+      result = apply([{ path: 'app/models/new_name.rb', score: 0.01, classification: 'leaf' }],
+                     { 'app/models/new_name.rb' => { dependencies: [] } }, data)
+
+      expect(result['app/models/new_name.rb'][:new_file]).to be(true)
+      expect(result['app/models/new_name.rb'][:classification]).to eq('branch')
+      expect(result['app/models/new_name.rb'][:escalation]).to eq('recency_floor')
+    end
+  end
+end

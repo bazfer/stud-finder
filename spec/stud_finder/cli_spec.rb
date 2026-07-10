@@ -376,10 +376,23 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '0.0000', '0.0000', '7', '1.0000',
-         '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
+        ['1', 'ruby', file, '0.5882', 'branch', 'true', '0', 'recency_floor', '0', '0.0000', '0', '0.0000',
+         '0.0000', '0.0000', '7', '1.0000', '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0',
+         '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
+    end
+  end
+
+  it 'keeps pre-newness classification behavior when --no-newness is passed' do
+    make_repo(file_count: 5) do |root|
+      status, stdout, stderr = run_cli([root, '--min-files', '5', '--top', '1', '--output', 'csv', '--no-newness'])
+      row = CSV.parse(stdout, nil_value: '', headers: true).first
+
+      expect(status).to eq(0), stderr
+      expect(row['class']).to eq('leaf')
+      expect(row['new_file']).to eq('false')
+      expect(row['escalation']).to eq('')
     end
   end
 

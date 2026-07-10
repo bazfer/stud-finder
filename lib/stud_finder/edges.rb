@@ -54,6 +54,7 @@ module StudFinder
                             score: format_score(row[:score]), class: row[:classification],
                             fan_in: row[:fan_in], fan_out: row[:fan_out],
                             instability: format_score(row[:instability]))
+        @stdout.puts "  escalation: #{row[:escalation]}" if row[:escalation] && !row[:escalation].empty?
       end
       @stdout.puts
     end
