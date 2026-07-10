@@ -17,6 +17,7 @@ require_relative 'fan_in'
 require_relative 'js_fan_in'
 require_relative 'js_complexity'
 require_relative 'file_collector'
+require_relative 'loc_counter'
 require_relative 'scorer'
 require_relative 'version'
 
@@ -26,7 +27,7 @@ module StudFinder
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
     RESULT_COLUMNS = %w[
       rank language file score class fan_in fan_in_pct fan_out fan_out_pct instability instability_pct complexity
-      complexity_pct churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners
+      complexity_pct churn_commits churn_lines churn_pct loc loc_pct max_coupling max_coupling_partner coupling_partners
       coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
@@ -58,7 +59,7 @@ module StudFinder
       cli_warnings: []
     }.freeze
 
-    Analysis = Struct.new(:files, :fan_in, :fan_out, :edges, :complexity, :churn_commits, :churn_lines, :coverage,
+    Analysis = Struct.new(:files, :fan_in, :fan_out, :edges, :complexity, :churn_commits, :churn_lines, :loc, :coverage,
                           :coverage_available, :skipped_files, :warnings, :rows, :weights, keyword_init: true)
     Report = Struct.new(:ruby, :javascript, :warnings, keyword_init: true)
 
@@ -399,8 +400,9 @@ module StudFinder
       churn_result = Churn.new(repo_path: path, files: analysis_files, days: @options[:churn_days],
                                stderr: @stderr).call
 
+      loc = LocCounter.new(repo_path: path, files: analysis_files).call
       score_group(analysis_files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
-                  complexity_result.counts, churn_result, complexity_result.skipped_files,
+                  complexity_result.counts, churn_result, loc, complexity_result.skipped_files,
                   ruby_coverage(path, analysis_files),
                   language_by_file: analysis_files.to_h { |file| [file, :ruby] }, coupling: coupling)
     end
@@ -413,19 +415,21 @@ module StudFinder
       complexity_result = JsComplexity.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
                                            stderr: @stderr).call
       churn_result = Churn.new(repo_path: path, files: files, days: @options[:churn_days], stderr: @stderr).call
+      loc = LocCounter.new(repo_path: path, files: files).call
       score_group(files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
-                  complexity_result.counts, churn_result, [], js_coverage(path, files),
+                  complexity_result.counts, churn_result, loc, [], js_coverage(path, files),
                   language_by_file: languages, extra_warnings: fan_in_result.warnings + complexity_result.warnings,
                   coupling: coupling)
     end
 
     # rubocop:disable Metrics/ParameterLists
-    def score_group(files, fan_in, fan_out, edges, complexity, churn_result, skipped_files, coverage_payload,
+    def score_group(files, fan_in, fan_out, edges, complexity, churn_result, loc, skipped_files, coverage_payload,
                     language_by_file: {}, extra_warnings: [], coupling: nil)
       progress("normalizing + scoring #{files.length} files...")
       coverage_result, coverage_parser = coverage_payload
+      loc_pct = loc_percentiles_by_language(files, loc, language_by_file)
       scorer = Scorer.new(files: files, fan_in: fan_in, fan_out: fan_out, complexity: complexity,
-                          churn: churn_result.counts, churn_lines: churn_result.line_counts,
+                          churn: churn_result.counts, churn_lines: churn_result.line_counts, loc: loc, loc_pct: loc_pct,
                           coverage: coverage_result, weights: @options[:weights],
                           branch_threshold: @options[:branch_threshold], trunk_threshold: @options[:trunk_threshold],
                           coupling: coupling)
@@ -438,13 +442,19 @@ module StudFinder
       emit_scoring_note(scorer, coverage_result)
       Analysis.new(
         files: files, fan_in: fan_in, fan_out: fan_out, edges: edges, complexity: complexity,
-        churn_commits: churn_result.churn_commits, churn_lines: churn_result.churn_lines,
+        churn_commits: churn_result.churn_commits, churn_lines: churn_result.churn_lines, loc: loc,
         coverage: coverage_result, coverage_available: !coverage_result.nil?, skipped_files: skipped_files,
         warnings: warnings.uniq, rows: scorer.call.map { |row| with_language(row, language_by_file) },
         weights: scorer.normalized_weights
       )
     end
     # rubocop:enable Metrics/ParameterLists
+
+    def loc_percentiles_by_language(files, loc, language_by_file)
+      files.group_by { |file| language_by_file.fetch(file) }.values.reduce({}) do |pct, language_files|
+        pct.merge(Normalizer.percentile_rank(loc, language_files))
+      end
+    end
 
     def with_language(row, language_by_file)
       row.merge(language: language_by_file.fetch(row[:path]).to_s)
@@ -568,8 +578,10 @@ module StudFinder
     end
 
     def empty_analysis
-      Analysis.new(files: [], fan_in: {}, fan_out: {}, edges: {}, complexity: {}, churn_commits: {}, churn_lines: {},
-                   coverage: nil, coverage_available: false, skipped_files: [], warnings: [], rows: [], weights: nil)
+      Analysis.new(
+        files: [], fan_in: {}, fan_out: {}, edges: {}, complexity: {}, churn_commits: {}, churn_lines: {}, loc: {},
+        coverage: nil, coverage_available: false, skipped_files: [], warnings: [], rows: [], weights: nil
+      )
     end
 
     def emit_markdown_section(title, rows)
@@ -584,8 +596,9 @@ module StudFinder
     def emit_table_section(title, rows)
       @stdout.puts title
       @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
-                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct  max_coupling  ' \
-                   'max_coupling_partner                      coupling_partners  coupling_pct  coverage'
+                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct    loc  loc_pct  ' \
+                   'max_coupling  max_coupling_partner                      coupling_partners  coupling_pct  ' \
+                   'coverage'
       rows.each { |row| @stdout.puts table_row(row) }
       @stdout.puts
     end
@@ -688,6 +701,8 @@ module StudFinder
         churn_commits: row[:churn_commits],
         churn_lines: row[:churn_lines],
         churn_pct: row[:churn_pct],
+        loc: row[:loc],
+        loc_pct: row[:loc_pct],
         max_coupling: row[:max_coupling],
         max_coupling_partner: row[:max_coupling_partner],
         coupling_partners: row[:coupling_partners],
@@ -714,6 +729,8 @@ module StudFinder
         row[:churn_commits],
         row[:churn_lines],
         format_score(row[:churn_pct]),
+        row[:loc],
+        format_score(row[:loc_pct]),
         format_score(row[:max_coupling]),
         row[:max_coupling_partner],
         row[:coupling_partners],
@@ -774,13 +791,14 @@ module StudFinder
     def table_row(row)
       format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
              '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
-             '%<churn_pct>9s  %<max_coupling>12s  %<max_coupling_partner>-40s  %<coupling_partners>17d  ' \
-             '%<coupling_pct>12s  %<coverage>8s',
+             '%<churn_pct>9s  %<loc>5d  %<loc_pct>7s  %<max_coupling>12s  ' \
+             '%<max_coupling_partner>-40s  %<coupling_partners>17d  %<coupling_pct>12s  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
              classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
              instability: format_score(row[:instability]), complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
-             churn_pct: format_score(row[:churn_pct]), max_coupling: format_score(row[:max_coupling]),
+             churn_pct: format_score(row[:churn_pct]), loc: row[:loc], loc_pct: format_score(row[:loc_pct]),
+             max_coupling: format_score(row[:max_coupling]),
              max_coupling_partner: truncate_partner(row[:max_coupling_partner]),
              coupling_partners: row[:coupling_partners], coupling_pct: format_score(row[:coupling_pct]),
              coverage: format_coverage(row[:coverage]))

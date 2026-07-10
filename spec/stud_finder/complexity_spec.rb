@@ -117,12 +117,71 @@ RSpec.describe StudFinder::Complexity do
       'rubocop',
       '--config', kind_of(String),
       '--format', 'json',
-      '/repo'
+      'app/models/user.rb',
+      chdir: '/repo'
     )
     expect(captured_config).to include('DisabledByDefault: true')
     expect(captured_config).to include('Metrics/CyclomaticComplexity:')
     expect(captured_config).to include('Enabled: true')
     expect(captured_config).to include('Max: 0')
+  end
+
+  it 'runs RuboCop against collected files in relative-path batches' do
+    Dir.mktmpdir do |repo|
+      files = Array.new(501) do |index|
+        path = "app/models/model_#{index}.rb"
+        full_path = File.join(repo, path)
+        FileUtils.mkdir_p(File.dirname(full_path))
+        File.write(full_path, "class Model#{index}\n  def call\n  end\nend\n")
+        path
+      end
+      batches = []
+      allow(Open3).to receive(:capture3) do |*args, **kwargs|
+        batch = args.drop(args.index('--format') + 2)
+        batches << [batch, kwargs]
+        payload = batch.map.with_index do |file, offset|
+          score = file == 'app/models/model_500.rb' ? 3 : (offset % 2) + 1
+          { 'path' => File.join(repo, file), 'offenses' => [complexity_offense('call', score)] }
+        end
+        [rubocop_json(payload), '', status(1)]
+      end
+
+      result = described_class.new(repo_path: repo, files: files).call
+
+      expect(batches.map { |batch, _kwargs| batch.length }).to eq([500, 1])
+      expect(batches).to all(satisfy do |batch, kwargs|
+        kwargs == { chdir: repo } && batch.all? { |file| !file.start_with?('/') }
+      end)
+      expect(result.counts.length).to eq(501)
+      expect(result.counts.fetch('app/models/model_0.rb')).to eq(1)
+      expect(result.counts.fetch('app/models/model_499.rb')).to eq(2)
+      expect(result.counts.fetch('app/models/model_500.rb')).to eq(3)
+    end
+  end
+
+  it 'ignores the target repo RuboCop excludes when scoring explicit files' do
+    Dir.mktmpdir do |repo|
+      system('git', 'init', '-q', repo)
+      FileUtils.mkdir_p(File.join(repo, 'app/models'))
+      File.write(File.join(repo, '.rubocop.yml'), <<~YAML)
+        AllCops:
+          Exclude:
+            - app/models/**
+      YAML
+      File.write(File.join(repo, 'app/models/user.rb'), <<~RUBY)
+        class User
+          def call
+            if a
+            elsif b
+            end
+          end
+        end
+      RUBY
+
+      result = described_class.new(repo_path: repo, files: ['app/models/user.rb']).call
+
+      expect(result.counts.fetch('app/models/user.rb')).to be > 0
+    end
   end
 
   it 'raises the required message when rubocop is not in PATH' do

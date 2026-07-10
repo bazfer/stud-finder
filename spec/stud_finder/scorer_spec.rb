@@ -210,3 +210,28 @@ RSpec.describe StudFinder::Scorer, 'with coverage' do
     expect(rows['a.rb'][:coverage]).to eq(1.0)
   end
 end
+
+RSpec.describe StudFinder::Scorer, 'LOC instrumentation' do
+  it 'emits LOC and language-scope percentile ranks without affecting score' do
+    files = %w[small.rb medium.rb large.rb]
+    base = {
+      files: files,
+      fan_in: files.to_h { |file| [file, 0] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 }
+    }
+
+    without_loc = described_class.new(**base).call.to_h { |row| [row[:path], row] }
+    with_loc = described_class.new(**base, loc: { 'small.rb' => 1, 'medium.rb' => 5, 'large.rb' => 10 })
+                              .call.to_h { |row| [row[:path], row] }
+
+    expect(with_loc['small.rb'][:loc]).to eq(1)
+    expect(with_loc['small.rb'][:loc_pct]).to eq(0.0)
+    expect(with_loc['medium.rb'][:loc_pct]).to eq(0.5)
+    expect(with_loc['large.rb'][:loc_pct]).to eq(1.0)
+    expect(with_loc.transform_values { |row| row[:score] })
+      .to eq(without_loc.transform_values { |row| row[:score] })
+  end
+end
