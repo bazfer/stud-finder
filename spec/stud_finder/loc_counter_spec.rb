@@ -20,4 +20,15 @@ RSpec.describe StudFinder::LocCounter do
       expect(counts).to eq('app/models/user.rb' => 4)
     end
   end
+
+  it 'returns zero for files with invalid UTF-8 bytes' do
+    Dir.mktmpdir do |repo|
+      path = File.join(repo, 'invalid.rb')
+      File.binwrite(path, "\xff\xfe not utf-8")
+
+      counts = described_class.new(repo_path: repo, files: ['invalid.rb']).call
+
+      expect(counts).to eq('invalid.rb' => 0)
+    end
+  end
 end

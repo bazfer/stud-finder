@@ -15,7 +15,7 @@ module StudFinder
 
     def non_blank_lines(file)
       File.foreach(File.join(@repo_path, file)).count { |line| !line.strip.empty? }
-    rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
+    rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError, ArgumentError
       0
     end
   end
