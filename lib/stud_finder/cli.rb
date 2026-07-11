@@ -36,10 +36,11 @@ module StudFinder
       churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
+    OPTIONAL_WEIGHT_KEYS = %i[interaction].freeze
     DEFAULT_OPTIONS = {
       output: 'table',
       churn_days: 180,
-      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 },
+      weights: StudFinder::Scorer::DEFAULT_WEIGHTS,
       custom_weights: false,
       trunk_threshold: 85,
       branch_threshold: 50,
@@ -172,8 +173,13 @@ module StudFinder
         opts.on('--churn-days N', Integer, 'Commit lookback window in days (default: 180)') do |value|
           @options[:churn_days] = value
         end
-        opts.on('--weights WEIGHTS', 'fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V') do |value|
+        opts.on('--weights WEIGHTS', 'fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I]') do |value|
           @options[:weights] = parse_weights(value)
+          @options[:custom_weights] = true
+        end
+        opts.on('--interaction-weight N', Float,
+                'fan_in × coverage_risk interaction weight (requires coverage)') do |value|
+          @options[:weights][:interaction] = value
           @options[:custom_weights] = true
         end
         opts.on('--ruby-coverage PATH', 'Path to a Ruby coverage report (.xml, .info, .json)') do |value|
@@ -257,6 +263,7 @@ module StudFinder
     end
     # rubocop:enable Metrics/AbcSize, Metrics/BlockLength, Metrics/MethodLength
 
+    # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
     def parse_weights(value)
       pairs = value.split(',').map do |entry|
         key, raw = entry.split(':', 2)
@@ -269,17 +276,21 @@ module StudFinder
 
       weights = pairs.to_h
       missing = WEIGHT_KEYS - weights.keys
-      extra = weights.keys - WEIGHT_KEYS
+      extra = weights.keys - WEIGHT_KEYS - OPTIONAL_WEIGHT_KEYS
       unless missing.empty? && extra.empty?
         raise ValidationError,
               'Error: weights must include fan_in, fan_out, complexity, churn, and coverage.'
       end
+
+      weights[:interaction] = 0.0 unless weights.key?(:interaction)
 
       out_of_range = weights.any? { |_key, weight| weight.negative? || weight > 1.0 }
       raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if out_of_range
 
       weights
     end
+
+    # rubocop:enable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
     def validate_options!
       validate_threshold!(:trunk_threshold)
@@ -348,8 +359,14 @@ module StudFinder
 
     def validate_weights!
       weights = @options[:weights]
+      out_of_range = weights.any? { |_key, weight| !weight.nil? && (weight.negative? || weight > 1.0) }
+      raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if out_of_range
+
       if weights[:coverage].positive? && !coverage_available?
         raise ValidationError, 'Error: coverage weight must be 0.0 when no coverage data is provided.'
+      end
+      if weights.fetch(:interaction, 0.0).positive? && !coverage_available?
+        raise ValidationError, 'Error: interaction weight must be 0.0 when no coverage data is provided.'
       end
 
       active_sum = weights.values.sum
@@ -795,7 +812,8 @@ module StudFinder
         fan_out: weights[:fan_out].round(4),
         complexity: weights[:complexity].round(4),
         churn: weights[:churn].round(4),
-        coverage: weights[:coverage]&.round(4)
+        coverage: weights[:coverage]&.round(4),
+        interaction: weights[:interaction]&.round(4)
       }
     end
 

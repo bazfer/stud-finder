@@ -6,7 +6,7 @@ require 'spec_helper'
 require 'stud_finder/cli'
 
 RSpec.describe StudFinder::CLI do
-  full_weights = 'fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15'
+  full_weights = 'fan_in:0.20,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.10,interaction:0.10'
 
   define_method(:full_weights) { full_weights }
 
@@ -164,10 +164,19 @@ RSpec.describe StudFinder::CLI do
   end
 
   it 'validates weights that do not sum to 1.0' do
-    status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.4,fan_out:0.0,complexity:0.3,churn:0.1,coverage:0.0'])
+    weights = 'fan_in:0.4,fan_out:0.0,complexity:0.3,churn:0.1,coverage:0.0,interaction:0.0'
+    status, _stdout, stderr = run_cli(['--weights', weights])
 
     expect(status).to eq(1)
     expect(stderr).to include('actual sum is 0.8000')
+  end
+
+  it 'rejects a negative interaction weight when total weight is valid' do
+    weights = 'fan_in:0.30,fan_out:0.10,complexity:0.30,churn:0.30,coverage:0.10'
+    status, _stdout, stderr = run_cli(['--weights', weights, '--interaction-weight', '-0.10'])
+
+    expect(status).to eq(1)
+    expect(stderr).to include('weight values must be between 0.0 and 1.0')
   end
 
   it 'rejects coverage weight in Phase 1' do
@@ -389,7 +398,7 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.5882', 'branch', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
+        ['1', 'ruby', file, '0.6250', 'branch', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
          '0.0000', '7', '1.0000', '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")

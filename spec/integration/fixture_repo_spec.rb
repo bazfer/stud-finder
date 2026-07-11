@@ -66,7 +66,7 @@ RSpec.describe 'fixture repo integration' do
     files = payload['ruby'].to_h { |file| [file['path'], file] }
     expect(files['app/models/user.rb']['coverage']).to eq(1.0)
     expect(files['app/services/auth_service.rb']['coverage']).to eq(0.0)
-    expect(files['app/services/auth_service.rb']['score']).to be > files['app/services/post_service.rb']['score']
+    expect(files['app/services/auth_service.rb']['score']).to be > files['app/controllers/users_controller.rb']['score']
   end
 
   it 'renders absent coverage as an em dash in JSON while scoring with max coverage risk' do
@@ -79,9 +79,9 @@ RSpec.describe 'fixture repo integration' do
     files = payload['ruby'].to_h { |file| [file['path'], file] }
     expect(files['app/models/post.rb']['coverage']).to eq('—')
     expect(files['app/models/post.rb']['coverage']).not_to eq(0.0)
-    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.3611)
+    expect(files['app/models/post.rb']['score']).to be_within(0.0001).of(0.3469)
     expect(files['app/models/profile.rb']['coverage']).to eq(0.75)
-    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.25)
+    expect(files['app/models/profile.rb']['score']).to be_within(0.0001).of(0.2173)
   end
 
   it 'renders absent coverage as an em dash in table output' do
