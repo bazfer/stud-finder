@@ -236,6 +236,15 @@ RSpec.describe StudFinder::CLI do
     expect(stderr).to include('coverage weight must be 0.0 when no coverage data is provided')
   end
 
+  it 'accepts --coupling-weight alone without coverage data' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--coupling-weight', '0.05', '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      expect(stderr).not_to include('coverage weight must be 0.0 when no coverage data is provided')
+    end
+  end
+
   it 'requires all weight keys including fan_out' do
     status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.5,complexity:0.3,churn:0.2'])
 

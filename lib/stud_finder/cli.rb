@@ -187,7 +187,6 @@ module StudFinder
         end
         opts.on('--coupling-weight N', Float, 'temporal coupling weight') do |value|
           @options[:weights][:coupling] = value
-          @options[:custom_weights] = true
         end
         opts.on('--ruby-coverage PATH', 'Path to a Ruby coverage report (.xml, .info, .json)') do |value|
           @options[:ruby_coverage_path] = value
@@ -544,7 +543,7 @@ module StudFinder
 
     def emit_scoring_note(scorer, coverage_result)
       if coverage_result
-        @stderr.puts 'Note: coverage data available. Score uses 5-factor formula.'
+        @stderr.puts coverage_scoring_note(weights: scorer.normalized_weights)
       else
         @stderr.puts scoring_note(weights: scorer.normalized_weights, stderr: true)
       end
@@ -840,6 +839,12 @@ module StudFinder
         interaction: weights[:interaction]&.round(4),
         coupling: weights[:coupling]&.round(4)
       }
+    end
+
+    def coverage_scoring_note(weights:)
+      return 'Note: coverage data available. Score uses 6-factor formula (including coupling).' if weights[:coupling]
+
+      'Note: coverage data available. Score uses 5-factor formula.'
     end
 
     def scoring_note(weights:, stderr:)
