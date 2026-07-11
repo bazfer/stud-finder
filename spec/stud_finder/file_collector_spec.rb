@@ -124,6 +124,22 @@ end
     end
   end
 
+  it 'excludes SimpleCov-generated coverage directory by default' do
+    make_repo do |root|
+      %w[app/models/user.rb app/models/account.rb app/models/order.rb app/models/invoice.rb
+         app/models/payment.rb].each do |file|
+        write_file(root, file)
+      end
+      write_file(root, 'coverage/foo/bar.js', 'var x = 1;')
+      write_file(root, 'coverage/assets/0.13.2/application.js', '/* bundled jquery */var $=function(){};')
+
+      result = collect(root)
+
+      expect(result.files).not_to include('coverage/foo/bar.js', 'coverage/assets/0.13.2/application.js')
+      expect(result.default_excluded_count).to eq(2)
+    end
+  end
+
   it 'raises for a missing path' do
     missing = File.join(Dir.tmpdir, "stud-finder-missing-#{rand(100_000)}")
 
