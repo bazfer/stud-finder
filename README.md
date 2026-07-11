@@ -99,7 +99,7 @@ Weights sum to 1.00 when all signals are available. The **base-four ratios** (fa
 | ✓ | ✓ | all 7 | `5-factor + coupling` |
 | ✓ | ✗ | 6 (drop coupling) | `5-factor` |
 | ✗ | ✓ | 5 (drop coverage + interaction) | `4-factor + coupling` |
-| ✗ | ✗ | 4 (base only) | `4-factor (no coverage)` |
+| ✗ | ✗ | 4 (base only) | `4-factor` |
 
 The formula label appears in JSON output at `meta.formula` and in the stderr scoring note.
 
@@ -133,6 +133,8 @@ After the score threshold runs, safety floors escalate anything visibly dangerou
 
 The floors exist because tiny or uniform-signal codebases can produce a composite score below the branch threshold even when the raw signals are visibly high — the percentile pass collapses everyone to the middle. Absolute floors catch this failure mode without altering the numeric score.
 
+A floor escalation sets `escalation=complexity_floor` (raw complexity ≥ 15) or `escalation=fan_in_floor` (raw fan-in ≥ 25) on the output row, so consumers can distinguish a floor-escalated branch from a threshold-classified one. When a file meets a floor condition and is also considered new, `escalation=recency_floor` takes precedence — the newness marker wins.
+
 ### Newness rules
 
 History-based signals can under-protect brand-new files: a fresh AI-generated file may have little churn, low fan-in, and no established blast radius yet, even though it is often the least proven code in the change. Post-scoring newness rules therefore change only `class`, `new_file`, `age_days`, and `escalation`; the numeric `score` stays honest and unchanged.
@@ -150,6 +152,8 @@ A stronger rule runs first: if a new file depends on a structurally `trunk` file
 Every row carries an `evidence` value (0.0–1.0) alongside `score`. Score is the weighted signal composite. Evidence is a metadata confidence: how much history + coverage-data backing does that score have?
 
 Evidence combines file age, commit count, and whether coverage data was explicitly provided. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." A high score with high evidence is a strong claim.
+
+In shallow clones (git fetch-depth < full history), evidence is `null` on every row because file-metadata history is unavailable. The `shallow_clone_newness_disabled` warning also fires. See the CI note above.
 
 **Gate consumers should threshold `class` for verdicts and `evidence` for confidence, not raw `score` alone.** Output is sorted by `(class_rank, score)` so trunks group above branches above leaves, and `--top N` no longer drops newness-escalated `trunk_adjacent` files behind high-score branches.
 

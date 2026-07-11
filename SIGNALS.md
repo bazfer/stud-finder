@@ -97,6 +97,8 @@ Classification runs the composite-score threshold first, then applies safety flo
 
 The floors catch the tiny-repo / uniform-signal failure mode: in a 10-file codebase where every file has a high raw complexity, percentile ranking flattens everyone to the middle, the composite score sits around 0.4, and every file classifies as `leaf` despite being structurally dangerous.
 
+A floor escalation sets `escalation=complexity_floor` (raw complexity ≥ 15) or `escalation=fan_in_floor` (raw fan-in ≥ 25) on the output row. When a file qualifies for a floor escalation and is also considered new, `escalation=recency_floor` takes precedence — the newness marker wins over the floor marker.
+
 ### Newness rules
 
 History-based signals under-protect brand-new files: a fresh AI-generated file may have little churn, low fan-in, and no established blast radius yet, even though it is often the least proven code in the change.

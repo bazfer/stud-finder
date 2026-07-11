@@ -209,11 +209,11 @@ module StudFinder
           @options[:rails_inference] = false
         end
         opts.on('--trunk-threshold N', Integer,
-                'score cutoff for trunk classification, as 0-100 percentile (default: 85)') do |value|
+                'score cutoff for trunk classification, integer 1-99 (default: 85)') do |value|
           @options[:trunk_threshold] = value
         end
         opts.on('--branch-threshold N', Integer,
-                'score cutoff for branch classification, as 0-100 percentile (default: 50)') do |value|
+                'score cutoff for branch classification, integer 1-99 (default: 50)') do |value|
           @options[:branch_threshold] = value
         end
         opts.on('--exclude PATTERN', 'Exclude glob pattern (repeatable)') do |value|

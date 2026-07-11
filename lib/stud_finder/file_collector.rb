@@ -14,6 +14,7 @@ module StudFinder
       '**/*.min.js',
       'tmp/**',
       'log/**',
+      'coverage/**',
       'spec/**',
       'test/**',
       '__tests__/**',
