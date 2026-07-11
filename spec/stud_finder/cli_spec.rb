@@ -571,7 +571,7 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.6250', '0.0000', 'branch', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
+        ['1', 'ruby', file, '0.6250', '0.0000', 'trunk', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
          '0.0000', '7', '1.0000', '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
