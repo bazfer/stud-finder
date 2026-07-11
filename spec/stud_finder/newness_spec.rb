@@ -69,7 +69,7 @@ RSpec.describe StudFinder::Newness do
     result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data,
                    coverage: {})
 
-    expect(result[file][:evidence]).to eq(0.6667)
+    expect(result[file][:evidence]).to eq(1.0)
   end
 
   it 'emits nil evidence when newness metadata is disabled' do
@@ -80,6 +80,22 @@ RSpec.describe StudFinder::Newness do
                    coverage: { file => 0.8 })
 
     expect(result[file][:evidence]).to be_nil
+  end
+
+  it 'full history without coverage now produces evidence 1.0 (not 0.6667)' do
+    file = 'app/models/user.rb'
+    data = { file => { new_file: false, age_days: 45, total_commits: 10, escalation: '', metadata_available: true } }
+    result = apply([{ path: file, score: 0.5, classification: 'branch' }], { file => { dependencies: [] } }, data)
+    expect(result[file][:evidence]).to eq(1.0)
+  end
+
+  it 'new file without coverage produces evidence 0.25' do
+    file = 'app/models/new_thing.rb'
+    data = { file => { new_file: true, age_days: 5, total_commits: 1, escalation: '', metadata_available: true } }
+    result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data)
+    # age_component = min(5/30.0, 1.0) = 0.1667, commits_component = min(1/3.0, 1.0) = 0.3333
+    # history_only = 0.25, no coverage
+    expect(result[file][:evidence]).to eq(0.25)
   end
 
   it 'floors a file first committed yesterday from leaf to branch without changing its score' do
