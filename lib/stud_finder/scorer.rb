@@ -128,10 +128,12 @@ module StudFinder
       fo = @fan_out.fetch(file, 0).to_i
       rounded_score = score.round(4)
       complexity = @complexity.fetch(file, 0).to_i
+      floored_class, floor_escalation = floored_classification(classification(rounded_score), complexity, fi)
       {
         path: file,
         score: rounded_score,
-        classification: floored_classification(classification(rounded_score), complexity, fi),
+        classification: floored_class,
+        escalation: floor_escalation,
         fan_in: fi,
         fan_in_pct: pcts[:fan_in].fetch(file).round(4),
         fan_out: fo,
@@ -248,10 +250,15 @@ module StudFinder
     end
 
     def floored_classification(classification, complexity, fan_in)
-      return classification unless classification == 'leaf'
-      return 'branch' if complexity >= COMPLEXITY_FLOOR || fan_in >= FAN_IN_FLOOR
+      return [classification, ''] unless classification == 'leaf'
 
-      classification
+      if complexity >= COMPLEXITY_FLOOR
+        %w[branch complexity_floor]
+      elsif fan_in >= FAN_IN_FLOOR
+        %w[branch fan_in_floor]
+      else
+        [classification, '']
+      end
     end
   end
   # rubocop:enable Metrics/ClassLength

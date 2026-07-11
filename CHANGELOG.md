@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - Unreleased
 
+### Fixed
+
+- `--interaction-weight N` now works correctly: setting only the interaction weight no longer triggers `weights must sum to 1.0` or `coverage weight must be 0.0` errors; it behaves identically to `--coupling-weight N` (bounds-checked inline, then renormalized by the scorer).
+- Absolute-floor escalations now carry an `escalation` marker in the output row: `complexity_floor` when raw complexity ≥ 15 triggered the leaf→branch escalation, `fan_in_floor` when raw fan_in ≥ 25 triggered it. Consumers can now distinguish a floor-escalated branch from a threshold-classified branch without parsing the score. Newness escalations (`recency_floor`, `trunk_adjacent`) continue to take precedence.
+- Formula label is now consistent across all output surfaces. The canonical labels are `5-factor + coupling`, `5-factor`, `4-factor + coupling`, and `4-factor`; the previous mismatch (stderr reported `6-factor formula` while JSON meta reported `5-factor + coupling`) is resolved.
+
 ### Added
 
 - Absolute floors in classification: raw complexity >= 15 or raw fan_in >= 25 can no longer classify as leaf; these files escalate to branch only, never downgrade.
