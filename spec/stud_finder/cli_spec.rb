@@ -1148,5 +1148,4 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
     expect(cli.send(:formula_label, coverage_available: false, coupling_available: 0.0))
       .to eq('4-factor')
   end
-
 end
