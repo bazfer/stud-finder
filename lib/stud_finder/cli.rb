@@ -186,6 +186,8 @@ module StudFinder
           @options[:custom_weights] = true
         end
         opts.on('--coupling-weight N', Float, 'temporal coupling weight') do |value|
+          raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if value.negative? || value > 1.0
+
           @options[:weights][:coupling] = value
         end
         opts.on('--ruby-coverage PATH', 'Path to a Ruby coverage report (.xml, .info, .json)') do |value|

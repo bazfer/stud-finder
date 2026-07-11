@@ -245,6 +245,15 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  it 'rejects out-of-range --coupling-weight alone' do
+    ['-0.5', '2.0'].each do |value|
+      status, _stdout, stderr = run_cli(['--coupling-weight', value])
+
+      expect(status).to eq(1)
+      expect(stderr).to include('weight values must be between 0.0 and 1.0')
+    end
+  end
+
   it 'requires all weight keys including fan_out' do
     status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.5,complexity:0.3,churn:0.2'])
 
