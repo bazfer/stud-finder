@@ -309,6 +309,26 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['a.rb'][:churn_pct]).to eq(rows['b.rb'][:churn_pct])
   end
 
+  it 'keeps float-equivalent churn composites tied after re-ranking' do
+    files = %w[rank0.rb a.rb b.rb rank3.rb rank4.rb rank5.rb rank6.rb rank7.rb rank8.rb rank9.rb rank10.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: files.to_h { |file| [file, 0] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: {
+        'b.rb' => 0, 'a.rb' => 1, 'rank0.rb' => 2, 'rank3.rb' => 3, 'rank4.rb' => 4, 'rank5.rb' => 5,
+        'rank6.rb' => 6, 'rank7.rb' => 7, 'rank8.rb' => 8, 'rank9.rb' => 9, 'rank10.rb' => 10
+      },
+      churn_lines: {
+        'rank0.rb' => 0, 'rank3.rb' => 1, 'a.rb' => 2, 'b.rb' => 3, 'rank4.rb' => 4, 'rank5.rb' => 5,
+        'rank6.rb' => 6, 'rank7.rb' => 7, 'rank8.rb' => 8, 'rank9.rb' => 9, 'rank10.rb' => 10
+      }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['a.rb'][:churn_pct]).to eq(rows['b.rb'][:churn_pct])
+  end
+
   it 'returns zero churn percentiles when all churn counts and lines are identical' do
     rows = scorer(churn: files.to_h { |file| [file, 3] },
                   churn_lines: files.to_h { |file| [file, 9] }).call

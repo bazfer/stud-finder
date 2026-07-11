@@ -108,7 +108,7 @@ module StudFinder
       count_pct = Normalizer.percentile_rank(@churn, @files)
       line_pct = Normalizer.percentile_rank(@churn_lines, @files)
       averaged = @files.to_h do |file|
-        [file, (0.5 * count_pct.fetch(file)) + (0.5 * line_pct.fetch(file))]
+        [file, ((0.5 * count_pct.fetch(file)) + (0.5 * line_pct.fetch(file))).round(10)]
       end
 
       Normalizer.percentile_rank(averaged, @files)
