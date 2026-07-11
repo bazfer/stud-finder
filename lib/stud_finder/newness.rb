@@ -14,6 +14,10 @@ module StudFinder
       code: 'shallow_clone_newness_disabled',
       message: 'shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI for full newness behavior)'
     }.freeze
+    UNSHALLOW_FAILED_WARNING = {
+      code: 'shallow_clone_unshallow_failed',
+      message: 'auto-unshallow failed; evidence unavailable (use fetch-depth: 0 in CI or pass --no-auto-unshallow)'
+    }.freeze
 
     History = Struct.new(:first_commit_epoch, :total_commits, keyword_init: true)
 
@@ -104,9 +108,11 @@ module StudFinder
 
       age_component = [metadata.fetch(:age_days, 0) / 30.0, 1.0].min
       commits_component = [metadata.fetch(:total_commits, 0) / 3.0, 1.0].min
-      coverage_component = explicit_coverage ? 1.0 : 0.0
 
-      ((age_component + commits_component + coverage_component) / 3.0).round(4)
+      history_only = (age_component + commits_component) / 2.0
+      with_coverage = ((age_component + commits_component + 1.0) / 3.0) if explicit_coverage
+
+      ([history_only, with_coverage].compact.max).round(4)
     end
 
     def self.git_shallow_file?(repo_path)

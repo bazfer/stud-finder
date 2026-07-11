@@ -63,6 +63,7 @@ module StudFinder
       newness: true,
       new_file_days: StudFinder::Newness::DEFAULT_DAYS,
       new_file_min_commits: StudFinder::Newness::DEFAULT_MIN_COMMITS,
+      auto_unshallow: true,
       cli_warnings: []
     }.freeze
 
@@ -258,6 +259,9 @@ module StudFinder
         end
         opts.on('--no-newness', 'Disable new-file classification rules') do
           @options[:newness] = false
+        end
+        opts.on('--no-auto-unshallow', 'Disable automatic git fetch --unshallow on shallow clones') do
+          @options[:auto_unshallow] = false
         end
         opts.on('--verbose', 'Print suppressed per-file warnings to stderr') do
           @options[:verbose] = true
@@ -511,8 +515,12 @@ module StudFinder
 
     def apply_newness(files, edges, rows, coverage_result = nil)
       metadata = if @options[:newness] && Newness.shallow_repository?(@repo_path)
-                   @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
-                   Newness.disabled_metadata(files)
+                   if @options[:auto_unshallow]
+                     attempt_unshallow(files)
+                   else
+                     @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
+                     Newness.disabled_metadata(files)
+                   end
                  elsif @options[:newness]
                    Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
                                min_commits: @options[:new_file_min_commits]).call
@@ -520,6 +528,23 @@ module StudFinder
                    Newness.disabled_metadata(files)
                  end
       Newness.apply(rows: rows, edges: edges, metadata: metadata, coverage: coverage_result)
+    end
+
+    def attempt_unshallow(files)
+      require 'timeout'
+      Timeout.timeout(45) do
+        _stdout, _stderr, status = Open3.capture3('git', 'fetch', '--unshallow', chdir: @repo_path)
+        if status.success?
+          Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
+                      min_commits: @options[:new_file_min_commits]).call
+        else
+          raise 'unshallow failed'
+        end
+      end
+    rescue StandardError
+      @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
+      @options[:cli_warnings] << Newness::UNSHALLOW_FAILED_WARNING
+      Newness.disabled_metadata(files)
     end
 
     def loc_percentiles_by_language(files, loc, language_by_file)
