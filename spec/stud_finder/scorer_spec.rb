@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'stud_finder/newness'
 require 'stud_finder/scorer'
 
 RSpec.describe StudFinder::Scorer do
@@ -54,6 +55,88 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['a.rb'][:classification]).to eq('leaf')
     expect(rows['b.rb'][:classification]).to eq('branch')
     expect(rows['c.rb'][:classification]).to eq('branch')
+  end
+
+  it 'escalates a composite leaf to branch when raw complexity reaches the absolute floor' do
+    files = %w[target.rb peer.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: files.to_h { |file| [file, 0] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 20] },
+      churn: files.to_h { |file| [file, 0] }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['target.rb'][:score]).to eq(0.0)
+    expect(rows['target.rb'][:classification]).to eq('branch')
+  end
+
+  it 'escalates a composite leaf to branch when raw fan_in reaches the absolute floor' do
+    files = %w[target.rb peer.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: files.to_h { |file| [file, 30] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['target.rb'][:score]).to eq(0.0)
+    expect(rows['target.rb'][:classification]).to eq('branch')
+  end
+
+  it 'keeps a composite leaf as leaf when raw complexity and fan_in are under the absolute floors' do
+    files = %w[target.rb peer.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: files.to_h { |file| [file, 24] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 14] },
+      churn: files.to_h { |file| [file, 0] }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['target.rb'][:score]).to eq(0.0)
+    expect(rows['target.rb'][:classification]).to eq('leaf')
+  end
+
+  it 'does not demote a composite trunk when raw complexity and fan_in are below the absolute floors' do
+    files = %w[trunk.rb low.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'trunk.rb' => 2, 'low.rb' => 0 },
+      fan_out: { 'trunk.rb' => 5, 'low.rb' => 0 },
+      complexity: { 'trunk.rb' => 3, 'low.rb' => 0 },
+      churn: { 'trunk.rb' => 5, 'low.rb' => 0 },
+      weights: { fan_in: 0.0, fan_out: 0.5, complexity: 0.0, churn: 0.5, coverage: 0.0 },
+      trunk_threshold: 85
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['trunk.rb'][:score]).to eq(1.0)
+    expect(rows['trunk.rb'][:classification]).to eq('trunk')
+  end
+
+  it 'lets a branch from the complexity floor stack with newness trunk-adjacent escalation' do
+    files = %w[trunk.rb new_client.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: files.to_h { |file| [file, 0] },
+      fan_out: { 'trunk.rb' => 5, 'new_client.rb' => 0 },
+      complexity: { 'trunk.rb' => 0, 'new_client.rb' => 20 },
+      churn: { 'trunk.rb' => 5, 'new_client.rb' => 0 },
+      weights: { fan_in: 0.0, fan_out: 0.5, complexity: 0.0, churn: 0.5, coverage: 0.0 },
+      trunk_threshold: 85
+    ).call
+    metadata = {
+      'trunk.rb' => { new_file: false, age_days: 120, total_commits: 4, metadata_available: true },
+      'new_client.rb' => { new_file: true, age_days: 1, total_commits: 1, metadata_available: true }
+    }
+    edges = { 'new_client.rb' => { dependencies: ['trunk.rb'] } }
+
+    result = StudFinder::Newness.apply(rows: rows, edges: edges, metadata: metadata).to_h { |row| [row[:path], row] }
+
+    expect(rows.to_h { |row| [row[:path], row] }['new_client.rb'][:classification]).to eq('branch')
+    expect(result['new_client.rb'][:classification]).to eq('trunk')
+    expect(result['new_client.rb'][:escalation]).to eq('trunk_adjacent')
   end
 
   it 'classifies max complexity, max churn, zero coverage, and median fan_in by interaction-adjusted score' do
@@ -335,6 +418,15 @@ RSpec.describe StudFinder::Scorer do
            .to_h { |row| [row[:path], row] }
 
     expect(rows.values.map { |row| row[:churn_pct] }).to all(eq(0.0))
+  end
+
+  it 'warns when equal non-zero churn collapses to zero percentiles' do
+    test_scorer = scorer(churn: files.to_h { |file| [file, 5] },
+                         churn_lines: files.to_h { |file| [file, 10] })
+    rows = test_scorer.call.to_h { |row| [row[:path], row] }
+
+    expect(rows.values.map { |row| row[:churn_pct] }).to all(eq(0.0))
+    expect(test_scorer.warnings).to include('insufficient_dispersion_churn')
   end
 
   it 'percentile-ranks per-file instability into instability_pct' do

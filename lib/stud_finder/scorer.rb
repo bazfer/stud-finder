@@ -1,17 +1,21 @@
 # frozen_string_literal: true
 
+require_relative 'dispersion_warnings'
 require_relative 'normalizer'
 
 module StudFinder
+  # rubocop:disable Metrics/ClassLength
   class Scorer
     DEFAULT_WEIGHTS = {
       fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10
     }.freeze
     RENORMALIZED_KEYS = %i[fan_in fan_out complexity churn].freeze
+    COMPLEXITY_FLOOR = 15
+    FAN_IN_FLOOR = 25
 
     class ValidationError < StandardError; end
 
-    attr_reader :normalized_weights
+    attr_reader :normalized_weights, :warnings
 
     def initialize(files:, fan_in:, fan_out:, complexity:, churn:, churn_lines: nil, loc: nil, loc_pct: nil,
                    coverage: nil, weights: DEFAULT_WEIGHTS, branch_threshold: 50, trunk_threshold: 85, coupling: nil)
@@ -28,6 +32,7 @@ module StudFinder
       @branch_threshold = branch_threshold
       @trunk_threshold = trunk_threshold
       @coupling = coupling
+      @warnings = []
       validate!
       @normalized_weights = normalize_weights
     end
@@ -43,6 +48,7 @@ module StudFinder
         coupling: coupling_pct,
         coverage: coverage_risk_pct
       }
+      @warnings = insufficient_dispersion_warnings(pcts)
 
       rows = @files.each_with_index.map do |file, index|
         score = weighted_score(file, pcts)
@@ -107,28 +113,35 @@ module StudFinder
     def composite_churn_pct
       count_pct = Normalizer.percentile_rank(@churn, @files)
       line_pct = Normalizer.percentile_rank(@churn_lines, @files)
-      averaged = @files.to_h do |file|
+      @churn_signal_raw = @files.to_h do |file|
         [file, ((0.5 * count_pct.fetch(file)) + (0.5 * line_pct.fetch(file))).round(10)]
       end
 
-      Normalizer.percentile_rank(averaged, @files)
+      Normalizer.percentile_rank(@churn_signal_raw, @files)
+    end
+
+    def churn_dispersion_raw_source
+      @files.to_h do |file|
+        [file, @churn.fetch(file, 0).to_f.abs + @churn_lines.fetch(file, 0).to_f.abs]
+      end
     end
 
     def result_row(file, score, pcts)
       fi = @fan_in.fetch(file, 0).to_i
       fo = @fan_out.fetch(file, 0).to_i
       rounded_score = score.round(4)
+      complexity = @complexity.fetch(file, 0).to_i
       {
         path: file,
         score: rounded_score,
-        classification: classification(rounded_score),
+        classification: floored_classification(classification(rounded_score), complexity, fi),
         fan_in: fi,
         fan_in_pct: pcts[:fan_in].fetch(file).round(4),
         fan_out: fo,
         fan_out_pct: pcts[:fan_out].fetch(file).round(4),
         instability: instability(fi, fo),
         instability_pct: pcts[:instability].fetch(file).round(4),
-        complexity: @complexity.fetch(file, 0).to_i,
+        complexity: complexity,
         complexity_pct: pcts[:complexity].fetch(file).round(4),
         churn_commits: @churn.fetch(file, 0).to_i,
         churn_lines: @churn_lines.fetch(file, 0).to_i,
@@ -173,8 +186,35 @@ module StudFinder
     def coverage_risk_pct
       return {} unless coverage_available?
 
-      values = @files.to_h { |file| [file, 1.0 - @coverage.fetch(file, 0.0)] }
-      Normalizer.percentile_rank(values, @files)
+      Normalizer.percentile_rank(coverage_risk_values, @files)
+    end
+
+    def coverage_risk_values
+      return {} unless coverage_available?
+
+      @files.to_h { |file| [file, 1.0 - @coverage.fetch(file, 0.0)] }
+    end
+
+    def interaction_values(pcts)
+      return {} unless coverage_available?
+
+      @files.to_h { |file| [file, pcts[:fan_in].fetch(file) * pcts[:coverage].fetch(file)] }
+    end
+
+    def insufficient_dispersion_warnings(pcts)
+      raw_sources = {
+        fan_in: @fan_in,
+        fan_out: @fan_out,
+        complexity: @complexity,
+        churn: churn_dispersion_raw_source
+      }
+      if coverage_available?
+        raw_sources[:coverage] = coverage_risk_values
+        raw_sources[:interaction] = interaction_values(pcts)
+        pcts = pcts.merge(interaction: Normalizer.percentile_rank(raw_sources[:interaction], @files))
+      end
+
+      DispersionWarnings.build(files: @files, pcts: pcts, raw_sources: raw_sources)
     end
 
     def coverage_value(file)
@@ -194,5 +234,13 @@ module StudFinder
 
       'leaf'
     end
+
+    def floored_classification(classification, complexity, fan_in)
+      return classification unless classification == 'leaf'
+      return 'branch' if complexity >= COMPLEXITY_FLOOR || fan_in >= FAN_IN_FLOOR
+
+      classification
+    end
   end
+  # rubocop:enable Metrics/ClassLength
 end
