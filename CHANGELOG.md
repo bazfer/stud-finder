@@ -11,10 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - BREAKING: Classification thresholds are now percentile-based, not score-value-based. `--trunk-threshold 85` and `--branch-threshold 50` now mean "top 15% and top 50% of files by composite score" — not "score value ≥ 0.85 / 0.50". This is a semantic change to the same flag values; the numbers you pass stay the same but their meaning inverts. Previously, trunk was unreachable at defaults (max observed composite score ~0.717 in real repos, zero trunks); now every repo of meaningful size produces some trunks and branches. Absolute floors (raw complexity ≥ 15, raw fan_in ≥ 25) still escalate to `branch` regardless of percentile.
 
-### Fixed
-
-- `[0.1.0]` entry corrected to "Initial RubyGems release" (the gem is published on RubyGems, 1688 downloads).
-
 ## [0.3.0] - 2026-07-11
 
 ### Fixed
