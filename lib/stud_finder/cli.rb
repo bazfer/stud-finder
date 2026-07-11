@@ -32,8 +32,8 @@ module StudFinder
       max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
-      rank language file score class new_file age_days escalation fan_in fan_out instability complexity churn_commits
-      churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
+      rank language file score class new_file age_days escalation fan_in fan_out fan_out_pct instability complexity
+      churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
     DEFAULT_OPTIONS = {
@@ -696,10 +696,10 @@ module StudFinder
     def markdown_row(row)
       values = [
         row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:new_file],
-        row[:age_days], row[:escalation], row[:fan_in], row[:fan_out], format_score(row[:instability]),
-        row[:complexity], row[:churn_commits], row[:churn_lines], format_score(row[:churn_pct]),
-        format_score(row[:max_coupling]), row[:max_coupling_partner], row[:coupling_partners],
-        format_score(row[:coupling_pct]), format_coverage(row[:coverage])
+        row[:age_days], row[:escalation], row[:fan_in], row[:fan_out], format_score(row[:fan_out_pct]),
+        format_score(row[:instability]), row[:complexity], row[:churn_commits], row[:churn_lines],
+        format_score(row[:churn_pct]), format_score(row[:max_coupling]), row[:max_coupling_partner],
+        row[:coupling_partners], format_score(row[:coupling_pct]), format_coverage(row[:coverage])
       ]
       "| #{values.join(' | ')} |"
     end

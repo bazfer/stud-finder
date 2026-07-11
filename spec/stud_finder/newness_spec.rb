@@ -28,6 +28,12 @@ RSpec.describe StudFinder::Newness do
            'git', '-C', root, 'commit', '-qm', message)
   end
 
+  def commit_with_dates(root, message, author_date:, committer_date:)
+    system('git', '-C', root, 'add', '-A')
+    system({ 'GIT_AUTHOR_DATE' => author_date.iso8601, 'GIT_COMMITTER_DATE' => committer_date.iso8601 },
+           'git', '-C', root, 'commit', '-qm', message)
+  end
+
   def metadata(root, files, **options)
     described_class.new(repo_path: root, files: files, now: now, **options).call
   end
@@ -50,6 +56,25 @@ RSpec.describe StudFinder::Newness do
       expect(result['app/models/new_leaf.rb'][:new_file]).to be(true)
       expect(result['app/models/new_leaf.rb'][:age_days]).to eq(1)
       expect(result['app/models/new_leaf.rb'][:escalation]).to eq('recency_floor')
+    end
+  end
+
+  it 'uses committer date for file age so recent imports with old authorship still floor' do
+    make_repo do |root|
+      file = 'app/models/imported_leaf.rb'
+      write_file(root, file, "class ImportedLeaf\nend\n")
+      commit_with_dates(root, 'import old-authored leaf',
+                        author_date: now - (90 * 86_400),
+                        committer_date: now - 86_400)
+
+      data = metadata(root, [file])
+      result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data)
+
+      expect(data[file][:total_commits]).to eq(1)
+      expect(data[file][:age_days]).to eq(1)
+      expect(result[file][:new_file]).to be(true)
+      expect(result[file][:classification]).to eq('branch')
+      expect(result[file][:escalation]).to eq('recency_floor')
     end
   end
 

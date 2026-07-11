@@ -102,9 +102,11 @@ module StudFinder
     end
 
     def git_history
+      # Use committer time (%ct), not author time, because newness is about when code landed in this repo.
+      # Cherry-picked or imported files can carry old author dates while still being newly introduced here.
       stdout, _stderr, status = Open3.capture3(
         'git', '-C', @repo_path, 'log',
-        '--format=%x1e%at',
+        '--format=%x1e%ct',
         '--name-status',
         '--find-renames',
         '--diff-filter=ACMRD'

@@ -810,6 +810,14 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
     expect(cli.send(:markdown_row, row)).to include('| false | 42 |')
   end
 
+  it 'includes fan_out_pct in markdown output' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS).to include('fan_out_pct')
+    expect(described_class::MARKDOWN_COLUMNS).to include('fan_out_pct')
+    expect(cli.send(:markdown_row, row)).to include('| 1 | 1.0000 | 1.0000 |')
+  end
+
   it 'computes LOC percentiles separately for each language' do
     cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
     files = %w[small.rb large.rb small.ts large.ts]
