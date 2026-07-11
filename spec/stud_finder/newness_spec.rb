@@ -453,6 +453,65 @@ RSpec.describe StudFinder::Newness do
     end
   end
 
+  # Floor vs newness marker precedence — P2 fix (round 2)
+  it 'recency_floor overwrites complexity_floor when a new file satisfies both' do
+    file = 'app/models/new_complex.rb'
+    data = { file => { new_file: true, age_days: 10, total_commits: 1, escalation: '', metadata_available: true } }
+    rows = [{ path: file, score: 0.4, classification: 'branch', escalation: 'complexity_floor' }]
+    edges = { file => { dependencies: [] } }
+
+    result = apply(rows, edges, data)
+
+    expect(result[file][:classification]).to eq('branch')
+    expect(result[file][:escalation]).to eq('recency_floor')
+  end
+
+  it 'recency_floor overwrites fan_in_floor when a new file satisfies both' do
+    file = 'app/models/new_hub.rb'
+    data = { file => { new_file: true, age_days: 10, total_commits: 1, escalation: '', metadata_available: true } }
+    rows = [{ path: file, score: 0.4, classification: 'branch', escalation: 'fan_in_floor' }]
+    edges = { file => { dependencies: [] } }
+
+    result = apply(rows, edges, data)
+
+    expect(result[file][:classification]).to eq('branch')
+    expect(result[file][:escalation]).to eq('recency_floor')
+  end
+
+  it 'trunk_adjacent takes precedence over both complexity_floor and recency_floor for a new complex file' do
+    trunk_file = 'app/models/trunk.rb'
+    file = 'app/models/new_complex_client.rb'
+    data = {
+      trunk_file => { new_file: false, age_days: 500, total_commits: 50, escalation: '', metadata_available: true },
+      file => { new_file: true, age_days: 10, total_commits: 1, escalation: '', metadata_available: true }
+    }
+    rows = [
+      { path: trunk_file, score: 0.9, classification: 'trunk', escalation: '' },
+      { path: file, score: 0.4, classification: 'branch', escalation: 'complexity_floor' }
+    ]
+    edges = {
+      trunk_file => { dependencies: [] },
+      file => { dependencies: [trunk_file] }
+    }
+
+    result = apply(rows, edges, data)
+
+    expect(result[file][:classification]).to eq('trunk')
+    expect(result[file][:escalation]).to eq('trunk_adjacent')
+  end
+
+  it 'preserves complexity_floor marker for an old file that does not satisfy newness' do
+    file = 'app/models/old_complex.rb'
+    data = { file => { new_file: false, age_days: 500, total_commits: 50, escalation: '', metadata_available: true } }
+    rows = [{ path: file, score: 0.4, classification: 'branch', escalation: 'complexity_floor' }]
+    edges = { file => { dependencies: [] } }
+
+    result = apply(rows, edges, data)
+
+    expect(result[file][:classification]).to eq('branch')
+    expect(result[file][:escalation]).to eq('complexity_floor')
+  end
+
   it 'returns disabled metadata when called directly against a shallow repository' do
     make_repo do |root|
       file = 'app/models/user.rb'

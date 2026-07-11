@@ -64,7 +64,7 @@ module StudFinder
         dependencies = edges.fetch(row[:path], {}).fetch(:dependencies, [])
         if dependencies.any? { |path| trunk_paths.include?(path) }
           row.merge(classification: 'trunk', escalation: 'trunk_adjacent')
-        elsif row[:classification] == 'leaf'
+        elsif row[:classification] == 'leaf' || %w[complexity_floor fan_in_floor].include?(row[:escalation].to_s)
           row.merge(classification: branch_threshold, escalation: 'recency_floor')
         else
           row
