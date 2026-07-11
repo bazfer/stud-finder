@@ -6,7 +6,8 @@ require 'spec_helper'
 require 'stud_finder/cli'
 
 RSpec.describe StudFinder::CLI do
-  full_weights = 'fan_in:0.20,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.10,interaction:0.10'
+  full_weights = 'fan_in:0.19,fan_out:0.095,complexity:0.2375,churn:0.2375,' \
+                 'coverage:0.095,interaction:0.095,coupling:0.05'
 
   define_method(:full_weights) { full_weights }
 
@@ -217,7 +218,7 @@ RSpec.describe StudFinder::CLI do
     status, _stdout, stderr = run_cli(['--weights', weights])
 
     expect(status).to eq(1)
-    expect(stderr).to include('actual sum is 0.8000')
+    expect(stderr).to include('actual sum is 0.8500')
   end
 
   it 'rejects a negative interaction weight when total weight is valid' do
@@ -235,11 +236,84 @@ RSpec.describe StudFinder::CLI do
     expect(stderr).to include('coverage weight must be 0.0 when no coverage data is provided')
   end
 
+  it 'accepts --coupling-weight alone without coverage data' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--coupling-weight', '0.05', '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      expect(stderr).not_to include('coverage weight must be 0.0 when no coverage data is provided')
+    end
+  end
+
+  it 'rejects out-of-range --coupling-weight alone' do
+    ['-0.5', '2.0'].each do |value|
+      status, _stdout, stderr = run_cli(['--coupling-weight', value])
+
+      expect(status).to eq(1)
+      expect(stderr).to include('weight values must be between 0.0 and 1.0')
+    end
+  end
+
   it 'requires all weight keys including fan_out' do
     status, _stdout, stderr = run_cli(['--weights', 'fan_in:0.5,complexity:0.3,churn:0.2'])
 
     expect(status).to eq(1)
     expect(stderr).to include('weights must include fan_in, fan_out, complexity, churn, and coverage')
+  end
+
+  it 'weights temporal coupling from --coupling-weight' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      allow_any_instance_of(StudFinder::FanIn).to receive(:call).and_return(
+        StudFinder::FanIn::Result.new(counts: files.to_h { |file| [file, 0] },
+                                      fan_out_counts: files.to_h { |file| [file, 0] }, edges: {}, warnings: [])
+      )
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(
+          counts: files.to_h { |file| [file, 0] },
+          line_counts: files.to_h { |file| [file, 0] },
+          zero_inflated: false,
+          zero_percentage: 0
+        )
+      )
+      allow_any_instance_of(StudFinder::TemporalCoupling).to receive(:call).and_return(
+        StudFinder::TemporalCoupling::Result.new(
+          pairs: {
+            'app/models/model_0.rb' => [
+              { path: 'app/models/model_1.rb', coupling: 0.9, co_changes: 5 }
+            ]
+          },
+          warnings: []
+        )
+      )
+
+      status, stdout, stderr = run_cli([
+                                         root, '--min-files', '1', '--output', 'json',
+                                         '--weights',
+                                         'fan_in:0.0,fan_out:0.0,complexity:0.0,churn:0.5,' \
+                                         'coverage:0.0,interaction:0.0,coupling:0.0',
+                                         '--coupling-weight', '0.5'
+                                       ])
+      expect(status).to eq(0), stderr
+      payload = JSON.parse(stdout)
+      expect(payload.fetch('meta').fetch('formula')).to eq('4-factor + coupling')
+      expect(payload.fetch('meta').fetch('weights').fetch('coupling')).to eq(0.5)
+
+      rows = payload.fetch('ruby').to_h { |row| [row.fetch('path'), row] }
+      expect(rows.fetch('app/models/model_0.rb').fetch('score')).to eq(0.5)
+      expect(rows.fetch('app/models/model_0.rb').fetch('coupling_pct')).to eq(1.0)
+    end
+  end
+
+  it 'rejects a negative coupling weight when total weight is valid' do
+    weights = 'fan_in:0.30,fan_out:0.10,complexity:0.30,churn:0.35,coverage:0.0,interaction:0.0,coupling:0.05'
+    status, _stdout, stderr = run_cli(['--weights', weights, '--coupling-weight', '-0.05'])
+
+    expect(status).to eq(1)
+    expect(stderr).to include('weight values must be between 0.0 and 1.0')
   end
 
   it 'reports a missing coverage file' do
@@ -896,6 +970,20 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
 
     expect(cli.send(:limited_rows, sorted).map { |result| result[:path] }).to include('new_client.rb')
     expect(sorted.find { |result| result[:path] == 'new_client.rb' }).to include(classification: 'trunk', rank: 2)
+  end
+
+  it 'labels JSON formulas based on coverage and coupling availability' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+    analysis = lambda do |coverage:, coupling:|
+      weights = { fan_in: 0.25, fan_out: 0.25, complexity: 0.25, churn: 0.25, coupling: coupling }
+      report = described_class::Analysis.new(coverage_available: coverage, weights: weights)
+      described_class::Report.new(ruby: report, javascript: report)
+    end
+
+    expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: 0.05))).to eq('5-factor + coupling')
+    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: 0.05))).to eq('4-factor + coupling')
+    expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: nil))).to eq('5-factor')
+    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: nil))).to eq('4-factor (no coverage)')
   end
 
   it 'includes LOC in table, JSON, and CSV columns, but excludes markdown' do

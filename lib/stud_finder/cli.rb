@@ -38,7 +38,7 @@ module StudFinder
       churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
-    OPTIONAL_WEIGHT_KEYS = %i[interaction].freeze
+    OPTIONAL_WEIGHT_KEYS = %i[interaction coupling].freeze
     DEFAULT_OPTIONS = {
       output: 'table',
       churn_days: 180,
@@ -175,7 +175,8 @@ module StudFinder
         opts.on('--churn-days N', Integer, 'Commit lookback window in days (default: 180)') do |value|
           @options[:churn_days] = value
         end
-        opts.on('--weights WEIGHTS', 'fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I]') do |value|
+        opts.on('--weights WEIGHTS',
+                'fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I][,coupling:P]') do |value|
           @options[:weights] = parse_weights(value)
           @options[:custom_weights] = true
         end
@@ -183,6 +184,11 @@ module StudFinder
                 'fan_in × coverage_risk interaction weight (requires coverage)') do |value|
           @options[:weights][:interaction] = value
           @options[:custom_weights] = true
+        end
+        opts.on('--coupling-weight N', Float, 'temporal coupling weight') do |value|
+          raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if value.negative? || value > 1.0
+
+          @options[:weights][:coupling] = value
         end
         opts.on('--ruby-coverage PATH', 'Path to a Ruby coverage report (.xml, .info, .json)') do |value|
           @options[:ruby_coverage_path] = value
@@ -285,6 +291,7 @@ module StudFinder
       end
 
       weights[:interaction] = 0.0 unless weights.key?(:interaction)
+      weights[:coupling] = 0.05 unless weights.key?(:coupling)
 
       out_of_range = weights.any? { |_key, weight| weight.negative? || weight > 1.0 }
       raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if out_of_range
@@ -538,7 +545,7 @@ module StudFinder
 
     def emit_scoring_note(scorer, coverage_result)
       if coverage_result
-        @stderr.puts 'Note: coverage data available. Score uses 5-factor formula.'
+        @stderr.puts coverage_scoring_note(weights: scorer.normalized_weights)
       else
         @stderr.puts scoring_note(weights: scorer.normalized_weights, stderr: true)
       end
@@ -698,7 +705,7 @@ module StudFinder
         churn_days: @options[:churn_days],
         file_count: analysis.ruby.files.length + analysis.javascript.files.length,
         files_skipped: analysis.ruby.skipped_files.length + analysis.javascript.skipped_files.length,
-        formula: report_coverage_available?(analysis) ? '5-factor' : '4-factor (no coverage)',
+        formula: json_formula(analysis),
         weights: json_weights(analysis.ruby.weights || analysis.javascript.weights),
         warnings: analysis.warnings
       }
@@ -824,6 +831,18 @@ module StudFinder
       analysis.ruby.coverage_available || analysis.javascript.coverage_available
     end
 
+    def json_formula(analysis)
+      coverage_available = report_coverage_available?(analysis)
+      weights = analysis.ruby.weights || analysis.javascript.weights
+      coupling_available = weights[:coupling]
+
+      if coverage_available
+        coupling_available ? '5-factor + coupling' : '5-factor'
+      else
+        coupling_available ? '4-factor + coupling' : '4-factor (no coverage)'
+      end
+    end
+
     def json_weights(weights)
       {
         fan_in: weights[:fan_in].round(4),
@@ -831,17 +850,37 @@ module StudFinder
         complexity: weights[:complexity].round(4),
         churn: weights[:churn].round(4),
         coverage: weights[:coverage]&.round(4),
-        interaction: weights[:interaction]&.round(4)
+        interaction: weights[:interaction]&.round(4),
+        coupling: weights[:coupling]&.round(4)
       }
     end
 
+    def coverage_scoring_note(weights:)
+      return 'Note: coverage data available. Score uses 6-factor formula (including coupling).' if weights[:coupling]
+
+      'Note: coverage data available. Score uses 5-factor formula.'
+    end
+
     def scoring_note(weights:, stderr:)
+      return coupling_scoring_note(weights: weights, stderr: stderr) if weights[:coupling]
+
       if stderr
         format('Note: coverage data not available. Score uses 4-factor formula (fan_in %<fan_in>.2f, ' \
                'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f).', **weights)
       else
         format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
                'complexity %<complexity>.2f, churn %<churn>.2f.', **weights)
+      end
+    end
+
+    def coupling_scoring_note(weights:, stderr:)
+      if stderr
+        format('Note: coverage data not available. Score uses 5-factor formula (fan_in %<fan_in>.2f, ' \
+               'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f, ' \
+               'coupling %<coupling>.2f).', **weights)
+      else
+        format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
+               'complexity %<complexity>.2f, churn %<churn>.2f, coupling %<coupling>.2f.', **weights)
       end
     end
 

@@ -7,9 +7,11 @@ module StudFinder
   # rubocop:disable Metrics/ClassLength
   class Scorer
     DEFAULT_WEIGHTS = {
-      fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10
+      fan_in: 0.19, fan_out: 0.095, complexity: 0.2375, churn: 0.2375, coverage: 0.095,
+      interaction: 0.095, coupling: 0.05
     }.freeze
-    RENORMALIZED_KEYS = %i[fan_in fan_out complexity churn].freeze
+    BASE_WEIGHT_KEYS = %i[fan_in fan_out complexity churn].freeze
+    WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage interaction coupling].freeze
     COMPLEXITY_FLOOR = 15
     FAN_IN_FLOOR = 25
 
@@ -70,37 +72,32 @@ module StudFinder
     end
 
     def normalize_weights
-      active_total = RENORMALIZED_KEYS.sum { |key| @weights.fetch(key, 0.0) }
-      if !coverage_available? && active_total <= 0.0
+      active_keys = BASE_WEIGHT_KEYS.dup
+      active_keys += %i[coverage interaction] if coverage_available?
+      active_keys << :coupling if coupling_available?
+
+      active_total = active_keys.sum { |key| @weights.fetch(key, 0.0) }
+      if active_total <= 0.0
         raise ValidationError,
               'Error: active weights must be greater than 0.0.'
       end
 
-      @active_weights = if active_total > 0.0
-                          RENORMALIZED_KEYS.to_h { |key| [key, @weights.fetch(key, 0.0) / active_total] }
-                                           .merge(coverage: nil)
-                        else
-                          RENORMALIZED_KEYS.to_h { |key| [key, 0.0] }.merge(coverage: nil)
-                        end
-
-      return @weights if coverage_available?
-
-      @active_weights
+      WEIGHT_KEYS.to_h do |key|
+        [key, active_keys.include?(key) ? @weights.fetch(key, 0.0) / active_total : nil]
+      end
     end
 
     def weighted_score(file, pcts)
-      return active_weights_score(file, pcts) unless coverage_available?
+      score = structural_score(@normalized_weights, file, pcts)
+      score += @normalized_weights[:coverage] * pcts[:coverage].fetch(file) if coverage_available?
+      score += interaction_score(file, pcts) if coverage_available?
+      score += @normalized_weights[:coupling] * pcts[:coupling].fetch(file) if coupling_available?
 
-      base = structural_score(@normalized_weights, file, pcts) +
-             (@normalized_weights[:coverage] * pcts[:coverage].fetch(file))
-      interaction = @normalized_weights.fetch(:interaction, 0.0) * pcts[:fan_in].fetch(file) *
-                    pcts[:coverage].fetch(file)
-
-      (base + interaction).clamp(0.0, 1.0)
+      score.clamp(0.0, 1.0)
     end
 
-    def active_weights_score(file, pcts)
-      structural_score(@active_weights, file, pcts)
+    def interaction_score(file, pcts)
+      @normalized_weights.fetch(:interaction, 0.0) * pcts[:fan_in].fetch(file) * pcts[:coverage].fetch(file)
     end
 
     def structural_score(weights, file, pcts)
@@ -176,11 +173,14 @@ module StudFinder
     end
 
     def coupling_pct
-      values = @files.to_h do |file|
+      Normalizer.percentile_rank(coupling_values, @files)
+    end
+
+    def coupling_values
+      @files.to_h do |file|
         partner = @coupling&.fetch(file, nil)
         [file, partner ? partner.fetch(:max_coupling, 0.0).to_f : 0.0]
       end
-      Normalizer.percentile_rank(values, @files)
     end
 
     def coverage_risk_pct
@@ -213,6 +213,7 @@ module StudFinder
         raw_sources[:interaction] = interaction_values(pcts)
         pcts = pcts.merge(interaction: Normalizer.percentile_rank(raw_sources[:interaction], @files))
       end
+      raw_sources[:coupling] = coupling_values if coupling_available?
 
       DispersionWarnings.build(files: @files, pcts: pcts, raw_sources: raw_sources)
     end
@@ -226,6 +227,17 @@ module StudFinder
 
     def coverage_available?
       !@coverage.nil?
+    end
+
+    def coupling_available?
+      return false if @coupling.nil? || @coupling.empty?
+
+      @files.any? do |file|
+        partner = @coupling.fetch(file, nil)
+        partner.respond_to?(:fetch) && partner.fetch(:max_coupling, 0.0).to_f.positive?
+      rescue ArgumentError, TypeError
+        false
+      end
     end
 
     def classification(score)
