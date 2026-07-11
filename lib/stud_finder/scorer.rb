@@ -107,10 +107,11 @@ module StudFinder
     def composite_churn_pct
       count_pct = Normalizer.percentile_rank(@churn, @files)
       line_pct = Normalizer.percentile_rank(@churn_lines, @files)
-
-      @files.to_h do |file|
-        [file, (0.5 * count_pct.fetch(file)) + (0.5 * line_pct.fetch(file))]
+      averaged = @files.to_h do |file|
+        [file, ((0.5 * count_pct.fetch(file)) + (0.5 * line_pct.fetch(file))).round(10)]
       end
+
+      Normalizer.percentile_rank(averaged, @files)
     end
 
     def result_row(file, score, pcts)
