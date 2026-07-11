@@ -935,6 +935,59 @@ RSpec.describe StudFinder::CLI do
       end
     end
   end
+
+  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 4-factor mode' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
+                                      zero_percentage: 0)
+      )
+
+      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--output', 'json'])
+      _status, table_out, _table_err = run_cli([root, '--min-files', '5'])
+
+      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('4-factor')
+      expect(json_err).to include('Score uses 4-factor formula')
+      expect(table_out).to include('4-factor')
+    end
+  end
+
+  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 5-factor + coupling mode' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      coverage = write_coverage_report(root, files)
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
+                                      zero_percentage: 0)
+      )
+      allow_any_instance_of(StudFinder::TemporalCoupling).to receive(:call).and_return(
+        StudFinder::TemporalCoupling::Result.new(
+          pairs: {
+            'app/models/model_0.rb' => [
+              { path: 'app/models/model_1.rb', coupling: 0.9, co_changes: 5 }
+            ]
+          },
+          warnings: []
+        )
+      )
+
+      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage,
+                                             '--output', 'json'])
+      _status, table_out, _table_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage])
+
+      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('5-factor + coupling')
+      expect(json_err).to include('Score uses 5-factor + coupling formula')
+      expect(json_err).not_to include('6-factor')
+      expect(table_out).to include('5-factor + coupling')
+    end
+  end
 end
 
 RSpec.describe StudFinder::CLI, 'LOC output routing' do
@@ -1096,56 +1149,4 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       .to eq('4-factor')
   end
 
-  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 4-factor mode' do
-    make_repo(file_count: 5) do |root|
-      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
-      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
-        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
-      )
-      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
-        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
-                                      zero_percentage: 0)
-      )
-
-      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--output', 'json'])
-      _status, table_out, _stderr = run_cli([root, '--min-files', '5'])
-
-      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('4-factor')
-      expect(json_err).to include('Score uses 4-factor formula')
-      expect(table_out).to include('4-factor')
-    end
-  end
-
-  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 5-factor + coupling mode' do
-    make_repo(file_count: 5) do |root|
-      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
-      coverage = write_coverage_report(root, files)
-      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
-        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
-      )
-      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
-        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
-                                      zero_percentage: 0)
-      )
-      allow_any_instance_of(StudFinder::TemporalCoupling).to receive(:call).and_return(
-        StudFinder::TemporalCoupling::Result.new(
-          pairs: {
-            'app/models/model_0.rb' => [
-              { path: 'app/models/model_1.rb', coupling: 0.9, co_changes: 5 }
-            ]
-          },
-          warnings: []
-        )
-      )
-
-      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage,
-                                             '--output', 'json'])
-      _status, table_out, _table_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage])
-
-      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('5-factor + coupling')
-      expect(json_err).to include('Score uses 5-factor + coupling formula')
-      expect(json_err).not_to include('6-factor')
-      expect(table_out).to include('5-factor + coupling')
-    end
-  end
 end

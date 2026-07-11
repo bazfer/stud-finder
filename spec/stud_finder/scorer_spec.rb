@@ -147,19 +147,24 @@ RSpec.describe StudFinder::Scorer do
 
   it 'does not set a floor escalation marker on a score-based branch' do
     # A file that reaches branch by score alone (not floor) carries no escalation from scorer.
-    files = %w[high.rb low.rb]
+    # Three files: high/medium/low. medium.rb sits in the middle percentile; its score lands
+    # at 0.5 with branch_threshold 30 → score-classified branch, no floor (complexity 5 < 15,
+    # fan_in 0 < 25).
+    files = %w[high.rb medium.rb low.rb]
     rows = described_class.new(
       files: files,
-      fan_in: { 'high.rb' => 0, 'low.rb' => 0 },
-      fan_out: { 'high.rb' => 5, 'low.rb' => 0 },
-      complexity: { 'high.rb' => 5, 'low.rb' => 0 },
-      churn: { 'high.rb' => 5, 'low.rb' => 0 },
+      fan_in: { 'high.rb' => 0, 'medium.rb' => 0, 'low.rb' => 0 },
+      fan_out: { 'high.rb' => 5, 'medium.rb' => 3, 'low.rb' => 0 },
+      complexity: { 'high.rb' => 5, 'medium.rb' => 5, 'low.rb' => 0 },
+      churn: { 'high.rb' => 5, 'medium.rb' => 3, 'low.rb' => 0 },
       weights: { fan_in: 0.0, fan_out: 0.5, complexity: 0.0, churn: 0.5, coverage: 0.0 },
-      branch_threshold: 50
+      branch_threshold: 30,
+      trunk_threshold: 85
     ).call.to_h { |row| [row[:path], row] }
 
-    expect(rows['high.rb'][:classification]).to eq('branch')
-    expect(rows['high.rb'][:escalation]).to eq('')
+    expect(rows['medium.rb'][:score]).to eq(0.5)
+    expect(rows['medium.rb'][:classification]).to eq('branch')
+    expect(rows['medium.rb'][:escalation]).to eq('')
   end
 
   it 'does not demote a composite trunk when raw complexity and fan_in are below the absolute floors' do

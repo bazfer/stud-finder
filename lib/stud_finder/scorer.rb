@@ -253,9 +253,9 @@ module StudFinder
       return [classification, ''] unless classification == 'leaf'
 
       if complexity >= COMPLEXITY_FLOOR
-        ['branch', 'complexity_floor']
+        %w[branch complexity_floor]
       elsif fan_in >= FAN_IN_FLOOR
-        ['branch', 'fan_in_floor']
+        %w[branch fan_in_floor]
       else
         [classification, '']
       end

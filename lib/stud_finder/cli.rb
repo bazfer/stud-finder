@@ -877,7 +877,7 @@ module StudFinder
                  'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f, ' \
                  'coupling %<coupling>.2f).', **weights)
         else
-          format("Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, " \
+          format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
                  'complexity %<complexity>.2f, churn %<churn>.2f, coupling %<coupling>.2f.', **weights)
         end
       elsif stderr
