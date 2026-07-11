@@ -40,12 +40,17 @@ module StudFinder
         age_days = age_days(first_epoch)
         is_new = new_file?(age_days, total_commits)
 
-        [file, { new_file: is_new, age_days: age_days || 0, total_commits: total_commits, escalation: '' }]
+        [file, { new_file: is_new, age_days: age_days || 0, total_commits: total_commits, escalation: '',
+                 metadata_available: true }]
       end
     end
 
-    def self.apply(rows:, edges:, metadata:, branch_threshold: 'branch')
-      rows = rows.map { |row| row.merge(newness_fields(metadata.fetch(row[:path], nil))) }
+    def self.apply(rows:, edges:, metadata:, branch_threshold: 'branch', coverage: nil)
+      rows = rows.map do |row|
+        file_metadata = metadata.fetch(row[:path], nil)
+        row.merge(newness_fields(file_metadata))
+           .merge(evidence: evidence(file_metadata, coverage&.key?(row[:path])))
+      end
       # Rule 2: scorer "trunk" now means high composite risk, not fan-in-only structural coupling.
       trunk_paths = rows.select { |row| row[:classification] == 'trunk' }.to_set { |row| row[:path] }
 
@@ -64,7 +69,9 @@ module StudFinder
     end
 
     def self.disabled_metadata(files)
-      files.to_h { |file| [file, { new_file: false, age_days: 0, total_commits: 0, escalation: '' }] }
+      files.to_h do |file|
+        [file, { new_file: false, age_days: 0, total_commits: 0, escalation: '', metadata_available: false }]
+      end
     end
 
     def self.shallow_repository?(repo_path)
@@ -78,12 +85,24 @@ module StudFinder
     end
 
     def self.newness_fields(metadata)
-      metadata ||= { new_file: false, age_days: 0 }
+      metadata ||= { new_file: false, age_days: 0, total_commits: 0, metadata_available: false }
       {
         new_file: metadata.fetch(:new_file, false),
         age_days: metadata.fetch(:age_days, 0),
+        total_commits: metadata.fetch(:total_commits, 0),
+        newness_metadata_available: metadata.fetch(:metadata_available, false),
         escalation: ''
       }
+    end
+
+    def self.evidence(metadata, explicit_coverage)
+      return nil unless metadata&.fetch(:metadata_available, false)
+
+      age_component = [metadata.fetch(:age_days, 0) / 30.0, 1.0].min
+      commits_component = [metadata.fetch(:total_commits, 0) / 3.0, 1.0].min
+      coverage_component = explicit_coverage ? 1.0 : 0.0
+
+      ((age_component + commits_component + coverage_component) / 3.0).round(4)
     end
 
     def self.git_shallow_file?(repo_path)

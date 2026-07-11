@@ -38,8 +38,48 @@ RSpec.describe StudFinder::Newness do
     described_class.new(repo_path: root, files: files, now: now, **options).call
   end
 
-  def apply(rows, edges, data)
-    described_class.apply(rows: rows, edges: edges, metadata: data).to_h { |row| [row[:path], row] }
+  def apply(rows, edges, data, coverage: nil)
+    described_class.apply(rows: rows, edges: edges, metadata: data, coverage: coverage).to_h { |row| [row[:path], row] }
+  end
+
+  it 'computes full evidence when age, commits, and coverage data are present' do
+    file = 'app/models/user.rb'
+    data = { file => { new_file: false, age_days: 45, total_commits: 10, escalation: '', metadata_available: true } }
+
+    result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data,
+                   coverage: { file => 0.8 })
+
+    expect(result[file][:evidence]).to eq(1.0)
+  end
+
+  it 'averages partial age evidence with full commits and coverage evidence' do
+    file = 'app/models/user.rb'
+    data = { file => { new_file: true, age_days: 15, total_commits: 6, escalation: '', metadata_available: true } }
+
+    result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data,
+                   coverage: { file => 0.8 })
+
+    expect(result[file][:evidence]).to eq(0.8333)
+  end
+
+  it 'treats files missing from a coverage report as absent coverage evidence' do
+    file = 'app/models/user.rb'
+    data = { file => { new_file: false, age_days: 45, total_commits: 10, escalation: '', metadata_available: true } }
+
+    result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data,
+                   coverage: {})
+
+    expect(result[file][:evidence]).to eq(0.6667)
+  end
+
+  it 'emits nil evidence when newness metadata is disabled' do
+    file = 'app/models/user.rb'
+    data = described_class.disabled_metadata([file])
+
+    result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data,
+                   coverage: { file => 0.8 })
+
+    expect(result[file][:evidence]).to be_nil
   end
 
   it 'floors a file first committed yesterday from leaf to branch without changing its score' do
@@ -427,7 +467,8 @@ RSpec.describe StudFinder::Newness do
 
         data = described_class.new(repo_path: shallow_root, files: [file], now: now).call
 
-        expect(data[file]).to eq(new_file: false, age_days: 0, total_commits: 0, escalation: '')
+        expect(data[file]).to eq(new_file: false, age_days: 0, total_commits: 0, escalation: '',
+                                 metadata_available: false)
       end
     end
   end

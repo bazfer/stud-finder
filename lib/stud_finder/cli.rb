@@ -26,13 +26,15 @@ module StudFinder
   # rubocop:disable Metrics/ClassLength
   class CLI
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
+    CLASS_RANK = { 'trunk' => 3, 'branch' => 2, 'leaf' => 1 }.freeze
     RESULT_COLUMNS = %w[
-      rank language file score class new_file age_days escalation fan_in fan_in_pct fan_out fan_out_pct instability
-      instability_pct complexity complexity_pct churn_commits churn_lines churn_pct loc loc_pct max_coupling
+      rank language file score evidence class new_file age_days escalation fan_in fan_in_pct fan_out fan_out_pct
+      instability instability_pct complexity complexity_pct churn_commits churn_lines churn_pct loc loc_pct max_coupling
       max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
-      rank language file score class new_file age_days escalation fan_in fan_out fan_out_pct instability complexity
+      rank language file score evidence class new_file age_days escalation fan_in fan_out fan_out_pct instability
+      complexity
       churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
@@ -482,7 +484,9 @@ module StudFinder
       warnings << 'files_skipped' if skipped_files.any?
       warnings << 'small_repo' if files.length < @options[:min_files]
       emit_scoring_note(scorer, coverage_result)
-      rows = apply_newness(files, edges, scorer.call).map { |row| with_language(row, language_by_file) }
+      rows = apply_newness(files, edges, scorer.call, coverage_result)
+             .map { |row| with_language(row, language_by_file) }
+      rows = sort_and_rank_rows(rows, files)
       Analysis.new(
         files: files, fan_in: fan_in, fan_out: fan_out, edges: edges, complexity: complexity,
         churn_commits: churn_result.churn_commits, churn_lines: churn_result.churn_lines, loc: loc,
@@ -493,7 +497,7 @@ module StudFinder
     end
     # rubocop:enable Metrics/ParameterLists
 
-    def apply_newness(files, edges, rows)
+    def apply_newness(files, edges, rows, coverage_result = nil)
       metadata = if @options[:newness] && Newness.shallow_repository?(@repo_path)
                    @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
                    Newness.disabled_metadata(files)
@@ -503,7 +507,7 @@ module StudFinder
                  else
                    Newness.disabled_metadata(files)
                  end
-      Newness.apply(rows: rows, edges: edges, metadata: metadata)
+      Newness.apply(rows: rows, edges: edges, metadata: metadata, coverage: coverage_result)
     end
 
     def loc_percentiles_by_language(files, loc, language_by_file)
@@ -618,6 +622,14 @@ module StudFinder
                  warnings: (analysis.warnings + ['diff_no_scored_files']).uniq)
     end
 
+    def sort_and_rank_rows(rows, files)
+      original_index = files.each_with_index.to_h
+      sorted = rows.sort_by do |row|
+        [-CLASS_RANK.fetch(row[:classification], 0), -row[:score], original_index.fetch(row[:path])]
+      end
+      sorted.map.with_index(1) { |row, rank| row.merge(rank: rank) }
+    end
+
     def limited_rows(rows)
       filtered = @options[:filter_set] ? rows.select { |row| @options[:filter_set].include?(row[:path]) } : rows
       @options[:top] ? filtered.first(@options[:top]) : filtered
@@ -651,7 +663,8 @@ module StudFinder
 
     def emit_table_section(title, rows)
       @stdout.puts title
-      @stdout.puts ' rank  language    file                                            score  class   new  age_days  ' \
+      @stdout.puts ' rank  language    file                                            score  evidence  class   new  ' \
+                   'age_days  ' \
                    'escalation      fan_in  fan_out  instability  complexity  churn_commits  churn_lines  ' \
                    'churn_pct    loc  loc_pct  ' \
                    'max_coupling  max_coupling_partner                      coupling_partners  coupling_pct  ' \
@@ -712,8 +725,9 @@ module StudFinder
 
     def markdown_row(row)
       values = [
-        row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:new_file],
-        row[:age_days], row[:escalation], row[:fan_in], row[:fan_out], format_score(row[:fan_out_pct]),
+        row[:rank], row[:language], row[:path], format_score(row[:score]), format_evidence(row[:evidence]),
+        row[:classification], row[:new_file], row[:age_days], row[:escalation], row[:fan_in], row[:fan_out],
+        format_score(row[:fan_out_pct]),
         format_score(row[:instability]), row[:complexity], row[:churn_commits], row[:churn_lines],
         format_score(row[:churn_pct]), format_score(row[:max_coupling]), row[:max_coupling_partner],
         row[:coupling_partners], format_score(row[:coupling_pct]), format_coverage(row[:coverage])
@@ -746,6 +760,7 @@ module StudFinder
         language: row[:language],
         path: row[:path],
         score: row[:score],
+        evidence: row[:evidence],
         class: row[:classification],
         new_file: row[:new_file],
         age_days: row[:age_days],
@@ -777,6 +792,7 @@ module StudFinder
         row[:language],
         row[:path],
         format_score(row[:score]),
+        format_evidence(row[:evidence]),
         row[:classification],
         row[:new_file],
         row[:age_days],
@@ -852,14 +868,22 @@ module StudFinder
       "#{(coverage * 100).round}%"
     end
 
+    def format_evidence(evidence)
+      return nil if evidence.nil?
+
+      format_score(evidence)
+    end
+
     def table_row(row)
-      format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<new_file>5s  ' \
+      format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<evidence>8s  ' \
+             '%<classification>-6s  %<new_file>5s  ' \
              '%<age_days>8d  %<escalation>-15s  %<fan_in>6d  %<fan_out>7d  %<instability>11s  %<complexity>10d  ' \
              '%<churn_commits>13d  %<churn_lines>11d  %<churn_pct>9s  %<loc>5d  %<loc_pct>7s  ' \
              '%<max_coupling>12s  %<max_coupling_partner>-40s  %<coupling_partners>17d  ' \
              '%<coupling_pct>12s  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
-             classification: row[:classification], new_file: row[:new_file].to_s, age_days: row[:age_days].to_i,
+             evidence: format_evidence(row[:evidence]) || 'n/a', classification: row[:classification],
+             new_file: row[:new_file].to_s, age_days: row[:age_days].to_i,
              escalation: row[:escalation],
              fan_in: row[:fan_in], fan_out: row[:fan_out], instability: format_score(row[:instability]),
              complexity: row[:complexity],

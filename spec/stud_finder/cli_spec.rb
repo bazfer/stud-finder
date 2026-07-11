@@ -398,7 +398,7 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.6250', 'branch', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
+        ['1', 'ruby', file, '0.6250', '0.0000', 'branch', 'true', '0', '', '0', '0.0000', '0', '0.0000', '0.0000',
          '0.0000', '7', '1.0000', '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
@@ -771,6 +771,7 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       language: 'ruby',
       path: 'app/models/user.rb',
       score: 0.5,
+      evidence: 0.8333,
       classification: 'leaf',
       new_file: false,
       age_days: 42,
@@ -794,6 +795,58 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       coupling_pct: 0.0,
       coverage: nil
     }
+  end
+
+  it 'includes evidence immediately after score in output schemas' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS[3, 2]).to eq(%w[score evidence])
+    expect(described_class::MARKDOWN_COLUMNS[3, 2]).to eq(%w[score evidence])
+    expect(cli.send(:json_file, row).keys[3, 2]).to eq(%i[score evidence])
+    expect(cli.send(:csv_file, row)[3, 2]).to eq(%w[0.5000 0.8333])
+    expect(cli.send(:markdown_row, row)).to include('| 0.5000 | 0.8333 | leaf |')
+    expect(cli.send(:table_row, row)).to include('0.5000    0.8333  leaf')
+  end
+
+  it 'sorts emitted rows by class rank then score and reranks before top truncation' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+    rows = [
+      row.merge(path: 'branch.rb', score: 0.95, classification: 'branch', rank: 1),
+      row.merge(path: 'trunk.rb', score: 0.35, classification: 'trunk', rank: 2),
+      row.merge(path: 'leaf.rb', score: 1.0, classification: 'leaf', rank: 3)
+    ]
+
+    sorted = cli.send(:sort_and_rank_rows, rows, %w[branch.rb trunk.rb leaf.rb])
+    cli.instance_variable_get(:@options)[:top] = 1
+
+    expect(sorted.first).to include(path: 'trunk.rb', rank: 1, classification: 'trunk')
+    expect(cli.send(:limited_rows, sorted).first[:path]).to eq('trunk.rb')
+  end
+
+  it 'keeps a new trunk-adjacent file ahead of high-score branches for top output' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+    rows = [
+      row.merge(path: 'trunk.rb', score: 0.85, classification: 'trunk', rank: 1),
+      row.merge(path: 'new_client.rb', score: 0.10, classification: 'leaf', rank: 3),
+      row.merge(path: 'branch.rb', score: 0.95, classification: 'branch', rank: 2)
+    ]
+    metadata = {
+      'trunk.rb' => { new_file: false, age_days: 45, total_commits: 10, escalation: '', metadata_available: true },
+      'new_client.rb' => { new_file: true, age_days: 1, total_commits: 1, escalation: '', metadata_available: true },
+      'branch.rb' => { new_file: false, age_days: 45, total_commits: 10, escalation: '', metadata_available: true }
+    }
+    edges = {
+      'trunk.rb' => { dependencies: [] },
+      'new_client.rb' => { dependencies: ['trunk.rb'] },
+      'branch.rb' => { dependencies: [] }
+    }
+
+    escalated = StudFinder::Newness.apply(rows: rows, edges: edges, metadata: metadata)
+    sorted = cli.send(:sort_and_rank_rows, escalated, %w[trunk.rb new_client.rb branch.rb])
+    cli.instance_variable_get(:@options)[:top] = 2
+
+    expect(cli.send(:limited_rows, sorted).map { |result| result[:path] }).to include('new_client.rb')
+    expect(sorted.find { |result| result[:path] == 'new_client.rb' }).to include(classification: 'trunk', rank: 2)
   end
 
   it 'includes LOC in table, JSON, and CSV columns, but excludes markdown' do
