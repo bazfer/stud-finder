@@ -420,6 +420,15 @@ RSpec.describe StudFinder::Scorer do
     expect(rows.values.map { |row| row[:churn_pct] }).to all(eq(0.0))
   end
 
+  it 'warns when equal non-zero churn collapses to zero percentiles' do
+    test_scorer = scorer(churn: files.to_h { |file| [file, 5] },
+                         churn_lines: files.to_h { |file| [file, 10] })
+    rows = test_scorer.call.to_h { |row| [row[:path], row] }
+
+    expect(rows.values.map { |row| row[:churn_pct] }).to all(eq(0.0))
+    expect(test_scorer.warnings).to include('insufficient_dispersion_churn')
+  end
+
   it 'percentile-ranks per-file instability into instability_pct' do
     rows = scorer.call.to_h { |row| [row[:path], row] }
 

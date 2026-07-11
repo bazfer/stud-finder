@@ -120,6 +120,12 @@ module StudFinder
       Normalizer.percentile_rank(@churn_signal_raw, @files)
     end
 
+    def churn_dispersion_raw_source
+      @files.to_h do |file|
+        [file, @churn.fetch(file, 0).to_f.abs + @churn_lines.fetch(file, 0).to_f.abs]
+      end
+    end
+
     def result_row(file, score, pcts)
       fi = @fan_in.fetch(file, 0).to_i
       fo = @fan_out.fetch(file, 0).to_i
@@ -200,7 +206,7 @@ module StudFinder
         fan_in: @fan_in,
         fan_out: @fan_out,
         complexity: @complexity,
-        churn: @churn_signal_raw
+        churn: churn_dispersion_raw_source
       }
       if coverage_available?
         raw_sources[:coverage] = coverage_risk_values
