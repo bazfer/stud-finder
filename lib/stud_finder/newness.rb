@@ -5,6 +5,7 @@ require 'pathname'
 require 'set'
 
 module StudFinder
+  # rubocop:disable Metrics/ClassLength
   class Newness
     DEFAULT_DAYS = 30
     DEFAULT_MIN_COMMITS = 3
@@ -101,7 +102,7 @@ module StudFinder
         '--format=%x1e%at',
         '--name-status',
         '--find-renames',
-        '--diff-filter=ACMR'
+        '--diff-filter=ACMRD'
       )
       raise Error, "Error: #{@repo_path} is not a git repository." unless status.success?
 
@@ -110,6 +111,7 @@ module StudFinder
       raise Error, 'Error: git not found in PATH.'
     end
 
+    # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
     def parse_history(stdout)
       wanted = @files.to_set
       first_commit_epoch = {}
@@ -117,6 +119,7 @@ module StudFinder
       aliases = {}
       current_epoch = nil
       touched = Set.new
+      lineage_boundaries = Set.new
 
       flush_commit = lambda do
         touched.each do |file|
@@ -133,16 +136,23 @@ module StudFinder
           next
         end
 
+        deleted_path = deleted_path_for_status(line)
+        if deleted_path
+          canonical = canonical_path(deleted_path, aliases)
+          lineage_boundaries << canonical if wanted.include?(canonical)
+          next
+        end
+
         paths_for_status(line).each do |path|
           canonical = canonical_path(path, aliases)
-          touched << canonical if wanted.include?(canonical)
+          touched << canonical if wanted.include?(canonical) && !lineage_boundaries.include?(canonical)
         end
 
         old_path, new_path = rename_paths_for_status(line)
         next unless old_path && new_path
 
         canonical_new = canonical_path(new_path, aliases)
-        if wanted.include?(canonical_new)
+        if wanted.include?(canonical_new) && !lineage_boundaries.include?(canonical_new)
           touched << canonical_new
           aliases[old_path] = canonical_new
         end
@@ -151,6 +161,8 @@ module StudFinder
 
       History.new(first_commit_epoch: first_commit_epoch, total_commits: total_commits)
     end
+
+    # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
     def paths_for_status(line)
       return [] if line.nil? || line.empty?
@@ -171,6 +183,15 @@ module StudFinder
       return [nil, nil] unless parts.first.to_s.start_with?('R')
 
       [rebase_to_analysis_root(parts[1]), rebase_to_analysis_root(parts[2])]
+    end
+
+    def deleted_path_for_status(line)
+      return nil if line.nil? || line.empty?
+
+      parts = line.split("\t")
+      return nil unless parts.first == 'D'
+
+      rebase_to_analysis_root(parts[1])
     end
 
     def canonical_path(path, aliases)
@@ -232,4 +253,5 @@ module StudFinder
       unknown_lineage || within_age_window || low_commit_count
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end

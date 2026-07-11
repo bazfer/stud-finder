@@ -113,6 +113,31 @@ RSpec.describe StudFinder::Newness do
     end
   end
 
+  it 'treats delete and re-add at the same path as a fresh lineage' do
+    make_repo do |root|
+      file = 'app/models/reborn.rb'
+      write_file(root, file, "class Reborn\nend\n")
+      commit_at(root, 'add original reborn', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, file), 'a') { |f| f.puts "# old change #{i}" }
+        commit_at(root, "touch original reborn #{i}", now - ((80 - i) * 86_400))
+      end
+      system('git', '-C', root, 'rm', '-q', file)
+      commit_at(root, 'delete original reborn', now - (2 * 86_400))
+      write_file(root, file, "class Reborn\n  def fresh = true\nend\n")
+      commit_at(root, 're-add reborn', now - 86_400)
+
+      data = metadata(root, [file])
+      result = apply([{ path: file, score: 0.01, classification: 'leaf' }], { file => { dependencies: [] } }, data)
+
+      expect(data[file][:total_commits]).to eq(1)
+      expect(result[file][:new_file]).to be(true)
+      expect(result[file][:age_days]).to eq(1)
+      expect(result[file][:classification]).to eq('branch')
+      expect(result[file][:escalation]).to eq('recency_floor')
+    end
+  end
+
   it 'keeps pre-newness classification behavior when disabled' do
     rows = [{ path: 'app/models/new_leaf.rb', score: 0.01, classification: 'leaf' }]
     data = described_class.disabled_metadata(['app/models/new_leaf.rb'])
