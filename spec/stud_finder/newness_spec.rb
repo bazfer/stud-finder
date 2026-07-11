@@ -268,4 +268,87 @@ RSpec.describe StudFinder::Newness do
       expect(result[target_file][:escalation]).to eq('')
     end
   end
+
+  it 'ignores unrelated outside-subtree history that collides with a rebased inside path' do
+    make_repo do |root|
+      write_file(root, 'models/user.rb', "class OutsideUser\nend\n")
+      commit_at(root, 'add outside user', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, 'models/user.rb'), 'a') { |f| f.puts "# outside change #{i}" }
+        commit_at(root, "touch outside user #{i}", now - ((80 - i) * 86_400))
+      end
+      write_file(root, 'app/models/user.rb', "class AppUser\nend\n")
+      commit_at(root, 'add app user', now - 86_400)
+
+      data = metadata(File.join(root, 'app'), ['models/user.rb'])
+
+      expect(data['models/user.rb'][:total_commits]).to eq(1)
+      expect(data['models/user.rb'][:age_days]).to eq(1)
+      expect(data['models/user.rb'][:new_file]).to be(true)
+    end
+  end
+
+  it 'keeps a new sibling-subtree file new when an older root file has the same rebased key' do
+    make_repo do |root|
+      write_file(root, 'lib/foo.rb', "class RootFoo\nend\n")
+      commit_at(root, 'add root foo', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, 'lib/foo.rb'), 'a') { |f| f.puts "# root change #{i}" }
+        commit_at(root, "touch root foo #{i}", now - ((80 - i) * 86_400))
+      end
+      write_file(root, 'app/lib/foo.rb', "class AppFoo\nend\n")
+      commit_at(root, 'add app foo', now - 86_400)
+
+      data = metadata(File.join(root, 'app'), ['lib/foo.rb'])
+
+      expect(data['lib/foo.rb'][:total_commits]).to eq(1)
+      expect(data['lib/foo.rb'][:age_days]).to eq(1)
+      expect(data['lib/foo.rb'][:new_file]).to be(true)
+    end
+  end
+
+  it 'preserves mature outside-to-inside rename lineage when scanning a subdirectory' do
+    make_repo do |root|
+      old_file = 'legacy/user.rb'
+      new_file = 'app/models/user.rb'
+      write_file(root, old_file, "class LegacyUser\nend\n")
+      commit_at(root, 'add legacy user', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, old_file), 'a') { |f| f.puts "# legacy change #{i}" }
+        commit_at(root, "touch legacy user #{i}", now - ((80 - i) * 86_400))
+      end
+      FileUtils.mkdir_p(File.join(root, 'app/models'))
+      system('git', '-C', root, 'mv', old_file, new_file)
+      commit_at(root, 'move legacy user into app', now - 86_400)
+
+      data = metadata(File.join(root, 'app'), ['models/user.rb'])
+      result = apply([{ path: 'models/user.rb', score: 0.01, classification: 'leaf' }],
+                     { 'models/user.rb' => { dependencies: [] } }, data)
+
+      expect(data['models/user.rb'][:total_commits]).to eq(5)
+      expect(data['models/user.rb'][:age_days]).to eq(90)
+      expect(result['models/user.rb'][:new_file]).to be(false)
+      expect(result['models/user.rb'][:classification]).to eq('leaf')
+      expect(result['models/user.rb'][:escalation]).to eq('')
+    end
+  end
+
+  it 'returns disabled metadata when called directly against a shallow repository' do
+    make_repo do |root|
+      file = 'app/models/user.rb'
+      write_file(root, file, "class User\nend\n")
+      commit_at(root, 'add user', now - (90 * 86_400))
+      File.open(File.join(root, file), 'a') { |f| f.puts '# latest shallow-only change' }
+      commit_at(root, 'touch user', now - 86_400)
+
+      Dir.mktmpdir do |clone_parent|
+        shallow_root = File.join(clone_parent, 'shallow')
+        system('git', 'clone', '-q', '--depth', '1', "file://#{root}", shallow_root)
+
+        data = described_class.new(repo_path: shallow_root, files: [file], now: now).call
+
+        expect(data[file]).to eq(new_file: false, age_days: 0, total_commits: 0, escalation: '')
+      end
+    end
+  end
 end

@@ -30,14 +30,17 @@ module StudFinder
     end
 
     def call
-      history = @enabled ? git_history : empty_history
+      return self.class.disabled_metadata(@files) unless @enabled
+      return self.class.disabled_metadata(@files) if self.class.shallow_repository?(@repo_path)
+
+      history = git_history
       @files.to_h do |file|
         first_epoch = history.first_commit_epoch[file]
         total_commits = history.total_commits.fetch(file, 0)
         age_days = age_days(first_epoch)
-        is_new = @enabled && new_file?(age_days, total_commits)
+        is_new = new_file?(age_days, total_commits)
 
-        [file, { new_file: is_new, age_days: age_days || 0, total_commits: total_commits }]
+        [file, { new_file: is_new, age_days: age_days || 0, total_commits: total_commits, escalation: '' }]
       end
     end
 
@@ -59,7 +62,9 @@ module StudFinder
       end
     end
 
-    def self.disabled_metadata(files) = files.to_h { |file| [file, { new_file: false, age_days: 0, total_commits: 0 }] }
+    def self.disabled_metadata(files)
+      files.to_h { |file| [file, { new_file: false, age_days: 0, total_commits: 0, escalation: '' }] }
+    end
 
     def self.shallow_repository?(repo_path)
       repo_path = File.expand_path(repo_path)
@@ -138,20 +143,26 @@ module StudFinder
 
         deleted_path = deleted_path_for_status(line)
         if deleted_path
-          canonical = canonical_path(deleted_path, aliases)
-          lineage_boundaries << deleted_path if wanted.include?(canonical)
+          canonical = trackable_canonical_path(deleted_path, aliases)
+          lineage_boundaries << deleted_path if canonical && wanted.include?(canonical)
           next
         end
 
         paths_for_status(line).each do |path|
-          canonical = canonical_path(path, aliases)
-          touched << canonical if wanted.include?(canonical) && !lineage_boundaries.include?(path)
+          canonical = trackable_canonical_path(path, aliases)
+          next unless canonical && wanted.include?(canonical)
+          next if lineage_boundaries.include?(path)
+
+          touched << canonical
         end
 
         old_path, new_path = rename_paths_for_status(line)
         next unless old_path && new_path
 
-        canonical_new = canonical_path(new_path, aliases)
+        new_rebased = rebase_to_analysis_root(new_path)
+        next unless new_rebased
+
+        canonical_new = canonical_path(new_rebased, aliases)
         if wanted.include?(canonical_new) && !lineage_boundaries.include?(old_path)
           touched << canonical_new
           aliases[old_path] = canonical_new
@@ -170,9 +181,9 @@ module StudFinder
       parts = line.split("\t")
       status = parts.first.to_s
       if status.start_with?('R') || status.start_with?('C')
-        [path_for_analysis(parts[2])].compact
+        [parts[2]].compact
       else
-        [path_for_analysis(parts[1])].compact
+        [parts[1]].compact
       end
     end
 
@@ -182,7 +193,7 @@ module StudFinder
       parts = line.split("\t")
       return [nil, nil] unless parts.first.to_s.start_with?('R')
 
-      [path_for_analysis(parts[1]), path_for_analysis(parts[2])]
+      [parts[1], parts[2]]
     end
 
     def deleted_path_for_status(line)
@@ -191,11 +202,14 @@ module StudFinder
       parts = line.split("\t")
       return nil unless parts.first == 'D'
 
-      path_for_analysis(parts[1])
+      parts[1]
     end
 
-    def path_for_analysis(path)
-      rebase_to_analysis_root(path) || path
+    def trackable_canonical_path(raw_path, aliases)
+      rebased = rebase_to_analysis_root(raw_path)
+      return nil unless !rebased.nil? || aliases.key?(raw_path)
+
+      canonical_path(rebased || raw_path, aliases)
     end
 
     def canonical_path(path, aliases)
