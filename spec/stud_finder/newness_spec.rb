@@ -78,7 +78,7 @@ RSpec.describe StudFinder::Newness do
     end
   end
 
-  it 'escalates a new file that depends on a structural trunk file to trunk before applying the floor' do
+  it 'escalates a new file that depends on a composite-risk trunk file to trunk before applying the floor' do
     make_repo do |root|
       write_file(root, 'app/models/trunk.rb', "class Trunk\nend\n")
       write_file(root, 'app/models/new_client.rb', "class NewClient < Trunk\nend\n")
