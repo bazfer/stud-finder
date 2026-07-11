@@ -139,20 +139,20 @@ module StudFinder
         deleted_path = deleted_path_for_status(line)
         if deleted_path
           canonical = canonical_path(deleted_path, aliases)
-          lineage_boundaries << canonical if wanted.include?(canonical)
+          lineage_boundaries << deleted_path if wanted.include?(canonical)
           next
         end
 
         paths_for_status(line).each do |path|
           canonical = canonical_path(path, aliases)
-          touched << canonical if wanted.include?(canonical) && !lineage_boundaries.include?(canonical)
+          touched << canonical if wanted.include?(canonical) && !lineage_boundaries.include?(path)
         end
 
         old_path, new_path = rename_paths_for_status(line)
         next unless old_path && new_path
 
         canonical_new = canonical_path(new_path, aliases)
-        if wanted.include?(canonical_new) && !lineage_boundaries.include?(canonical_new)
+        if wanted.include?(canonical_new) && !lineage_boundaries.include?(old_path)
           touched << canonical_new
           aliases[old_path] = canonical_new
         end
@@ -170,9 +170,9 @@ module StudFinder
       parts = line.split("\t")
       status = parts.first.to_s
       if status.start_with?('R') || status.start_with?('C')
-        [rebase_to_analysis_root(parts[2])].compact
+        [path_for_analysis(parts[2])].compact
       else
-        [rebase_to_analysis_root(parts[1])].compact
+        [path_for_analysis(parts[1])].compact
       end
     end
 
@@ -182,7 +182,7 @@ module StudFinder
       parts = line.split("\t")
       return [nil, nil] unless parts.first.to_s.start_with?('R')
 
-      [rebase_to_analysis_root(parts[1]), rebase_to_analysis_root(parts[2])]
+      [path_for_analysis(parts[1]), path_for_analysis(parts[2])]
     end
 
     def deleted_path_for_status(line)
@@ -191,7 +191,11 @@ module StudFinder
       parts = line.split("\t")
       return nil unless parts.first == 'D'
 
-      rebase_to_analysis_root(parts[1])
+      path_for_analysis(parts[1])
+    end
+
+    def path_for_analysis(path)
+      rebase_to_analysis_root(path) || path
     end
 
     def canonical_path(path, aliases)

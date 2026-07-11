@@ -33,6 +33,19 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  def write_file(root, path, content)
+    full_path = File.join(root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, content)
+  end
+
+  def commit_at(root, message, date)
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'add', '-A')
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'commit', '-qm', message)
+  end
+
   def write_coverage_report(dir, files)
     path = File.join(dir, 'coverage.xml')
     classes = files.map do |file|
@@ -392,6 +405,37 @@ RSpec.describe StudFinder::CLI do
       expect(status).to eq(0), stderr
       expect(row['class']).to eq('leaf')
       expect(row['new_file']).to eq('false')
+      expect(row['escalation']).to eq('')
+    end
+  end
+
+  it 'preserves cross-subtree rename age when scanning a subdirectory as JSON' do
+    now = Time.now
+    Dir.mktmpdir do |root|
+      system('git', 'init', '-q', root)
+      system('git', '-C', root, 'config', 'user.email', 'stud-finder@example.test')
+      system('git', '-C', root, 'config', 'user.name', 'Stud Finder')
+
+      write_file(root, 'lib/foo.rb', "class Foo\nend\n")
+      commit_at(root, 'add foo outside app', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, 'lib/foo.rb'), 'a') { |file| file.puts "# change #{i}" }
+        commit_at(root, "touch foo outside app #{i}", now - ((80 - i) * 86_400))
+      end
+      FileUtils.mkdir_p(File.join(root, 'app/models'))
+      4.times do |i|
+        write_file(root, "app/models/filler_#{i}.rb", "class Filler#{i}\nend\n")
+      end
+      system('git', '-C', root, 'mv', 'lib/foo.rb', 'app/models/foo.rb')
+      commit_at(root, 'move foo into app models', now - 86_400)
+
+      status, stdout, stderr = run_cli([File.join(root, 'app'), '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      row = JSON.parse(stdout).fetch('ruby').find { |item| item['path'] == 'models/foo.rb' }
+      expect(row).not_to be_nil
+      expect(row['new_file']).to be(false)
+      expect(row['age_days']).to be_between(89, 91).inclusive
       expect(row['escalation']).to eq('')
     end
   end

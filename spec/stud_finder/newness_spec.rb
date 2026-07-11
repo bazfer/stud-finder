@@ -211,4 +211,61 @@ RSpec.describe StudFinder::Newness do
       expect(result[new_file][:escalation]).to eq('')
     end
   end
+
+  it 'carries rename history from outside the analysis subtree into a subdirectory scan' do
+    make_repo do |root|
+      old_file = 'lib/foo.rb'
+      new_file = 'models/foo.rb'
+      write_file(root, old_file, "class Foo\nend\n")
+      commit_at(root, 'add foo outside app', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, old_file), 'a') { |f| f.puts "# change #{i}" }
+        commit_at(root, "touch foo outside app #{i}", now - ((80 - i) * 86_400))
+      end
+      FileUtils.mkdir_p(File.join(root, 'app/models'))
+      system('git', '-C', root, 'mv', old_file, 'app/models/foo.rb')
+      commit_at(root, 'move foo into app models', now - 86_400)
+
+      data = metadata(File.join(root, 'app'), [new_file])
+      result = apply([{ path: new_file, score: 0.01, classification: 'leaf' }],
+                     { new_file => { dependencies: [] } }, data)
+
+      expect(data[new_file][:total_commits]).to eq(5)
+      expect(data[new_file][:age_days]).to be_between(89, 91).inclusive
+      expect(result[new_file][:new_file]).to be(false)
+      expect(result[new_file][:classification]).to eq('leaf')
+      expect(result[new_file][:escalation]).to eq('')
+    end
+  end
+
+  it 'does not let an unrelated prior delete at the target path block renamed lineage history' do
+    make_repo do |root|
+      target_file = 'app/models/user.rb'
+      source_file = 'app/models/customer.rb'
+      write_file(root, target_file, "class User\nend\n")
+      commit_at(root, 'add unrelated user', now - (100 * 86_400))
+      File.open(File.join(root, target_file), 'a') { |f| f.puts '# unrelated change' }
+      commit_at(root, 'touch unrelated user', now - (99 * 86_400))
+      write_file(root, source_file, "class Customer\nend\n")
+      commit_at(root, 'add customer', now - (90 * 86_400))
+      [80, 70, 65].each_with_index do |days_ago, i|
+        File.open(File.join(root, source_file), 'a') { |f| f.puts "# customer change #{i}" }
+        commit_at(root, "touch customer #{i}", now - (days_ago * 86_400))
+      end
+      system('git', '-C', root, 'rm', '-q', target_file)
+      commit_at(root, 'delete unrelated user', now - (60 * 86_400))
+      system('git', '-C', root, 'mv', source_file, target_file)
+      commit_at(root, 'rename customer to user', now - 86_400)
+
+      data = metadata(root, [target_file])
+      result = apply([{ path: target_file, score: 0.01, classification: 'leaf' }],
+                     { target_file => { dependencies: [] } }, data)
+
+      expect(data[target_file][:total_commits]).to eq(5)
+      expect(data[target_file][:age_days]).to be_between(89, 91).inclusive
+      expect(result[target_file][:new_file]).to be(false)
+      expect(result[target_file][:classification]).to eq('leaf')
+      expect(result[target_file][:escalation]).to eq('')
+    end
+  end
 end
