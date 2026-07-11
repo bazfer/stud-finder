@@ -163,6 +163,35 @@ RSpec.describe StudFinder::Newness do
     end
   end
 
+  it 'treats a rename target that was later deleted and re-added as a fresh lineage' do
+    make_repo do |root|
+      old_file = 'app/models/customer.rb'
+      new_file = 'app/models/user.rb'
+      write_file(root, old_file, "class Customer\nend\n")
+      commit_at(root, 'add customer', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, old_file), 'a') { |f| f.puts "# customer change #{i}" }
+        commit_at(root, "touch customer #{i}", now - ((80 - i) * 86_400))
+      end
+      system('git', '-C', root, 'mv', old_file, new_file)
+      commit_at(root, 'rename customer to user', now - (60 * 86_400))
+      system('git', '-C', root, 'rm', '-q', new_file)
+      commit_at(root, 'delete renamed user', now - (30 * 86_400))
+      write_file(root, new_file, "class User\n  def fresh = true\nend\n")
+      commit_at(root, 're-add user', now - 86_400)
+
+      data = metadata(root, [new_file])
+      result = apply([{ path: new_file, score: 0.01, classification: 'leaf' }],
+                     { new_file => { dependencies: [] } }, data)
+
+      expect(data[new_file][:total_commits]).to eq(1)
+      expect(data[new_file][:age_days]).to eq(1)
+      expect(result[new_file][:new_file]).to be(true)
+      expect(result[new_file][:classification]).to eq('branch')
+      expect(result[new_file][:escalation]).to eq('recency_floor')
+    end
+  end
+
   it 'keeps pre-newness classification behavior when disabled' do
     rows = [{ path: 'app/models/new_leaf.rb', score: 0.01, classification: 'leaf' }]
     data = described_class.disabled_metadata(['app/models/new_leaf.rb'])
