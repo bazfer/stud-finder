@@ -165,7 +165,7 @@ module StudFinder
         canonical_new = canonical_path(new_rebased, aliases)
         if wanted.include?(canonical_new) && !lineage_boundaries.include?(old_path)
           touched << canonical_new
-          aliases[old_path] = canonical_new
+          aliases[alias_key_for(old_path)] = canonical_new
         end
       end
       flush_commit.call if current_epoch
@@ -210,6 +210,10 @@ module StudFinder
       return nil unless !rebased.nil? || aliases.key?(raw_path)
 
       canonical_path(rebased || raw_path, aliases)
+    end
+
+    def alias_key_for(old_path)
+      rebase_to_analysis_root(old_path) || old_path
     end
 
     def canonical_path(path, aliases)

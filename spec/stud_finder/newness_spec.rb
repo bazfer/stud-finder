@@ -212,6 +212,32 @@ RSpec.describe StudFinder::Newness do
     end
   end
 
+  it 'carries in-subtree rename history when scanning a subdirectory' do
+    make_repo do |root|
+      old_file = 'app/models/customer.rb'
+      new_file = 'app/models/user.rb'
+      wanted_file = 'models/user.rb'
+      write_file(root, old_file, "class Customer\nend\n")
+      commit_at(root, 'add customer', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, old_file), 'a') { |f| f.puts "# customer change #{i}" }
+        commit_at(root, "touch customer #{i}", now - ((80 - i) * 86_400))
+      end
+      system('git', '-C', root, 'mv', old_file, new_file)
+      commit_at(root, 'rename customer to user', now - 86_400)
+
+      data = metadata(File.join(root, 'app'), [wanted_file])
+      result = apply([{ path: wanted_file, score: 0.01, classification: 'leaf' }],
+                     { wanted_file => { dependencies: [] } }, data)
+
+      expect(data[wanted_file][:total_commits]).to eq(5)
+      expect(data[wanted_file][:age_days]).to eq(90)
+      expect(result[wanted_file][:new_file]).to be(false)
+      expect(result[wanted_file][:classification]).to eq('leaf')
+      expect(result[wanted_file][:escalation]).to eq('')
+    end
+  end
+
   it 'carries rename history from outside the analysis subtree into a subdirectory scan' do
     make_repo do |root|
       old_file = 'lib/foo.rb'
