@@ -484,7 +484,9 @@ module StudFinder
       warnings << 'files_skipped' if skipped_files.any?
       warnings << 'small_repo' if files.length < @options[:min_files]
       emit_scoring_note(scorer, coverage_result)
-      rows = apply_newness(files, edges, scorer.call, coverage_result)
+      scored_rows = scorer.call
+      warnings.concat(scorer.warnings)
+      rows = apply_newness(files, edges, scored_rows, coverage_result)
              .map { |row| with_language(row, language_by_file) }
       rows = sort_and_rank_rows(rows, files)
       Analysis.new(

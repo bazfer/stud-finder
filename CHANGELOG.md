@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - Unreleased
 
+### Added
+
+- Absolute floors in classification: raw complexity >= 15 or raw fan_in >= 25 can no longer classify as leaf; these files escalate to branch only, never downgrade.
+- Insufficient-dispersion warnings in `analysis.warnings` when a signal percentile-rank collapses to all 0.0 despite non-zero raw values; score is unchanged.
+
 ### Changed
 
 - BREAKING: `class` (`trunk`/`branch`/`leaf`) is now driven by composite `score`, not fan-in percentile only. Class reflects overall risk, not just coupling role. `--trunk-threshold` and `--branch-threshold` still take percentile values from 0-100, but now threshold composite `score` instead of `fan_in_pct`; defaults remain 85/50.

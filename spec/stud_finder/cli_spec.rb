@@ -152,6 +152,55 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  it 'emits an insufficient-dispersion warning for all-equal nonzero complexity without breaking scoring' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 7] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(
+          counts: files.to_h { |file| [file, 0] },
+          line_counts: files.to_h { |file| [file, 0] },
+          zero_inflated: false,
+          zero_percentage: 0
+        )
+      )
+
+      status, stdout, stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+      payload = JSON.parse(stdout)
+      rows = payload.fetch('ruby')
+
+      expect(status).to eq(0), stderr
+      expect(payload.fetch('warnings')).to include('insufficient_dispersion_complexity')
+      expect(rows).not_to be_empty
+      expect(rows.map { |row| row.fetch('complexity_pct') }).to all(eq(0.0))
+    end
+  end
+
+  it 'does not emit an insufficient-dispersion warning for all-zero complexity' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(
+          counts: files.to_h { |file| [file, 0] },
+          line_counts: files.to_h { |file| [file, 0] },
+          zero_inflated: false,
+          zero_percentage: 0
+        )
+      )
+
+      status, stdout, stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+      payload = JSON.parse(stdout)
+
+      expect(status).to eq(0), stderr
+      expect(payload.fetch('warnings')).not_to include('insufficient_dispersion_complexity')
+    end
+  end
+
   it 'validates --js-coverage and --js-timeout' do
     missing = File.join(Dir.tmpdir, "stud-finder-js-coverage-nope-#{rand(100_000)}.info")
     status, _stdout, stderr = run_cli(['--js-coverage', missing])
