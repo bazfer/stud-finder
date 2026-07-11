@@ -52,9 +52,11 @@ module StudFinder
       }
       @warnings = insufficient_dispersion_warnings(pcts)
 
+      scores = @files.to_h { |file| [file, weighted_score(file, pcts)] }
+      score_pcts = Normalizer.percentile_rank(scores, @files)
+
       rows = @files.each_with_index.map do |file, index|
-        score = weighted_score(file, pcts)
-        [index, result_row(file, score, pcts)]
+        [index, result_row(file, scores.fetch(file), pcts, score_pcts.fetch(file))]
       end
 
       rows.sort_by { |index, row| [-row[:score], index] }
@@ -123,12 +125,12 @@ module StudFinder
       end
     end
 
-    def result_row(file, score, pcts)
+    def result_row(file, score, pcts, score_pct)
       fi = @fan_in.fetch(file, 0).to_i
       fo = @fan_out.fetch(file, 0).to_i
       rounded_score = score.round(4)
       complexity = @complexity.fetch(file, 0).to_i
-      floored_class, floor_escalation = floored_classification(classification(rounded_score), complexity, fi)
+      floored_class, floor_escalation = floored_classification(classification(score_pct), complexity, fi)
       {
         path: file,
         score: rounded_score,
@@ -242,9 +244,9 @@ module StudFinder
       end
     end
 
-    def classification(score)
-      return 'trunk' if score >= @trunk_threshold / 100.0
-      return 'branch' if score >= @branch_threshold / 100.0
+    def classification(score_pct)
+      return 'trunk' if score_pct >= @trunk_threshold / 100.0
+      return 'branch' if score_pct >= @branch_threshold / 100.0
 
       'leaf'
     end
