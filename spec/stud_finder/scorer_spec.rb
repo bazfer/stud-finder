@@ -33,6 +33,8 @@ RSpec.describe StudFinder::Scorer do
     expect(weights[:complexity]).to be_within(0.0001).of(0.3125)
     expect(weights[:churn]).to be_within(0.0001).of(0.3125)
     expect(weights[:coverage]).to be_nil
+    expect(weights[:interaction]).to be_nil
+    expect(weights[:coupling]).to be_nil
     expect(weights.values.compact.sum).to be_within(0.0001).of(1.0)
   end
 
@@ -241,8 +243,9 @@ RSpec.describe StudFinder::Scorer do
                      weights: { fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25,
                                 coverage: 0.10, interaction: 0.10 }).normalized_weights
 
-    expect(weights).to eq(fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10)
-    expect(weights.values.sum).to be_within(0.0001).of(1.0)
+    expect(weights).to eq(fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10,
+                          interaction: 0.10, coupling: nil)
+    expect(weights.values.compact.sum).to be_within(0.0001).of(1.0)
   end
 
   it 'percentile-ranks coverage risk so equivalent spreads contribute equivalent scores' do
@@ -459,6 +462,72 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['c.rb'][:coupling_partners]).to eq(0)
   end
 
+  it 'weights temporal coupling into otherwise-identical scores when coupling is available' do
+    comparison_files = %w[low.rb high.rb]
+    rows = described_class.new(
+      files: comparison_files,
+      fan_in: comparison_files.to_h { |file| [file, 0] },
+      fan_out: comparison_files.to_h { |file| [file, 0] },
+      complexity: comparison_files.to_h { |file| [file, 0] },
+      churn: comparison_files.to_h { |file| [file, 0] },
+      coupling: {
+        'low.rb' => { max_coupling: 0.0, max_coupling_partner: 'high.rb', partners: 1 },
+        'high.rb' => { max_coupling: 0.9, max_coupling_partner: 'low.rb', partners: 1 }
+      }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['high.rb'][:coupling_pct]).to eq(1.0)
+    expect(rows['high.rb'][:score]).to be > rows['low.rb'][:score]
+  end
+
+  it 'redistributes weights to active signals and zeroes coupling contribution when coupling is absent' do
+    weights = scorer(coupling: nil).normalized_weights
+
+    expect(weights[:coupling]).to be_nil
+    expect(weights.values.compact.sum).to be_within(0.0001).of(1.0)
+    expect(scorer(coupling: nil).call.first[:coupling_pct]).to eq(0.0)
+  end
+
+  it 'uses base four plus coupling as the active set when coverage is absent and coupling is present' do
+    weights = scorer(coupling: { 'a.rb' => { max_coupling: 0.9, max_coupling_partner: 'b.rb', partners: 1 } })
+              .normalized_weights
+
+    expect(weights[:fan_in]).to be_within(0.0001).of(0.19 / 0.81)
+    expect(weights[:fan_out]).to be_within(0.0001).of(0.095 / 0.81)
+    expect(weights[:complexity]).to be_within(0.0001).of(0.2375 / 0.81)
+    expect(weights[:churn]).to be_within(0.0001).of(0.2375 / 0.81)
+    expect(weights[:coverage]).to be_nil
+    expect(weights[:interaction]).to be_nil
+    expect(weights[:coupling]).to be_within(0.0001).of(0.05 / 0.81)
+    expect(weights.values.compact.sum).to be_within(0.0001).of(1.0)
+  end
+
+  it 'preserves the pre-coupling base-four effective weights when coverage and coupling are absent' do
+    weights = scorer(coverage: nil, coupling: nil).normalized_weights
+
+    expect(weights[:fan_in]).to be_within(0.0001).of(0.25)
+    expect(weights[:fan_out]).to be_within(0.0001).of(0.125)
+    expect(weights[:complexity]).to be_within(0.0001).of(0.3125)
+    expect(weights[:churn]).to be_within(0.0001).of(0.3125)
+    expect(weights.values.compact.sum).to be_within(0.0001).of(1.0)
+  end
+
+  it 'warns when equal non-zero coupling collapses to zero percentiles' do
+    test_scorer = scorer(coupling: files.to_h do |file|
+      [file, { max_coupling: 0.5, max_coupling_partner: 'peer.rb', partners: 1 }]
+    end)
+    test_scorer.call
+
+    expect(test_scorer.warnings).to include('insufficient_dispersion_coupling')
+  end
+
+  it 'does not emit coupling dispersion warnings when coupling is unavailable' do
+    test_scorer = scorer(coupling: nil)
+    test_scorer.call
+
+    expect(test_scorer.warnings).not_to include('insufficient_dispersion_coupling')
+  end
+
   it 'defaults max_coupling_partner to an empty string when a partner path is missing' do
     coupling = { 'a.rb' => { max_coupling: 0.5, partners: 2 } }
     rows = scorer(coupling: coupling).call.to_h { |row| [row[:path], row] }
@@ -497,7 +566,8 @@ RSpec.describe StudFinder::Scorer, 'with coverage' do
     )
 
     expect(scorer.normalized_weights).to eq(
-      fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10
+      fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10,
+      coupling: nil
     )
     rows = scorer.call.to_h { |row| [row[:path], row] }
     # b.rb: fan_out 1.0 (0.10) + complexity 1.0 (0.25) + uncovered coverage 1.0 (0.10).
