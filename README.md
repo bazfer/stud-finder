@@ -7,13 +7,14 @@ A code risk scoring CLI for Ruby and JavaScript/TypeScript codebases. Ranks ever
 ```
 $ bundle exec bin/stud-finder ./my-rails-app
 
-RANK  LANGUAGE  FILE                              SCORE  CLASS   FAN_IN  FAN_OUT  COMPLEXITY  CHURN_COMMITS  MAX_COUPLING  COUPLING_PARTNERS  COVERAGE
-1     ruby      app/models/proficiency.rb         0.91   trunk   223     4        85          11             0.62          3                  0.99
-2     ruby      app/services/payment_service.rb   0.84   trunk   78      12       91          42             0.71          5                  0.22
-3     ruby      app/controllers/orders_controller 0.73   branch  61      9        65          74             0.48          2                  0.31
-4     js        src/components/Dashboard.tsx      0.68   branch  44      18       56          18             0.00          0                  —
-...
+Ruby
+ rank  language    file                              score  evidence  class   new  age_days  escalation  ...
+   1   ruby        app/models/proficiency.rb         0.9124   0.9200  trunk   false  842      —          ...
+   2   ruby        app/services/payment_service.rb   0.8410   0.8800  trunk   false  611      —          ...
+   3   ruby        app/controllers/orders_ctlr.rb    0.7305   0.9100  branch  false  520      —          ...
 ```
+
+The full table adds `fan_in`, `fan_out`, `instability`, `complexity`, `churn_commits`, `churn_lines`, `churn_pct`, `loc`, `loc_pct`, `max_coupling`, `max_coupling_partner`, `coupling_partners`, `coupling_pct`, and `coverage`. Use `--output json` for machine-readable output including a `warnings` section and full `meta`.
 
 ---
 
@@ -65,7 +66,7 @@ bundle exec bin/stud-finder ./my-rails-app --output csv > risk.csv
 # Top 50 highest-risk files, markdown for a PR comment
 bundle exec bin/stud-finder ./my-rails-app --top 50 --output markdown
 
-# With coverage signals (5-factor scoring)
+# With coverage signals (activates the five-factor formula and interaction term)
 bundle exec bin/stud-finder ./my-rails-app \
   --ruby-coverage ./coverage/resultset.json \
   --js-coverage ./coverage/lcov.info
@@ -73,44 +74,103 @@ bundle exec bin/stud-finder ./my-rails-app \
 
 ---
 
-## The Five Signals
+## Signals and weights
 
-Each file is scored on up to five independently measured signals. See [PRODUCT.md](PRODUCT.md) for the full theory and weighting math.
+Each file is scored on up to seven inputs — six direct signals plus one cross-term (`interaction`) that fires when coverage data is present. See [SIGNALS.md](SIGNALS.md) for the theory behind each signal; this section lists the current defaults.
 
-| Signal | What it measures | Weight |
-|--------|------------------|--------|
-| **fan_in** | How many other files depend on this one (blast radius) | 25% |
-| **fan_out** | How many other files this one depends on (its own coupling burden) | 10% |
-| **complexity** | Cyclomatic complexity of the hardest method in the file | 25% |
-| **churn** | Commit frequency + line volume over a 180-day window | 25% |
-| **coverage** | Inverse of line coverage (lower coverage = higher risk) | 15% |
+| Signal | Default weight | Notes |
+|--------|---------------:|-------|
+| **fan_in** | 0.19 | Blast radius — incoming dependencies |
+| **fan_out** | 0.095 | Coupling burden — outgoing dependencies |
+| **complexity** | 0.2375 | Max cyclomatic complexity of any method in the file |
+| **churn** | 0.2375 | Commit frequency + line volume, both percentile-ranked and averaged, then re-ranked |
+| **coverage** | 0.095 | Inverse of line coverage (`1 − coverage`), percentile-ranked. Optional. |
+| **interaction** | 0.095 | Cross-term: `fan_in_pct × coverage_risk_pct`. Only active when coverage is present. |
+| **coupling** | 0.05 | Percentile-rank of `max_coupling` from temporal-coupling analysis. Requires git history. |
 
-When coverage isn't available, the remaining four signals (fan_in, fan_out, complexity, churn) re-normalize to 100% automatically (4-factor mode).
+Weights sum to 1.00 when all signals are available. The **base-four ratios** (fan_in : fan_out : complexity : churn = 4:2:5:5) are preserved across all availability modes, so removing optional signals and re-normalizing does not distort the relative weighting of the base structural signals.
 
-### Informational columns (not scored)
+**Availability modes** — the composite drops unavailable signals and re-normalizes the rest to sum to 1.0:
 
-These ride alongside the score to give reviewers extra context, but do not contribute to it:
+| coverage | coupling | Active signals | Formula label |
+|----------|----------|----------------|---------------|
+| ✓ | ✓ | all 7 | `5-factor + coupling` |
+| ✓ | ✗ | 6 (drop coupling) | `5-factor` |
+| ✗ | ✓ | 5 (drop coverage + interaction) | `4-factor + coupling` |
+| ✗ | ✗ | 4 (base only) | `4-factor (no coverage)` |
 
-- **instability** / **instability_pct** — `fan_out / (fan_in + fan_out)`, and its percentile rank across the repo. High instability = depends on a lot while little depends on it.
-- **max_coupling** / **max_coupling_partner** / **coupling_partners** / **coupling_pct** — temporal coupling from git history: the strongest co-change ratio with any partner file, the path of that strongest partner, how many partners cross the threshold, and the percentile rank of `max_coupling`. The analysis produces co-change pairs; each file's row keeps the strongest pair's ratio (`max_coupling`), that partner's path (`max_coupling_partner`), and the count of pairs (`coupling_partners`). On ties the strongest partner is chosen deterministically: highest coupling, then highest co-change count, then alphabetical path; `max_coupling_partner` is an empty string when a file has no qualifying partners. Computed once over the full file set in the main scan (one extra `git log` pass), so cross-language co-change is captured. By default, commits touching more than 50 scored files are skipped as bulk commits; use `--coupling-max-commit-files 0` for unlimited/legacy behavior. Same thresholds as the `edges` subcommand (`--coupling-threshold`, `--coupling-min-commits`).
+The formula label appears in JSON output at `meta.formula` and in the stderr scoring note.
 
-Files are classified into three labels based on their **fan_in percentile** (not the total score):
+### The score
 
-- **trunk** — fan_in in the top 15% (default `trunk_threshold: 85`). Load-bearing. High review bar, change with care.
-- **branch** — fan_in between the 50th and 85th percentile (default `branch_threshold: 50`). Meaningful coupling.
-- **leaf** — everything below the 50th percentile. Isolated. Move fast here.
+Every signal is percentile-ranked across the full codebase, so scores are relative to the project itself. The composite score is the weighted sum of the active signals plus the interaction cross-term when coverage is present:
 
-The total score still drives the ranking. The class label is a separate coupling-based signal.
+```
+score = Σ (weight_i × signal_i_pct)  +  (weight_interaction × fan_in_pct × coverage_risk_pct)
+```
 
-### Newness rules (AI-generated code)
+Result is clamped to `[0.0, 1.0]` and rounded to four decimal places.
 
-History-based signals can under-protect brand-new files: a fresh AI-generated file may have little churn, low fan-in, and no established blast radius yet, even though it is often the least proven code in the change. Stud Finder therefore applies post-scoring newness rules that change only `class`, `new_file`, `age_days`, and `escalation`; the numeric `score` stays honest and unchanged.
+---
+
+## Classification
+
+Every row is labelled with a `class`:
+
+- **trunk** — composite score ≥ `trunk_threshold / 100` (default `trunk_threshold: 85`, so score ≥ 0.85). Load-bearing. High review bar.
+- **branch** — composite score ≥ `branch_threshold / 100` and below the trunk cutoff (default `branch_threshold: 50`, so 0.50 ≤ score < 0.85). Meaningful coupling.
+- **leaf** — score below the branch cutoff. Isolated. Move fast here.
+
+`--trunk-threshold` and `--branch-threshold` take integer values 0–100 that are compared against the composite `score` (score × 100). Classification is driven by the full composite, not by fan-in percentile — a file with modest fan-in but very high complexity + churn can still classify as `trunk`.
+
+Because `score` is a weighted sum of percentile-ranked signals, not itself a percentile, a threshold of 85 does not mean "top 15% of files." Well-distributed projects rarely have any file scoring above 0.85; in tighter distributions the cutoffs may need tuning per-project.
+
+### Absolute floors
+
+After the score threshold runs, safety floors escalate anything visibly dangerous that percentile ranking flattened. A file with raw complexity ≥ 15 or raw fan-in ≥ 25 cannot classify as `leaf` — those files escalate to `branch` regardless of score. Floors escalate only; they never downgrade a `branch` or `trunk`.
+
+The floors exist because tiny or uniform-signal codebases can produce a composite score below the branch threshold even when the raw signals are visibly high — the percentile pass collapses everyone to the middle. Absolute floors catch this failure mode without altering the numeric score.
+
+### Newness rules
+
+History-based signals can under-protect brand-new files: a fresh AI-generated file may have little churn, low fan-in, and no established blast radius yet, even though it is often the least proven code in the change. Post-scoring newness rules therefore change only `class`, `new_file`, `age_days`, and `escalation`; the numeric `score` stays honest and unchanged.
 
 A file is considered new when its first commit is within `--new-file-days` days (default 30), or when it has fewer than `--new-file-min-commits` commits in full git history (default 3). New files cannot classify below `branch`; those rows show `escalation=recency_floor`.
 
 A stronger rule runs first: if a new file depends on a structurally `trunk` file through its fan-out edges, it escalates to `trunk` with `escalation=trunk_adjacent`. This highlights new code consuming critical interfaces, where contract-violation risk is highest. Use `--no-newness` to disable both newness rules.
 
-**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone, it auto-disables both newness rules and emits `shallow_clone_newness_disabled` so classifications match `--no-newness` instead of misclassifying mature files as new.
+**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone, it auto-disables both newness rules and emits `shallow_clone_newness_disabled` in `warnings` so classifications match `--no-newness` instead of misclassifying mature files as new.
+
+---
+
+## Evidence
+
+Every row carries an `evidence` value (0.0–1.0) alongside `score`. Score is the weighted signal composite. Evidence is a metadata confidence: how much history + coverage-data backing does that score have?
+
+Evidence combines file age, commit count, and whether coverage data was explicitly provided. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." A high score with high evidence is a strong claim.
+
+**Gate consumers should threshold `class` for verdicts and `evidence` for confidence, not raw `score` alone.** Output is sorted by `(class_rank, score)` so trunks group above branches above leaves, and `--top N` no longer drops newness-escalated `trunk_adjacent` files behind high-score branches.
+
+---
+
+## Warnings
+
+`analysis.warnings` (available in JSON output) surfaces conditions the run detected that a consumer should know about:
+
+- **`shallow_clone_newness_disabled`** — shallow git clone detected; newness rules auto-disabled.
+- **`insufficient_dispersion_<signal>`** — every file in the codebase has the same non-zero raw value for `<signal>`, so its percentile-ranked contribution collapsed to `0.0`. The score is unchanged; the warning flags that the signal is silently uninformative rather than genuinely absent. One per affected signal: `fan_in`, `fan_out`, `complexity`, `churn`, `coverage`, `interaction`, `coupling`.
+- Language-specific warnings such as `js_depcruise_no_config` when the JS pipeline had to fall back.
+
+---
+
+## Informational columns
+
+These ride alongside the score to give reviewers extra context, but do not contribute to it directly:
+
+- **`instability`** / **`instability_pct`** — `fan_out / (fan_in + fan_out)`, and its percentile rank across the repo. High instability = depends on a lot while little depends on it.
+- **`max_coupling`** / **`max_coupling_partner`** / **`coupling_partners`** — temporal coupling from git history. The strongest co-change ratio with any partner file, the path of that strongest partner, and how many partners cross the threshold. `coupling_pct` (the percentile rank of `max_coupling`) does contribute to the score at weight `0.05` — the raw fields are informational.
+
+On ties the strongest partner is chosen deterministically: highest coupling, then highest co-change count, then alphabetical path; `max_coupling_partner` is an empty string when a file has no qualifying partners. Coupling is computed once over the full file set in the main scan (one extra `git log` pass), so cross-language co-change is captured. By default, commits touching more than 50 scored files are skipped as bulk commits; use `--coupling-max-commit-files 0` for unlimited/legacy behavior.
 
 ---
 
@@ -130,19 +190,15 @@ Ruby fan-in includes conservative Rails-style implicit references by default. As
 - complexity via `eslint` (`--rule '{"complexity":["error",0]}'`)
 - coverage: LCOV (`.info` format)
 
-Stud Finder first runs dependency-cruiser with the target project's normal config so path aliases,
-TypeScript config, and bundler resolution can be honored. If that fails because no usable
-configuration is available, it retries once with `--no-config` and reports
-`js_depcruise_no_config`. The fallback keeps analysis running, but aliases such as
-`tsconfig` paths and webpack aliases will not resolve, so JS/TS `fan_in` may be undercounted.
-For alias-heavy TypeScript projects, run `npx depcruise --init` in the target repo for accurate
-results.
+Stud Finder first runs dependency-cruiser with the target project's normal config so path aliases, TypeScript config, and bundler resolution can be honored. If that fails because no usable configuration is available, it retries once with `--no-config` and reports `js_depcruise_no_config`. The fallback keeps analysis running, but aliases such as `tsconfig` paths and webpack aliases will not resolve, so JS/TS `fan_in` may be undercounted. For alias-heavy TypeScript projects, run `npx depcruise --init` in the target repo for accurate results.
 
 Each language gets its own ranking section in the output — Ruby and JS are not pooled.
 
 ---
 
 ## Flag Reference
+
+`stud-finder --help` is the authoritative reference; this table is a summary.
 
 | Flag | Description |
 |------|-------------|
@@ -152,10 +208,12 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--coverage PATH` | Deprecated alias for `--ruby-coverage` |
 | `--js-timeout N` | dependency-cruiser timeout in seconds (default: 60) |
 | `--no-rails-inference` | Disable Rails association/string fan-in inference |
-| `--churn-days N` | Commit lookback window in days (default: 180). Churn uses git rename detection; within the window, rename commits are attributed to the new path when git pairs the rename. History before that paired rename stays with the old path unless it is also paired within the window. |
-| `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:0.25,fan_out:0.10,complexity:0.25,churn:0.25,coverage:0.15`. Defaults shown. All five keys are required. |
-| `--trunk-threshold N` | fan_in percentile cutoff for trunk classification (default: 85) |
-| `--branch-threshold N` | fan_in percentile cutoff for branch classification (default: 50) |
+| `--churn-days N` | Commit lookback window in days (default: 180). Churn uses git rename detection; within the window, rename commits are attributed to the new path when git pairs the rename. |
+| `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I][,coupling:P]`. The five base keys (`fan_in`, `fan_out`, `complexity`, `churn`, `coverage`) are required. `interaction` and `coupling` are optional: when omitted, `interaction` defaults to `0.0` (custom weights opt-in) and `coupling` defaults to `0.05`. Each value must be in `[0.0, 1.0]`. When no coverage data is provided, `coverage` must be `0.0`. |
+| `--interaction-weight N` | Sugar flag for setting only the interaction weight. |
+| `--coupling-weight N` | Sugar flag for setting only the coupling weight. Bounds-checked `[0.0, 1.0]`. |
+| `--trunk-threshold N` | Composite-score percentile cutoff for trunk classification (default: 85) |
+| `--branch-threshold N` | Composite-score percentile cutoff for branch classification (default: 50) |
 | `--exclude PATTERN` | Exclude glob pattern (repeatable). `spec/` and `test/` excluded by default. |
 | `--top N` | Emit only the top N results |
 | `--diff-base REF` | Score the whole repo but emit only the files changed on `HEAD` vs the merge-base with `REF` (e.g. `origin/staging`). Ranks and scores stay relative to the full repo. Ideal for per-PR runs. |
@@ -176,7 +234,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 
 - `table` — human-readable, aligned columns
 - `csv` — spreadsheet-friendly, pipe to a file
-- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections
+- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections. `meta.formula` labels the active mode (`5-factor + coupling`, `5-factor`, `4-factor + coupling`, `4-factor (no coverage)`). `meta.weights` reports the normalized weights actually used (with `null` for signals that were unavailable).
 - `markdown` — drop directly into a PR comment or issue
 
 ---
@@ -189,14 +247,14 @@ Run it:
 - Before a code review, to know which PRs deserve extra scrutiny
 - On every PR in CI, as a risk-tagged diff context
 
-Don't run it as a gate — risk isn't a binary blocker. Run it as input to human judgment.
+Don't run it as a hard blocker on raw `score` — `score` is evidence, not a decision. Threshold `class` for verdicts and `evidence` for confidence.
 
 ---
 
 ## Documentation
 
-- **[PRODUCT.md](PRODUCT.md)** — theory, formulas, and the research behind each signal
-- **[VISION.md](VISION.md)** — project vision and positioning
+- **[SIGNALS.md](SIGNALS.md)** — theory behind each signal, and the score / class / evidence separation
+- **[CHANGELOG.md](CHANGELOG.md)** — per-version changes, weight-shift history, breaking notes
 
 ---
 

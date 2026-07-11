@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BREAKING: Numeric default weights are now `fan_in: 0.19`, `fan_out: 0.095`, `complexity: 0.2375`, `churn: 0.2375`, `coverage: 0.095`, `interaction: 0.095`, and `coupling: 0.05`; base-four ratios are preserved, so four-factor scoring without coupling data keeps the same effective weights as before.
 - BREAKING: Row output now includes `evidence` immediately after `score`, a 0.0-1.0 metadata confidence value based on age, commit count, and explicit coverage-data presence. Output sorting now keys on `(class_rank, score)`, so trunks rank above branches above leaves and `--top N` no longer drops newness-escalated `trunk_adjacent` files behind high-score branches. Gate consumers should threshold `class` for verdicts and `evidence` for confidence, not raw `score`.
 
+### Docs
+
+- Docs surface reduced to `README.md`, `SIGNALS.md`, and `CHANGELOG.md`. `PRODUCT.md` is renamed to `SIGNALS.md` and stripped of weights/roadmap so it only holds signal theory. `VISION.md` and `TRD.md` are removed — their content was drifting out of sync with the code faster than it was being read. `stud-finder --help` and the JSON output are the authoritative CLI/schema references.
+
 ## [0.1.0] - 2026-07-03
 
 ### Added
