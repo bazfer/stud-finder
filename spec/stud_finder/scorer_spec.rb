@@ -51,12 +51,15 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['b.rb'][:coverage]).to be_nil
   end
 
-  it 'classifies by composite score' do
+  it 'classifies by composite-score percentile rank' do
     rows = scorer.call.to_h { |row| [row[:path], row] }
 
-    expect(rows['a.rb'][:classification]).to eq('leaf')
-    expect(rows['b.rb'][:classification]).to eq('branch')
+    # b.rb has the highest score (0.7708) → score_pct 1.0 → trunk
+    # c.rb is second (0.5208) → score_pct 0.6667 → branch
+    # a.rb is third (0.4583) → score_pct 0.3333 → leaf
+    expect(rows['b.rb'][:classification]).to eq('trunk')
     expect(rows['c.rb'][:classification]).to eq('branch')
+    expect(rows['a.rb'][:classification]).to eq('leaf')
   end
 
   it 'escalates a composite leaf to branch when raw complexity reaches the absolute floor' do
@@ -145,7 +148,7 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['target.rb'][:escalation]).to eq('complexity_floor')
   end
 
-  it 'does not set a floor escalation marker on a score-based branch' do
+  it 'does not set a floor escalation marker on a percentile-classified branch' do
     # A file that reaches branch by score alone (not floor) carries no escalation from scorer.
     # Three files: high/medium/low. medium.rb sits in the middle percentile; its score lands
     # at 0.5 with branch_threshold 30 → score-classified branch, no floor (complexity 5 < 15,
@@ -225,7 +228,10 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['risky.rb'][:classification]).to eq('trunk')
   end
 
-  it 'classifies max fan_in with median complexity, churn, and coverage as trunk when score reaches threshold' do
+  it 'classifies max fan_in with median complexity, churn, and coverage by score percentile' do
+    # 3 files: low=0.0, fan_in_top=0.65, high=0.80.
+    # score_pcts (denom=2): low=0.0, fan_in_top=0.5, high=1.0.
+    # With trunk_threshold=65: score_pct >= 0.65 → trunk; fan_in_top at 0.5 → branch.
     files = %w[low.rb fan_in_top.rb high.rb]
     rows = described_class.new(
       files: files,
@@ -243,7 +249,8 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['fan_in_top.rb'][:complexity_pct]).to eq(0.5)
     expect(rows['fan_in_top.rb'][:churn_pct]).to eq(0.5)
     expect(rows['fan_in_top.rb'][:score]).to eq(0.65)
-    expect(rows['fan_in_top.rb'][:classification]).to eq('trunk')
+    expect(rows['fan_in_top.rb'][:classification]).to eq('branch')
+    expect(rows['high.rb'][:classification]).to eq('trunk')
   end
 
   it 'applies custom trunk and branch thresholds to composite score' do
@@ -609,6 +616,135 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['a.rb'][:max_coupling_partner]).to eq('')
     expect(rows['a.rb'][:coupling_partners]).to eq(0)
     expect(rows['a.rb'][:coupling_pct]).to eq(0.0)
+  end
+
+  it 'classifies top 15% as trunk, next 35% as branch, bottom 50% as leaf in a 20-file repo' do
+    # 20 files with spread scores. With denominator=19:
+    # ranks 18-20 (top 3, score_pct 17/19=0.895..19/19=1.0) → trunk (>= 0.85)
+    # ranks 11-17 (score_pct 10/19=0.526..16/19=0.842) → branch (>= 0.50, < 0.85)
+    # ranks 1-10 (score_pct 0/19=0.0..9/19=0.474) → leaf (< 0.50)
+    files = (1..20).map { |i| "f#{i}.rb" }
+    rows = described_class.new(
+      files: files,
+      fan_in: files.each_with_index.to_h { |file, i| [file, i] },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 },
+      branch_threshold: 50,
+      trunk_threshold: 85
+    ).call.to_h { |row| [row[:path], row] }
+
+    trunks = rows.values.select { |r| r[:classification] == 'trunk' }
+    branches = rows.values.select { |r| r[:classification] == 'branch' }
+    leaves = rows.values.select { |r| r[:classification] == 'leaf' }
+
+    expect(trunks.count).to eq(3)
+    expect(branches.count).to eq(7)
+    expect(leaves.count).to eq(10)
+  end
+
+  it 'produces 1 trunk, 1 branch, 1 leaf in a 3-file repo with distinct scores' do
+    # 3 files with distinct fan_in → distinct scores → distinct score_pcts.
+    # denominator=2: high→1.0→trunk, mid→0.5→branch, low→0.0→leaf
+    files = %w[low.rb mid.rb high.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'low.rb' => 0, 'mid.rb' => 1, 'high.rb' => 2 },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 },
+      branch_threshold: 50,
+      trunk_threshold: 85
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['high.rb'][:classification]).to eq('trunk')
+    expect(rows['mid.rb'][:classification]).to eq('branch')
+    expect(rows['low.rb'][:classification]).to eq('leaf')
+  end
+
+  it 'absolute-floor regression: complexity-floor file in the bottom-50 percentile still escalates to branch' do
+    # 20 files: 19 have high fan_in (driving high scores), 1 has zero fan_in but complexity >= 15
+    # The complexity file lands in the bottom percentile → leaf by score_pct → floor escalates to branch
+    peers = (1..19).map { |i| "peer#{i}.rb" }
+    files = peers + ['complex.rb']
+    rows = described_class.new(
+      files: files,
+      fan_in: peers.each_with_index.to_h { |file, i| [file, i + 1] }.merge('complex.rb' => 0),
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: peers.to_h { |file| [file, 0] }.merge('complex.rb' => 20),
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 },
+      branch_threshold: 50,
+      trunk_threshold: 85
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['complex.rb'][:score]).to eq(0.0)
+    expect(rows['complex.rb'][:classification]).to eq('branch')
+    expect(rows['complex.rb'][:escalation]).to eq('complexity_floor')
+  end
+
+  it 'newness regression: new file in the bottom-50 percentile still escalates to branch with recency_floor' do
+    # A new file with low score, run through Newness.apply
+    files = %w[high.rb low.rb new.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'high.rb' => 2, 'low.rb' => 0, 'new.rb' => 0 },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 },
+      branch_threshold: 50,
+      trunk_threshold: 85
+    ).call
+
+    metadata = {
+      'high.rb' => { new_file: false, age_days: 120, total_commits: 10, metadata_available: true },
+      'low.rb' => { new_file: false, age_days: 120, total_commits: 10, metadata_available: true },
+      'new.rb' => { new_file: true, age_days: 1, total_commits: 1, metadata_available: true }
+    }
+    edges = { 'high.rb' => { dependencies: [] }, 'low.rb' => { dependencies: [] }, 'new.rb' => { dependencies: [] } }
+    result = StudFinder::Newness.apply(rows: rows, edges: edges, metadata: metadata).to_h { |row| [row[:path], row] }
+
+    expect(result['new.rb'][:classification]).to eq('branch')
+    expect(result['new.rb'][:escalation]).to eq('recency_floor')
+  end
+
+  it 'trunk_adjacent regression: new file with fan_out edge to a percentile-trunk escalates to trunk' do
+    # With percentile classification, the highest-scoring file becomes trunk.
+    # A new file that depends on that trunk file should escalate to trunk via trunk_adjacent.
+    # This is Rec 2's key unlock: trunk_adjacent was dead code when trunk was unreachable.
+    files = %w[anchor.rb new_consumer.rb low.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'anchor.rb' => 2, 'new_consumer.rb' => 0, 'low.rb' => 0 },
+      fan_out: { 'anchor.rb' => 0, 'new_consumer.rb' => 1, 'low.rb' => 0 },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: files.to_h { |file| [file, 0] },
+      weights: { fan_in: 1.0, fan_out: 0.0, complexity: 0.0, churn: 0.0, coverage: 0.0 },
+      branch_threshold: 50,
+      trunk_threshold: 85
+    ).call
+
+    scorer_rows = rows.to_h { |row| [row[:path], row] }
+    # anchor.rb has the highest score → score_pct=1.0 → trunk
+    expect(scorer_rows['anchor.rb'][:classification]).to eq('trunk')
+
+    metadata = {
+      'anchor.rb' => { new_file: false, age_days: 120, total_commits: 10, metadata_available: true },
+      'new_consumer.rb' => { new_file: true, age_days: 1, total_commits: 1, metadata_available: true },
+      'low.rb' => { new_file: false, age_days: 120, total_commits: 10, metadata_available: true }
+    }
+    edges = {
+      'anchor.rb' => { dependencies: [] },
+      'new_consumer.rb' => { dependencies: ['anchor.rb'] },
+      'low.rb' => { dependencies: [] }
+    }
+    result = StudFinder::Newness.apply(rows: rows, edges: edges, metadata: metadata).to_h { |row| [row[:path], row] }
+
+    expect(result['new_consumer.rb'][:classification]).to eq('trunk')
+    expect(result['new_consumer.rb'][:escalation]).to eq('trunk_adjacent')
   end
 end
 

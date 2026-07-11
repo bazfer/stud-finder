@@ -9,12 +9,12 @@ $ bundle exec bin/stud-finder ./my-rails-app
 
 Ruby
  rank  language    file                              score  evidence  class   new  age_days  escalation  ...
-   1   ruby        app/models/proficiency.rb         0.7304   1.0000  branch  false  842                 ...
-   2   ruby        app/services/payment_service.rb   0.6890   1.0000  branch  false  611                 ...
+   1   ruby        app/models/proficiency.rb         0.7304   1.0000  trunk   false  842                 ...
+   2   ruby        app/services/payment_service.rb   0.6890   1.0000  trunk   false  611                 ...
    3   ruby        app/controllers/orders_ctlr.rb    0.5721   0.6667  branch  false  520                 ...
 ```
 
-*Scores and evidence are illustrative. Row 3 has no coverage data (evidence capped at `0.6667 = (1.0 + 1.0 + 0.0) / 3`); rows 1–2 have full coverage (evidence `1.0000`). Real runs on well-distributed repos typically top out around 0.70–0.75 composite score — see Classification.*
+*Scores and evidence are illustrative. Row 3 has no coverage data (evidence capped at `0.6667 = (1.0 + 1.0 + 0.0) / 3`); rows 1–2 have full coverage (evidence `1.0000`). The `class` column reflects percentile rank of composite score within the repo — see Classification.*
 
 The full table adds `fan_in`, `fan_out`, `instability`, `complexity`, `churn_commits`, `churn_lines`, `churn_pct`, `loc`, `loc_pct`, `max_coupling`, `max_coupling_partner`, `coupling_partners`, `coupling_pct`, and `coverage`. Use `--output json` for machine-readable output including a `warnings` section and full `meta`.
 
@@ -117,15 +117,19 @@ Result is clamped to `[0.0, 1.0]` and rounded to four decimal places.
 
 ## Classification
 
-Every row is labelled with a `class`:
+Files are classified into three tiers based on the **percentile rank of their composite score** within the repo:
 
-- **trunk** — composite score ≥ `trunk_threshold / 100` (default `trunk_threshold: 85`, so score ≥ 0.85). Load-bearing. High review bar.
-- **branch** — composite score ≥ `branch_threshold / 100` and below the trunk cutoff (default `branch_threshold: 50`, so 0.50 ≤ score < 0.85). Meaningful coupling.
-- **leaf** — score below the branch cutoff. Isolated. Move fast here.
+- **trunk** — top 15% by composite score (default `--trunk-threshold 85`). Load-bearing. High review bar, change with care.
+- **branch** — top 50% but below top 15% (default `--branch-threshold 50`). Meaningful coupling.
+- **leaf** — everything below the 50th percentile. Isolated. Move fast here.
 
-`--trunk-threshold` and `--branch-threshold` take integer values 1–99 that set the composite-score cutoff (a threshold of 85 means score ≥ 0.85). Classification is driven by the full composite, not by fan-in percentile — a file with modest fan-in but very high complexity + churn can still classify as `trunk`.
+This means every repo of meaningful size has trunks: a file at score 0.55 is trunk if the rest of the repo scores below it. The absolute floors below provide a safety net for tiny repos.
 
-Because `score` is a weighted sum of percentile-ranked signals, not itself a percentile, a threshold of 85 does not mean "top 15% of files." Well-distributed projects rarely have any file scoring above 0.85; in tighter distributions the cutoffs may need tuning per-project.
+**Absolute floors:** raw complexity ≥ 15 or raw fan-in ≥ 25 escalates a `leaf` to `branch` regardless of percentile. This ensures that structurally dangerous files in tiny repos (where percentile spread is minimal) still receive elevated attention.
+
+**Tiny repos:** In repos with very few files and uniform scores, the percentile spread may place all files at the same score_pct (0.0), resulting in 0 trunks. The absolute floor is the escape hatch for dangerous files in this case.
+
+Note: `--trunk-threshold 85` and `--branch-threshold 50` now mean "top 15% / top 50% of files by composite score" — not "score value ≥ 0.85 / 0.50". This is a BREAKING semantic change from 0.3.0. Trunk was previously unreachable at defaults (max observed composite score ~0.717 in real repos); this change restores the guarantee that some files are always classified trunk-tier relative to their codebase.
 
 ### Absolute floors
 
@@ -218,8 +222,8 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I][,coupling:P]`. The five base keys (`fan_in`, `fan_out`, `complexity`, `churn`, `coverage`) are required. `interaction` and `coupling` are optional: when omitted, `interaction` defaults to `0.0` (custom weights opt-in) and `coupling` defaults to `0.05`. Each value must be in `[0.0, 1.0]`. When no coverage data is provided, `coverage` must be `0.0`. |
 | `--interaction-weight N` | Sugar flag for setting only the interaction weight. |
 | `--coupling-weight N` | Sugar flag for setting only the coupling weight. Bounds-checked `[0.0, 1.0]`. |
-| `--trunk-threshold N` | Composite-score threshold for trunk classification: score ≥ N/100 (integer 1–99, default: 85) |
-| `--branch-threshold N` | Composite-score threshold for branch classification: score ≥ N/100 (integer 1–99, default: 50) |
+| `--trunk-threshold N` | composite-score percentile cutoff for trunk classification; top (100-N)% of files by score (default: 85) |
+| `--branch-threshold N` | composite-score percentile cutoff for branch classification; top (100-N)% of files by score (default: 50) |
 | `--exclude PATTERN` | Exclude glob pattern (repeatable). `spec/` and `test/` excluded by default. |
 | `--top N` | Emit only the top N results |
 | `--diff-base REF` | Score the whole repo but emit only the files changed on `HEAD` vs the merge-base with `REF` (e.g. `origin/staging`). Ranks and scores stay relative to the full repo. Ideal for per-PR runs. |

@@ -88,7 +88,7 @@ Ties receive the same rank. Edge cases: a codebase with only one file gets `0.0`
 Three pieces of output serve three purposes. Confusing them causes gate consumers to threshold the wrong number.
 
 - **`score`** (0.0–1.0, four decimals) — the weighted composite. This is **evidence about the file's structural risk**, nothing more. Higher score means the signals concentrated more risk on this file.
-- **`class`** (`leaf` / `branch` / `trunk`) — the decision label. Driven by the composite score against configurable thresholds (defaults: `branch` at score ≥ 0.50, `trunk` at score ≥ 0.85). This is what a gate should threshold on for verdicts.
+- **`class`** (`leaf` / `branch` / `trunk`) — the decision label. Driven by the composite-score PERCENTILE across the codebase against configurable thresholds (defaults: `branch` at top 50%, `trunk` at top 15%). This guarantees that some files are always trunk-tier relative to their repo — a file scoring 0.55 can be trunk if the rest of the codebase scores below it. This is what a gate should threshold on for verdicts.
 - **`evidence`** (0.0–1.0) — a metadata confidence value based on file age, commit count, and whether coverage data was explicitly provided. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." Gates should threshold `evidence` for confidence, not raw `score`.
 
 ### Absolute floors
