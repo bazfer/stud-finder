@@ -102,6 +102,16 @@ Files are classified into three labels based on their **fan_in percentile** (not
 
 The total score still drives the ranking. The class label is a separate coupling-based signal.
 
+### Newness rules (AI-generated code)
+
+History-based signals can under-protect brand-new files: a fresh AI-generated file may have little churn, low fan-in, and no established blast radius yet, even though it is often the least proven code in the change. Stud Finder therefore applies post-scoring newness rules that change only `class`, `new_file`, `age_days`, and `escalation`; the numeric `score` stays honest and unchanged.
+
+A file is considered new when its first commit is within `--new-file-days` days (default 30), or when it has fewer than `--new-file-min-commits` commits in full git history (default 3). New files cannot classify below `branch`; those rows show `escalation=recency_floor`.
+
+A stronger rule runs first: if a new file depends on a structurally `trunk` file through its fan-out edges, it escalates to `trunk` with `escalation=trunk_adjacent`. This highlights new code consuming critical interfaces, where contract-violation risk is highest. Use `--no-newness` to disable both newness rules.
+
+**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone, it auto-disables both newness rules and emits `shallow_clone_newness_disabled` so classifications match `--no-newness` instead of misclassifying mature files as new.
+
 ---
 
 ## Language Support
@@ -154,6 +164,9 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--coupling-threshold FLOAT` | Minimum temporal-coupling ratio for edges output and main-scan coupling columns (default: 0.30) |
 | `--coupling-min-commits N` | Minimum co-change count for temporal-coupling edges/columns (default: 5) |
 | `--coupling-max-commit-files N` | Skip temporal-coupling commits touching more than N scored files (default: 50; `0` = unlimited) |
+| `--new-file-days N` | Treat files first committed within N days as new (default: 30; `0` disables the age floor) |
+| `--new-file-min-commits N` | Treat files with fewer than N full-history commits as new (default: 3; `0` disables the commit-count floor) |
+| `--no-newness` | Disable new-file classification rules |
 | `--verbose` | Print suppressed per-file warnings to stderr |
 | `--version`, `--help` | Self-explanatory |
 

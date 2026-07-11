@@ -18,6 +18,7 @@ require_relative 'js_fan_in'
 require_relative 'js_complexity'
 require_relative 'file_collector'
 require_relative 'loc_counter'
+require_relative 'newness'
 require_relative 'scorer'
 require_relative 'version'
 
@@ -26,13 +27,13 @@ module StudFinder
   class CLI
     OUTPUT_FORMATS = %w[table json markdown csv].freeze
     RESULT_COLUMNS = %w[
-      rank language file score class fan_in fan_in_pct fan_out fan_out_pct instability instability_pct complexity
-      complexity_pct churn_commits churn_lines churn_pct loc loc_pct max_coupling max_coupling_partner coupling_partners
-      coupling_pct coverage
+      rank language file score class new_file age_days escalation fan_in fan_in_pct fan_out fan_out_pct instability
+      instability_pct complexity complexity_pct churn_commits churn_lines churn_pct loc loc_pct max_coupling
+      max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     MARKDOWN_COLUMNS = %w[
-      rank language file score class fan_in fan_out fan_out_pct instability complexity churn_commits churn_lines
-      churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
+      rank language file score class new_file age_days escalation fan_in fan_out fan_out_pct instability complexity
+      churn_commits churn_lines churn_pct max_coupling max_coupling_partner coupling_partners coupling_pct coverage
     ].freeze
     WEIGHT_KEYS = %i[fan_in fan_out complexity churn coverage].freeze
     DEFAULT_OPTIONS = {
@@ -56,6 +57,9 @@ module StudFinder
       coupling_threshold: 0.30,
       coupling_min_commits: 5,
       coupling_max_commit_files: 50,
+      newness: true,
+      new_file_days: StudFinder::Newness::DEFAULT_DAYS,
+      new_file_min_commits: StudFinder::Newness::DEFAULT_MIN_COMMITS,
       cli_warnings: []
     }.freeze
 
@@ -115,7 +119,7 @@ module StudFinder
       0
     rescue OptionParser::InvalidOption, OptionParser::MissingArgument, OptionParser::InvalidArgument, ValidationError,
            FileCollector::Error, Churn::Error, Complexity::Error, Coverage::Cobertura::Error, Coverage::Detector::Error,
-           Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Scorer::ValidationError => e
+           Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Newness::Error, Scorer::ValidationError => e
       @stderr.puts e.message
       1
     end
@@ -147,7 +151,7 @@ module StudFinder
         coupling_threshold: @options[:coupling_threshold],
         stdout: @stdout, stderr: @stderr
       ).call
-    rescue FileCollector::Error, Churn::Error, Complexity::Error, Scorer::ValidationError => e
+    rescue FileCollector::Error, Churn::Error, Complexity::Error, Newness::Error, Scorer::ValidationError => e
       @stderr.puts e.message
       1
     end
@@ -226,6 +230,18 @@ module StudFinder
                 'Skip temporal-coupling commits touching more than N files (default: 50, 0 = unlimited)') do |value|
           @options[:coupling_max_commit_files] = value
         end
+        opts.on('--new-file-days N', Integer,
+                'Treat files first committed within N days as new (default: 30, 0 disables age floor)') do |value|
+          @options[:new_file_days] = value
+        end
+        opts.on('--new-file-min-commits N', Integer,
+                'Treat files with fewer than N full-history commits as new ' \
+                '(default: 3, 0 disables count floor)') do |value|
+          @options[:new_file_min_commits] = value
+        end
+        opts.on('--no-newness', 'Disable new-file classification rules') do
+          @options[:newness] = false
+        end
         opts.on('--verbose', 'Print suppressed per-file warnings to stderr') do
           @options[:verbose] = true
         end
@@ -277,6 +293,8 @@ module StudFinder
       raise ValidationError, 'Error: --churn-days must be positive.' if @options[:churn_days] <= 0
       raise ValidationError, 'Error: --js-timeout must be positive.' if @options[:js_timeout] <= 0
 
+      validate_newness_options!
+
       raise ValidationError, 'Error: --coupling-min-commits must be positive.' if @options[:coupling_min_commits] <= 0
       if @options[:coupling_max_commit_files].negative?
         raise ValidationError, 'Error: --coupling-max-commit-files must be zero or positive.'
@@ -288,6 +306,13 @@ module StudFinder
       validate_coverage_paths!
       validate_filter_options!
       validate_weights! if @options[:custom_weights]
+    end
+
+    def validate_newness_options!
+      raise ValidationError, 'Error: --new-file-days must be zero or positive.' if @options[:new_file_days].negative?
+      return unless @options[:new_file_min_commits].negative?
+
+      raise ValidationError, 'Error: --new-file-min-commits must be zero or positive.'
     end
 
     def validate_coverage_paths!
@@ -440,15 +465,29 @@ module StudFinder
       warnings << 'files_skipped' if skipped_files.any?
       warnings << 'small_repo' if files.length < @options[:min_files]
       emit_scoring_note(scorer, coverage_result)
+      rows = apply_newness(files, edges, scorer.call).map { |row| with_language(row, language_by_file) }
       Analysis.new(
         files: files, fan_in: fan_in, fan_out: fan_out, edges: edges, complexity: complexity,
         churn_commits: churn_result.churn_commits, churn_lines: churn_result.churn_lines, loc: loc,
         coverage: coverage_result, coverage_available: !coverage_result.nil?, skipped_files: skipped_files,
-        warnings: warnings.uniq, rows: scorer.call.map { |row| with_language(row, language_by_file) },
+        warnings: warnings.uniq, rows: rows,
         weights: scorer.normalized_weights
       )
     end
     # rubocop:enable Metrics/ParameterLists
+
+    def apply_newness(files, edges, rows)
+      metadata = if @options[:newness] && Newness.shallow_repository?(@repo_path)
+                   @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
+                   Newness.disabled_metadata(files)
+                 elsif @options[:newness]
+                   Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
+                               min_commits: @options[:new_file_min_commits]).call
+                 else
+                   Newness.disabled_metadata(files)
+                 end
+      Newness.apply(rows: rows, edges: edges, metadata: metadata)
+    end
 
     def loc_percentiles_by_language(files, loc, language_by_file)
       files.group_by { |file| language_by_file.fetch(file) }.values.reduce({}) do |pct, language_files|
@@ -595,8 +634,9 @@ module StudFinder
 
     def emit_table_section(title, rows)
       @stdout.puts title
-      @stdout.puts ' rank  language    file                                            score  class   fan_in  ' \
-                   'fan_out  instability  complexity  churn_commits  churn_lines  churn_pct    loc  loc_pct  ' \
+      @stdout.puts ' rank  language    file                                            score  class   new  age_days  ' \
+                   'escalation      fan_in  fan_out  instability  complexity  churn_commits  churn_lines  ' \
+                   'churn_pct    loc  loc_pct  ' \
                    'max_coupling  max_coupling_partner                      coupling_partners  coupling_pct  ' \
                    'coverage'
       rows.each { |row| @stdout.puts table_row(row) }
@@ -655,11 +695,11 @@ module StudFinder
 
     def markdown_row(row)
       values = [
-        row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:fan_in],
-        row[:fan_out], format_score(row[:fan_out_pct]), format_score(row[:instability]), row[:complexity],
-        row[:churn_commits], row[:churn_lines], format_score(row[:churn_pct]), format_score(row[:max_coupling]),
-        row[:max_coupling_partner], row[:coupling_partners], format_score(row[:coupling_pct]),
-        format_coverage(row[:coverage])
+        row[:rank], row[:language], row[:path], format_score(row[:score]), row[:classification], row[:new_file],
+        row[:age_days], row[:escalation], row[:fan_in], row[:fan_out], format_score(row[:fan_out_pct]),
+        format_score(row[:instability]), row[:complexity], row[:churn_commits], row[:churn_lines],
+        format_score(row[:churn_pct]), format_score(row[:max_coupling]), row[:max_coupling_partner],
+        row[:coupling_partners], format_score(row[:coupling_pct]), format_coverage(row[:coverage])
       ]
       "| #{values.join(' | ')} |"
     end
@@ -690,6 +730,9 @@ module StudFinder
         path: row[:path],
         score: row[:score],
         class: row[:classification],
+        new_file: row[:new_file],
+        age_days: row[:age_days],
+        escalation: row[:escalation],
         fan_in: row[:fan_in],
         fan_in_pct: row[:fan_in_pct],
         fan_out: row[:fan_out],
@@ -718,6 +761,9 @@ module StudFinder
         row[:path],
         format_score(row[:score]),
         row[:classification],
+        row[:new_file],
+        row[:age_days],
+        row[:escalation],
         row[:fan_in],
         format_score(row[:fan_in_pct]),
         row[:fan_out],
@@ -789,13 +835,16 @@ module StudFinder
     end
 
     def table_row(row)
-      format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<fan_in>6d  ' \
-             '%<fan_out>7d  %<instability>11s  %<complexity>10d  %<churn_commits>13d  %<churn_lines>11d  ' \
-             '%<churn_pct>9s  %<loc>5d  %<loc_pct>7s  %<max_coupling>12s  ' \
-             '%<max_coupling_partner>-40s  %<coupling_partners>17d  %<coupling_pct>12s  %<coverage>8s',
+      format('%<rank>5d  %<language>-10s  %<path>-45s  %<score>6s  %<classification>-6s  %<new_file>5s  ' \
+             '%<age_days>8d  %<escalation>-15s  %<fan_in>6d  %<fan_out>7d  %<instability>11s  %<complexity>10d  ' \
+             '%<churn_commits>13d  %<churn_lines>11d  %<churn_pct>9s  %<loc>5d  %<loc_pct>7s  ' \
+             '%<max_coupling>12s  %<max_coupling_partner>-40s  %<coupling_partners>17d  ' \
+             '%<coupling_pct>12s  %<coverage>8s',
              rank: row[:rank], language: row[:language], path: row[:path], score: format_score(row[:score]),
-             classification: row[:classification], fan_in: row[:fan_in], fan_out: row[:fan_out],
-             instability: format_score(row[:instability]), complexity: row[:complexity],
+             classification: row[:classification], new_file: row[:new_file].to_s, age_days: row[:age_days].to_i,
+             escalation: row[:escalation],
+             fan_in: row[:fan_in], fan_out: row[:fan_out], instability: format_score(row[:instability]),
+             complexity: row[:complexity],
              churn_commits: row[:churn_commits], churn_lines: row[:churn_lines],
              churn_pct: format_score(row[:churn_pct]), loc: row[:loc], loc_pct: format_score(row[:loc_pct]),
              max_coupling: format_score(row[:max_coupling]),

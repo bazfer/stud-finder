@@ -127,6 +127,47 @@ RSpec.describe 'fixture repo integration' do
     expect(stdout).to include('| 1 | ruby | app/models/user.rb |')
   end
 
+  it 'does not mark mature files as new when scanning a subdirectory' do
+    Dir.mktmpdir('stud-finder-subdir-app') do |root|
+      initialize_mature_subdirectory_repo(root)
+
+      stdout, stderr, status = Open3.capture3('bundle', 'exec', 'ruby', bin_path, File.join(root, 'app'),
+                                              '--min-files', '5', '--output', 'json')
+      payload = JSON.parse(stdout)
+      files = payload.fetch('ruby')
+
+      expect(status).to be_success, stderr
+      expect(files.length).to eq(5)
+      files.each do |file|
+        expect(file['path']).to start_with('models/model_')
+        expect(file['new_file']).to be(false)
+        expect(file['age_days']).to eq(90)
+        expect(file['class']).to eq('leaf')
+        expect(file['escalation']).not_to eq('recency_floor')
+      end
+    end
+  end
+
+  it 'emits age_days in every output format' do
+    %w[table markdown json csv].each do |format|
+      stdout, stderr, status = run_cli('--min-files', '5', '--output', format)
+
+      expect(status).to be_success, stderr
+      case format
+      when 'table'
+        expect(stdout).to include('age_days')
+      when 'markdown'
+        expect(stdout).to include('| age_days |')
+      when 'json'
+        payload = JSON.parse(stdout)
+        expect(payload.fetch('ruby').first).to have_key('age_days')
+      when 'csv'
+        rows = CSV.parse(stdout, headers: true)
+        expect(rows.headers).to include('age_days')
+      end
+    end
+  end
+
   it 'filters output to files changed vs --diff-base, preserving full-repo rank and score' do
     system('git', '-C', repo_path, 'branch', '-D', 'base', out: File::NULL, err: File::NULL)
     system('git', '-C', repo_path, 'branch', 'base')
@@ -235,6 +276,31 @@ RSpec.describe 'fixture repo integration' do
     File.open(File.join(repo_path, 'app/models/user.rb'), 'a') { |file| file.puts '# another churn marker' }
     system('git', '-C', repo_path, 'add', 'app/models/user.rb')
     system('git', '-C', repo_path, 'commit', '-qm', 'touch user model again')
+  end
+
+  def initialize_mature_subdirectory_repo(root)
+    now = Time.now
+    system('git', 'init', '-q', root)
+    system('git', '-C', root, 'config', 'user.email', 'stud-finder@example.test')
+    system('git', '-C', root, 'config', 'user.name', 'Stud Finder')
+    (1..5).each do |i|
+      path = File.join(root, 'app/models', "model_#{i}.rb")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "class Model#{i}\nend\n")
+    end
+    commit_repo_at(root, 'add mature models', now - (90 * 86_400))
+    3.times do |i|
+      (1..5).each do |j|
+        File.open(File.join(root, 'app/models', "model_#{j}.rb"), 'a') { |file| file.puts "# old touch #{i}" }
+      end
+      commit_repo_at(root, "touch mature models #{i}", now - ((80 - i) * 86_400))
+    end
+  end
+
+  def commit_repo_at(root, message, date)
+    env = { 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 }
+    system(env, 'git', '-C', root, 'add', '-A')
+    system(env, 'git', '-C', root, 'commit', '-qm', message)
   end
 
   def top_table_row(stdout)

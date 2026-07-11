@@ -33,6 +33,19 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  def write_file(root, path, content)
+    full_path = File.join(root, path)
+    FileUtils.mkdir_p(File.dirname(full_path))
+    File.write(full_path, content)
+  end
+
+  def commit_at(root, message, date)
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'add', '-A')
+    system({ 'GIT_AUTHOR_DATE' => date.iso8601, 'GIT_COMMITTER_DATE' => date.iso8601 },
+           'git', '-C', root, 'commit', '-qm', message)
+  end
+
   def write_coverage_report(dir, files)
     path = File.join(dir, 'coverage.xml')
     classes = files.map do |file|
@@ -376,10 +389,102 @@ RSpec.describe StudFinder::CLI do
         StudFinder::CLI::RESULT_COLUMNS
       )
       expect(rows.last).to eq(
-        ['1', 'ruby', file, '0.5882', 'leaf', '0', '0.0000', '0', '0.0000', '0.0000', '0.0000', '7', '1.0000',
-         '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0', '0.0000', '']
+        ['1', 'ruby', file, '0.5882', 'branch', 'true', '0', 'recency_floor', '0', '0.0000', '0', '0.0000',
+         '0.0000', '0.0000', '7', '1.0000', '3', '15', '1.0000', '2', '0.0000', '0.0000', '', '0',
+         '0.0000', '']
       )
       expect(lines.last).to end_with(",\"\"\n")
+    end
+  end
+
+  it 'keeps pre-newness classification behavior when --no-newness is passed' do
+    make_repo(file_count: 5) do |root|
+      status, stdout, stderr = run_cli([root, '--min-files', '5', '--top', '1', '--output', 'csv', '--no-newness'])
+      row = CSV.parse(stdout, nil_value: '', headers: true).first
+
+      expect(status).to eq(0), stderr
+      expect(row['class']).to eq('leaf')
+      expect(row['new_file']).to eq('false')
+      expect(row['escalation']).to eq('')
+    end
+  end
+
+  it 'preserves cross-subtree rename age when scanning a subdirectory as JSON' do
+    now = Time.now
+    Dir.mktmpdir do |root|
+      system('git', 'init', '-q', root)
+      system('git', '-C', root, 'config', 'user.email', 'stud-finder@example.test')
+      system('git', '-C', root, 'config', 'user.name', 'Stud Finder')
+
+      write_file(root, 'lib/foo.rb', "class Foo\nend\n")
+      commit_at(root, 'add foo outside app', now - (90 * 86_400))
+      3.times do |i|
+        File.open(File.join(root, 'lib/foo.rb'), 'a') { |file| file.puts "# change #{i}" }
+        commit_at(root, "touch foo outside app #{i}", now - ((80 - i) * 86_400))
+      end
+      FileUtils.mkdir_p(File.join(root, 'app/models'))
+      4.times do |i|
+        write_file(root, "app/models/filler_#{i}.rb", "class Filler#{i}\nend\n")
+      end
+      system('git', '-C', root, 'mv', 'lib/foo.rb', 'app/models/foo.rb')
+      commit_at(root, 'move foo into app models', now - 86_400)
+
+      status, stdout, stderr = run_cli([File.join(root, 'app'), '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      row = JSON.parse(stdout).fetch('ruby').find { |item| item['path'] == 'models/foo.rb' }
+      expect(row).not_to be_nil
+      expect(row['new_file']).to be(false)
+      expect(row['age_days']).to be_between(89, 91).inclusive
+      expect(row['escalation']).to eq('')
+    end
+  end
+
+  it 'disables newness and emits a structured warning for shallow clones' do
+    make_repo(file_count: 5) do |root|
+      3.times do |i|
+        File.open(File.join(root, 'app/models/model_0.rb'), 'a') { |file| file.puts "# mature change #{i}" }
+        system('git', '-C', root, 'add', '.')
+        system('git', '-C', root, 'commit', '-qm', "mature model_0 #{i}")
+      end
+
+      Dir.mktmpdir do |clone_parent|
+        shallow_root = File.join(clone_parent, 'shallow')
+        cloned = system('git', 'clone', '--depth', '1', "file://#{root}", shallow_root,
+                        out: File::NULL, err: File::NULL)
+        expect(cloned).to be(true)
+
+        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json'])
+        disabled_status, disabled_stdout, disabled_stderr = run_cli([
+                                                                      shallow_root, '--min-files', '5',
+                                                                      '--output', 'json', '--no-newness'
+                                                                    ])
+
+        expect(status).to eq(0), stderr
+        expect(disabled_status).to eq(0), disabled_stderr
+
+        payload = JSON.parse(stdout)
+        disabled_payload = JSON.parse(disabled_stdout)
+        warning = payload['warnings'].find do |item|
+          item.is_a?(Hash) && item['code'] == 'shallow_clone_newness_disabled'
+        end
+
+        expect(warning).not_to be_nil
+        expect(warning['message']).to include('shallow git clone detected; newness rules disabled')
+
+        rows = payload['ruby'] + payload['javascript']
+        disabled_rows_by_path = (disabled_payload['ruby'] + disabled_payload['javascript']).to_h do |row|
+          [row['path'], row]
+        end
+
+        expect(rows).not_to be_empty
+        rows.each do |row|
+          expect(row['new_file']).to be(false)
+          expect(row['age_days']).to eq(0)
+          expect(row['escalation']).to eq('')
+          expect(row['class']).to eq(disabled_rows_by_path.fetch(row['path'])['class'])
+        end
+      end
     end
   end
 
@@ -659,6 +764,9 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       path: 'app/models/user.rb',
       score: 0.5,
       classification: 'leaf',
+      new_file: false,
+      age_days: 42,
+      escalation: '',
       fan_in: 0,
       fan_in_pct: 0.0,
       fan_out: 1,
@@ -689,6 +797,25 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
     expect(cli.send(:csv_file, row)).to include(12, '0.7500')
     expect(cli.send(:table_row, row)).to include('12', '0.7500')
     expect(cli.send(:markdown_row, row)).not_to include('0.7500')
+  end
+
+  it 'includes age_days in table, markdown, JSON, and CSV output' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS).to include('age_days')
+    expect(described_class::MARKDOWN_COLUMNS).to include('age_days')
+    expect(cli.send(:json_file, row)).to include(age_days: 42)
+    expect(cli.send(:csv_file, row)).to include(42)
+    expect(cli.send(:table_row, row)).to include('42')
+    expect(cli.send(:markdown_row, row)).to include('| false | 42 |')
+  end
+
+  it 'includes fan_out_pct in markdown output' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(described_class::RESULT_COLUMNS).to include('fan_out_pct')
+    expect(described_class::MARKDOWN_COLUMNS).to include('fan_out_pct')
+    expect(cli.send(:markdown_row, row)).to include('| 1 | 1.0000 | 1.0000 |')
   end
 
   it 'computes LOC percentiles separately for each language' do
