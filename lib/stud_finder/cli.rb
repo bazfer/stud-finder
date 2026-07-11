@@ -182,8 +182,9 @@ module StudFinder
         end
         opts.on('--interaction-weight N', Float,
                 'fan_in × coverage_risk interaction weight (requires coverage)') do |value|
+          raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if value.negative? || value > 1.0
+
           @options[:weights][:interaction] = value
-          @options[:custom_weights] = true
         end
         opts.on('--coupling-weight N', Float, 'temporal coupling weight') do |value|
           raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if value.negative? || value > 1.0
@@ -719,8 +720,10 @@ module StudFinder
       @stdout.puts "## stud-finder — #{Time.now.utc.strftime('%Y-%m-%d')}"
       @stdout.puts
       file_count = analysis.ruby.files.length + analysis.javascript.files.length
-      @stdout.puts "> #{report_coverage_available?(analysis) ? '5-factor score' : '4-factor score (no coverage)'}. " \
-                   "Churn window: #{@options[:churn_days]} days. #{file_count} files analyzed."
+      weights = analysis.ruby.weights || analysis.javascript.weights
+      md_formula = formula_label(coverage_available: report_coverage_available?(analysis),
+                                 coupling_available: weights[:coupling])
+      @stdout.puts "> #{md_formula}. Churn window: #{@options[:churn_days]} days. #{file_count} files analyzed."
       note = filter_note
       if note
         @stdout.puts
@@ -746,7 +749,8 @@ module StudFinder
 
     def emit_table(path, result, analysis, ruby_rows, javascript_rows)
       coverage_available = report_coverage_available?(analysis)
-      formula = coverage_available ? '5-factor score' : '4-factor score'
+      weights = analysis.ruby.weights || analysis.javascript.weights
+      formula = formula_label(coverage_available: coverage_available, coupling_available: weights[:coupling])
       @stdout.puts "stud-finder — #{path} (#{@options[:churn_days]}-day churn, #{formula})"
       unless coverage_available
         @stdout.puts scoring_note(weights: analysis.ruby.weights || analysis.javascript.weights,
@@ -832,14 +836,19 @@ module StudFinder
     end
 
     def json_formula(analysis)
-      coverage_available = report_coverage_available?(analysis)
       weights = analysis.ruby.weights || analysis.javascript.weights
-      coupling_available = weights[:coupling]
+      formula_label(
+        coverage_available: report_coverage_available?(analysis),
+        coupling_available: weights[:coupling]
+      )
+    end
 
+    def formula_label(coverage_available:, coupling_available:)
+      coupling = coupling_available.to_f.positive?
       if coverage_available
-        coupling_available ? '5-factor + coupling' : '5-factor'
+        coupling ? '5-factor + coupling' : '5-factor'
       else
-        coupling_available ? '4-factor + coupling' : '4-factor (no coverage)'
+        coupling ? '4-factor + coupling' : '4-factor'
       end
     end
 
@@ -856,31 +865,27 @@ module StudFinder
     end
 
     def coverage_scoring_note(weights:)
-      return 'Note: coverage data available. Score uses 6-factor formula (including coupling).' if weights[:coupling]
-
-      'Note: coverage data available. Score uses 5-factor formula.'
+      label = formula_label(coverage_available: true, coupling_available: weights[:coupling])
+      "Note: coverage data available. Score uses #{label} formula."
     end
 
     def scoring_note(weights:, stderr:)
-      return coupling_scoring_note(weights: weights, stderr: stderr) if weights[:coupling]
-
-      if stderr
-        format('Note: coverage data not available. Score uses 4-factor formula (fan_in %<fan_in>.2f, ' \
+      label = formula_label(coverage_available: false, coupling_available: weights[:coupling])
+      if weights[:coupling]
+        if stderr
+          format("Note: coverage data not available. Score uses #{label} formula (fan_in %<fan_in>.2f, " \
+                 'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f, ' \
+                 'coupling %<coupling>.2f).', **weights)
+        else
+          format("Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, " \
+                 'complexity %<complexity>.2f, churn %<churn>.2f, coupling %<coupling>.2f.', **weights)
+        end
+      elsif stderr
+        format("Note: coverage data not available. Score uses #{label} formula (fan_in %<fan_in>.2f, " \
                'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f).', **weights)
       else
         format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
                'complexity %<complexity>.2f, churn %<churn>.2f.', **weights)
-      end
-    end
-
-    def coupling_scoring_note(weights:, stderr:)
-      if stderr
-        format('Note: coverage data not available. Score uses 5-factor formula (fan_in %<fan_in>.2f, ' \
-               'fan_out %<fan_out>.2f, complexity %<complexity>.2f, churn %<churn>.2f, ' \
-               'coupling %<coupling>.2f).', **weights)
-      else
-        format('Note: coverage data not available. Score uses fan_in %<fan_in>.2f, fan_out %<fan_out>.2f, ' \
-               'complexity %<complexity>.2f, churn %<churn>.2f, coupling %<coupling>.2f.', **weights)
       end
     end
 

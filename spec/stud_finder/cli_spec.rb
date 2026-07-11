@@ -316,6 +316,56 @@ RSpec.describe StudFinder::CLI do
     expect(stderr).to include('weight values must be between 0.0 and 1.0')
   end
 
+  it 'accepts --interaction-weight alone in no-coverage mode without triggering weight validation errors' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--interaction-weight', '0.10', '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      expect(stderr).not_to include('coverage weight must be 0.0')
+      expect(stderr).not_to include('weights must sum to 1.0')
+    end
+  end
+
+  it 'accepts --interaction-weight alone in coverage mode (interaction weight is applied and renormalized)' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      coverage = write_coverage_report(root, files)
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
+                                      zero_percentage: 0)
+      )
+
+      status, stdout, stderr = run_cli([root, '--interaction-weight', '0.10',
+                                        '--ruby-coverage', coverage, '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+      expect(stderr).not_to include('weights must sum to 1.0')
+      parsed = JSON.parse(stdout)
+      expect(parsed.dig('meta', 'weights', 'interaction')).not_to be_nil
+    end
+  end
+
+  it 'rejects out-of-range --interaction-weight values' do
+    ['-0.05', '1.5'].each do |value|
+      status, _stdout, stderr = run_cli(['--interaction-weight', value])
+
+      expect(status).to eq(1)
+      expect(stderr).to include('weight values must be between 0.0 and 1.0')
+    end
+  end
+
+  it 'accepts --interaction-weight combined with --coupling-weight in no-coverage mode' do
+    make_repo(file_count: 5) do |root|
+      status, _stdout, stderr = run_cli([root, '--interaction-weight', '0.10', '--coupling-weight', '0.10',
+                                         '--min-files', '1', '--output', 'json'])
+
+      expect(status).to eq(0), stderr
+    end
+  end
+
   it 'reports a missing coverage file' do
     path = File.join(Dir.tmpdir, "stud-finder-coverage-nope-#{rand(100_000)}.xml")
     status, _stdout, stderr = run_cli(['--coverage', path])
@@ -983,7 +1033,7 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
     expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: 0.05))).to eq('5-factor + coupling')
     expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: 0.05))).to eq('4-factor + coupling')
     expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: nil))).to eq('5-factor')
-    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: nil))).to eq('4-factor (no coverage)')
+    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: nil))).to eq('4-factor')
   end
 
   it 'includes LOC in table, JSON, and CSV columns, but excludes markdown' do
@@ -1028,5 +1078,74 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       'small.ts' => 0.0,
       'large.ts' => 1.0
     )
+  end
+
+  it 'formula_label returns canonical label per mode (no 6-factor or (no coverage) suffix)' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+
+    expect(cli.send(:formula_label, coverage_available: true, coupling_available: 0.05))
+      .to eq('5-factor + coupling')
+    expect(cli.send(:formula_label, coverage_available: true, coupling_available: nil))
+      .to eq('5-factor')
+    expect(cli.send(:formula_label, coverage_available: false, coupling_available: 0.05))
+      .to eq('4-factor + coupling')
+    expect(cli.send(:formula_label, coverage_available: false, coupling_available: nil))
+      .to eq('4-factor')
+    # coupling_available: 0.0 (zero weight) must not count as coupling present
+    expect(cli.send(:formula_label, coverage_available: false, coupling_available: 0.0))
+      .to eq('4-factor')
+  end
+
+  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 4-factor mode' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
+                                      zero_percentage: 0)
+      )
+
+      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--output', 'json'])
+      _status, table_out, _stderr = run_cli([root, '--min-files', '5'])
+
+      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('4-factor')
+      expect(json_err).to include('Score uses 4-factor formula')
+      expect(table_out).to include('4-factor')
+    end
+  end
+
+  it 'formula label is consistent across JSON meta.formula, stderr, and table header in 5-factor + coupling mode' do
+    make_repo(file_count: 5) do |root|
+      files = Array.new(5) { |i| "app/models/model_#{i}.rb" }
+      coverage = write_coverage_report(root, files)
+      allow_any_instance_of(StudFinder::Complexity).to receive(:call).and_return(
+        StudFinder::Complexity::Result.new(counts: files.to_h { |file| [file, 0] }, skipped_files: [])
+      )
+      allow_any_instance_of(StudFinder::Churn).to receive(:call).and_return(
+        StudFinder::Churn::Result.new(counts: files.to_h { |file| [file, 0] }, zero_inflated: false,
+                                      zero_percentage: 0)
+      )
+      allow_any_instance_of(StudFinder::TemporalCoupling).to receive(:call).and_return(
+        StudFinder::TemporalCoupling::Result.new(
+          pairs: {
+            'app/models/model_0.rb' => [
+              { path: 'app/models/model_1.rb', coupling: 0.9, co_changes: 5 }
+            ]
+          },
+          warnings: []
+        )
+      )
+
+      _status, json_out, json_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage,
+                                             '--output', 'json'])
+      _status, table_out, _table_err = run_cli([root, '--min-files', '5', '--ruby-coverage', coverage])
+
+      expect(JSON.parse(json_out).dig('meta', 'formula')).to eq('5-factor + coupling')
+      expect(json_err).to include('Score uses 5-factor + coupling formula')
+      expect(json_err).not_to include('6-factor')
+      expect(table_out).to include('5-factor + coupling')
+    end
   end
 end

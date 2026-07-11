@@ -48,8 +48,12 @@ module StudFinder
     def self.apply(rows:, edges:, metadata:, branch_threshold: 'branch', coverage: nil)
       rows = rows.map do |row|
         file_metadata = metadata.fetch(row[:path], nil)
-        row.merge(newness_fields(file_metadata))
-           .merge(evidence: evidence(file_metadata, coverage&.key?(row[:path])))
+        nf = newness_fields(file_metadata)
+        # Preserve floor escalation from the scorer (complexity_floor / fan_in_floor); newness rules
+        # may still override it below for new files (trunk_adjacent or recency_floor always win).
+        existing_escalation = row.fetch(:escalation, '')
+        nf = nf.merge(escalation: existing_escalation) unless existing_escalation.to_s.empty?
+        row.merge(nf).merge(evidence: evidence(file_metadata, coverage&.key?(row[:path])))
       end
       # Rule 2: scorer "trunk" now means high composite risk, not fan-in-only structural coupling.
       trunk_paths = rows.select { |row| row[:classification] == 'trunk' }.to_set { |row| row[:path] }
