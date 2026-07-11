@@ -171,6 +171,14 @@ RSpec.describe StudFinder::CLI do
     expect(stderr).to include('actual sum is 0.8000')
   end
 
+  it 'rejects a negative interaction weight when total weight is valid' do
+    weights = 'fan_in:0.30,fan_out:0.10,complexity:0.30,churn:0.30,coverage:0.10'
+    status, _stdout, stderr = run_cli(['--weights', weights, '--interaction-weight', '-0.10'])
+
+    expect(status).to eq(1)
+    expect(stderr).to include('weight values must be between 0.0 and 1.0')
+  end
+
   it 'rejects coverage weight in Phase 1' do
     status, _stdout, stderr = run_cli(['--weights', full_weights])
 

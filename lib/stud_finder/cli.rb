@@ -359,6 +359,9 @@ module StudFinder
 
     def validate_weights!
       weights = @options[:weights]
+      out_of_range = weights.any? { |_key, weight| !weight.nil? && (weight.negative? || weight > 1.0) }
+      raise ValidationError, 'Error: weight values must be between 0.0 and 1.0.' if out_of_range
+
       if weights[:coverage].positive? && !coverage_available?
         raise ValidationError, 'Error: coverage weight must be 0.0 when no coverage data is provided.'
       end
