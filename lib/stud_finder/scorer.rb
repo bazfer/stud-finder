@@ -110,10 +110,11 @@ module StudFinder
     def result_row(file, score, pcts)
       fi = @fan_in.fetch(file, 0).to_i
       fo = @fan_out.fetch(file, 0).to_i
+      rounded_score = score.round(4)
       {
         path: file,
-        score: score.round(4),
-        classification: classification(pcts[:fan_in].fetch(file)),
+        score: rounded_score,
+        classification: classification(rounded_score),
         fan_in: fi,
         fan_in_pct: pcts[:fan_in].fetch(file).round(4),
         fan_out: fo,
@@ -180,9 +181,9 @@ module StudFinder
       !@coverage.nil?
     end
 
-    def classification(fan_in_pct)
-      return 'trunk' if fan_in_pct >= @trunk_threshold / 100.0
-      return 'branch' if fan_in_pct >= @branch_threshold / 100.0
+    def classification(score)
+      return 'trunk' if score >= @trunk_threshold / 100.0
+      return 'branch' if score >= @branch_threshold / 100.0
 
       'leaf'
     end

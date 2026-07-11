@@ -49,12 +49,71 @@ RSpec.describe StudFinder::Scorer do
     expect(rows['b.rb'][:coverage]).to be_nil
   end
 
-  it 'classifies by fan_in percentile only' do
+  it 'classifies by composite score' do
     rows = scorer.call.to_h { |row| [row[:path], row] }
 
-    expect(rows['a.rb'][:classification]).to eq('trunk')
+    expect(rows['a.rb'][:classification]).to eq('leaf')
     expect(rows['b.rb'][:classification]).to eq('branch')
-    expect(rows['c.rb'][:classification]).to eq('leaf')
+    expect(rows['c.rb'][:classification]).to eq('branch')
+  end
+
+  it 'classifies max complexity, max churn, zero coverage, and median fan_in as trunk' do
+    files = %w[low.rb risky.rb fan_in_top.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'low.rb' => 0, 'risky.rb' => 1, 'fan_in_top.rb' => 2 },
+      fan_out: { 'low.rb' => 0, 'risky.rb' => 5, 'fan_in_top.rb' => 1 },
+      complexity: { 'low.rb' => 0, 'risky.rb' => 10, 'fan_in_top.rb' => 1 },
+      churn: { 'low.rb' => 0, 'risky.rb' => 10, 'fan_in_top.rb' => 1 },
+      coverage: { 'low.rb' => 1.0, 'risky.rb' => 0.0, 'fan_in_top.rb' => 1.0 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['risky.rb'][:fan_in_pct]).to eq(0.5)
+    expect(rows['risky.rb'][:score]).to eq(0.875)
+    expect(rows['risky.rb'][:classification]).to eq('trunk')
+  end
+
+  it 'classifies max fan_in with median complexity, churn, and coverage as trunk when score reaches threshold' do
+    files = %w[low.rb fan_in_top.rb high.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'low.rb' => 0, 'fan_in_top.rb' => 3, 'high.rb' => 1 },
+      fan_out: { 'low.rb' => 0, 'fan_in_top.rb' => 5, 'high.rb' => 1 },
+      complexity: { 'low.rb' => 0, 'fan_in_top.rb' => 1, 'high.rb' => 2 },
+      churn: { 'low.rb' => 0, 'fan_in_top.rb' => 1, 'high.rb' => 2 },
+      coverage: { 'low.rb' => 1.0, 'fan_in_top.rb' => 0.5, 'high.rb' => 0.0 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 },
+      branch_threshold: 30,
+      trunk_threshold: 65
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['fan_in_top.rb'][:fan_in_pct]).to eq(1.0)
+    expect(rows['fan_in_top.rb'][:complexity_pct]).to eq(0.5)
+    expect(rows['fan_in_top.rb'][:churn_pct]).to eq(0.5)
+    expect(rows['fan_in_top.rb'][:score]).to eq(0.675)
+    expect(rows['fan_in_top.rb'][:classification]).to eq('trunk')
+  end
+
+  it 'applies custom trunk and branch thresholds to composite score' do
+    files = %w[leaf.rb branch.rb near_trunk.rb trunk.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'leaf.rb' => 0, 'branch.rb' => 0, 'near_trunk.rb' => 1, 'trunk.rb' => 2 },
+      fan_out: { 'leaf.rb' => 0, 'branch.rb' => 1, 'near_trunk.rb' => 2, 'trunk.rb' => 3 },
+      complexity: { 'leaf.rb' => 0, 'branch.rb' => 0, 'near_trunk.rb' => 2, 'trunk.rb' => 3 },
+      churn: { 'leaf.rb' => 0, 'branch.rb' => 1, 'near_trunk.rb' => 2, 'trunk.rb' => 3 },
+      coverage: { 'leaf.rb' => 1.0, 'branch.rb' => 0.75, 'near_trunk.rb' => 0.25, 'trunk.rb' => 0.0 },
+      weights: { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 },
+      branch_threshold: 30,
+      trunk_threshold: 90
+    ).call.to_h { |row| [row[:path], row] }
+
+    expect(rows['trunk.rb'][:score]).to eq(1.0)
+    expect(rows['trunk.rb'][:classification]).to eq('trunk')
+    expect(rows['near_trunk.rb'][:score]).to eq(0.6667)
+    expect(rows['near_trunk.rb'][:classification]).to eq('branch')
+    expect(rows['leaf.rb'][:classification]).to eq('leaf')
   end
 
   it 'uses five-factor scoring when coverage is provided' do

@@ -46,6 +46,7 @@ module StudFinder
 
     def self.apply(rows:, edges:, metadata:, branch_threshold: 'branch')
       rows = rows.map { |row| row.merge(newness_fields(metadata.fetch(row[:path], nil))) }
+      # Rule 2: scorer "trunk" now means high composite risk, not fan-in-only structural coupling.
       trunk_paths = rows.select { |row| row[:classification] == 'trunk' }.to_set { |row| row[:path] }
 
       rows.map do |row|
