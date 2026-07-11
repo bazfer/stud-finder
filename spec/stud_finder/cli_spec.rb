@@ -298,7 +298,11 @@ RSpec.describe StudFinder::CLI do
                                          '--coupling-weight', '0.5'
                                        ])
       expect(status).to eq(0), stderr
-      rows = JSON.parse(stdout).fetch('ruby').to_h { |row| [row.fetch('path'), row] }
+      payload = JSON.parse(stdout)
+      expect(payload.fetch('meta').fetch('formula')).to eq('4-factor + coupling')
+      expect(payload.fetch('meta').fetch('weights').fetch('coupling')).to eq(0.5)
+
+      rows = payload.fetch('ruby').to_h { |row| [row.fetch('path'), row] }
       expect(rows.fetch('app/models/model_0.rb').fetch('score')).to eq(0.5)
       expect(rows.fetch('app/models/model_0.rb').fetch('coupling_pct')).to eq(1.0)
     end
@@ -966,6 +970,20 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
 
     expect(cli.send(:limited_rows, sorted).map { |result| result[:path] }).to include('new_client.rb')
     expect(sorted.find { |result| result[:path] == 'new_client.rb' }).to include(classification: 'trunk', rank: 2)
+  end
+
+  it 'labels JSON formulas based on coverage and coupling availability' do
+    cli = described_class.new([], stdout: StringIO.new, stderr: StringIO.new)
+    analysis = lambda do |coverage:, coupling:|
+      weights = { fan_in: 0.25, fan_out: 0.25, complexity: 0.25, churn: 0.25, coupling: coupling }
+      report = described_class::Analysis.new(coverage_available: coverage, weights: weights)
+      described_class::Report.new(ruby: report, javascript: report)
+    end
+
+    expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: 0.05))).to eq('5-factor + coupling')
+    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: 0.05))).to eq('4-factor + coupling')
+    expect(cli.send(:json_formula, analysis.call(coverage: true, coupling: nil))).to eq('5-factor')
+    expect(cli.send(:json_formula, analysis.call(coverage: false, coupling: nil))).to eq('4-factor (no coverage)')
   end
 
   it 'includes LOC in table, JSON, and CSV columns, but excludes markdown' do

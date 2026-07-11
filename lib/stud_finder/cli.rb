@@ -705,7 +705,7 @@ module StudFinder
         churn_days: @options[:churn_days],
         file_count: analysis.ruby.files.length + analysis.javascript.files.length,
         files_skipped: analysis.ruby.skipped_files.length + analysis.javascript.skipped_files.length,
-        formula: report_coverage_available?(analysis) ? '5-factor' : '4-factor (no coverage)',
+        formula: json_formula(analysis),
         weights: json_weights(analysis.ruby.weights || analysis.javascript.weights),
         warnings: analysis.warnings
       }
@@ -829,6 +829,18 @@ module StudFinder
 
     def report_coverage_available?(analysis)
       analysis.ruby.coverage_available || analysis.javascript.coverage_available
+    end
+
+    def json_formula(analysis)
+      coverage_available = report_coverage_available?(analysis)
+      weights = analysis.ruby.weights || analysis.javascript.weights
+      coupling_available = weights[:coupling]
+
+      if coverage_available
+        coupling_available ? '5-factor + coupling' : '5-factor'
+      else
+        coupling_available ? '4-factor + coupling' : '4-factor (no coverage)'
+      end
     end
 
     def json_weights(weights)
