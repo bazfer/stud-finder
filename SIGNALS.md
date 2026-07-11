@@ -129,3 +129,13 @@ When every file in a codebase has an identical non-zero raw value for a signal �
 ## Instability (informational)
 
 `instability` = `fan_out / (fan_in + fan_out)` — Robert Martin's I metric, bounded [0, 1]. Reported in every row for context but **not scored**. A file with fan-in 100 and fan-out 10 has instability 0.09 (stable, load-bearing); a file with fan-in 2 and fan-out 50 has instability 0.96 (fragile consumer). The metric captures a real property but has proved noisy enough at the file level that including it in the composite would dilute signals with better outcome correlations. It stays as reviewer context.
+
+---
+
+## Honest limits
+
+- **Coupling ≠ correctness.** High-coupling files often receive the most attention and best maintenance precisely because they are load-bearing. A high score means "this file concentrates risk signals"; it does not mean "this file has more bugs." Score is a triage signal, not an audit.
+- **Weights are heuristics, not calibrated estimates.** The default weights encode a plausible structural ordering but have not been fit against a labelled bug dataset. Until outcome calibration runs, treat weight differences as directional, not quantitative.
+- **Bugs live at interfaces, not files.** The most common production bugs surface at the boundary between two files — a producer/consumer contract that changed on one side. A single file's score misses cross-file interaction; use the `coupling` signal and `edges` output to reason about pairs.
+- **File-risk ≠ change-risk.** A file that is structurally load-bearing but untouched in a sprint carries lower per-change risk than a simpler file being actively rewritten. For per-PR gating, combine score with diff size rather than using score alone.
+- **Coverage measures execution, not assertion quality.** A line-covered file may have shallow assertions that miss real logic errors. Coverage as a risk signal catches the "no test catches a change here" case; it does not vouch for test depth.

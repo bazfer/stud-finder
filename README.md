@@ -9,10 +9,12 @@ $ bundle exec bin/stud-finder ./my-rails-app
 
 Ruby
  rank  language    file                              score  evidence  class   new  age_days  escalation  ...
-   1   ruby        app/models/proficiency.rb         0.9124   0.9200  trunk   false  842      —          ...
-   2   ruby        app/services/payment_service.rb   0.8410   0.8800  trunk   false  611      —          ...
-   3   ruby        app/controllers/orders_ctlr.rb    0.7305   0.9100  branch  false  520      —          ...
+   1   ruby        app/models/proficiency.rb         0.7304   1.0000  branch  false  842                 ...
+   2   ruby        app/services/payment_service.rb   0.6890   1.0000  branch  false  611                 ...
+   3   ruby        app/controllers/orders_ctlr.rb    0.5721   0.6667  branch  false  520                 ...
 ```
+
+*Scores and evidence are illustrative. Row 3 has no coverage data (evidence capped at `0.6667 = (1.0 + 1.0 + 0.0) / 3`); rows 1–2 have full coverage (evidence `1.0000`). Real runs on well-distributed repos typically top out around 0.70–0.75 composite score — see Classification.*
 
 The full table adds `fan_in`, `fan_out`, `instability`, `complexity`, `churn_commits`, `churn_lines`, `churn_pct`, `loc`, `loc_pct`, `max_coupling`, `max_coupling_partner`, `coupling_partners`, `coupling_pct`, and `coverage`. Use `--output json` for machine-readable output including a `warnings` section and full `meta`.
 
@@ -121,7 +123,7 @@ Every row is labelled with a `class`:
 - **branch** — composite score ≥ `branch_threshold / 100` and below the trunk cutoff (default `branch_threshold: 50`, so 0.50 ≤ score < 0.85). Meaningful coupling.
 - **leaf** — score below the branch cutoff. Isolated. Move fast here.
 
-`--trunk-threshold` and `--branch-threshold` take integer values 0–100 that are compared against the composite `score` (score × 100). Classification is driven by the full composite, not by fan-in percentile — a file with modest fan-in but very high complexity + churn can still classify as `trunk`.
+`--trunk-threshold` and `--branch-threshold` take integer values 1–99 that set the composite-score cutoff (a threshold of 85 means score ≥ 0.85). Classification is driven by the full composite, not by fan-in percentile — a file with modest fan-in but very high complexity + churn can still classify as `trunk`.
 
 Because `score` is a weighted sum of percentile-ranked signals, not itself a percentile, a threshold of 85 does not mean "top 15% of files." Well-distributed projects rarely have any file scoring above 0.85; in tighter distributions the cutoffs may need tuning per-project.
 
@@ -212,8 +214,8 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 | `--weights WEIGHTS` | Custom weights as fractions, e.g. `fan_in:F,fan_out:O,complexity:C,churn:H,coverage:V[,interaction:I][,coupling:P]`. The five base keys (`fan_in`, `fan_out`, `complexity`, `churn`, `coverage`) are required. `interaction` and `coupling` are optional: when omitted, `interaction` defaults to `0.0` (custom weights opt-in) and `coupling` defaults to `0.05`. Each value must be in `[0.0, 1.0]`. When no coverage data is provided, `coverage` must be `0.0`. |
 | `--interaction-weight N` | Sugar flag for setting only the interaction weight. |
 | `--coupling-weight N` | Sugar flag for setting only the coupling weight. Bounds-checked `[0.0, 1.0]`. |
-| `--trunk-threshold N` | Composite-score percentile cutoff for trunk classification (default: 85) |
-| `--branch-threshold N` | Composite-score percentile cutoff for branch classification (default: 50) |
+| `--trunk-threshold N` | Composite-score threshold for trunk classification: score ≥ N/100 (integer 1–99, default: 85) |
+| `--branch-threshold N` | Composite-score threshold for branch classification: score ≥ N/100 (integer 1–99, default: 50) |
 | `--exclude PATTERN` | Exclude glob pattern (repeatable). `spec/` and `test/` excluded by default. |
 | `--top N` | Emit only the top N results |
 | `--diff-base REF` | Score the whole repo but emit only the files changed on `HEAD` vs the merge-base with `REF` (e.g. `origin/staging`). Ranks and scores stay relative to the full repo. Ideal for per-PR runs. |
@@ -234,7 +236,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 
 - `table` — human-readable, aligned columns
 - `csv` — spreadsheet-friendly, pipe to a file
-- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections. `meta.formula` labels the active mode (`5-factor + coupling`, `5-factor`, `4-factor + coupling`, `4-factor (no coverage)`). `meta.weights` reports the normalized weights actually used (with `null` for signals that were unavailable).
+- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections. `meta.formula` labels the active mode (`5-factor + coupling`, `5-factor`, `4-factor + coupling`, `4-factor`). `meta.weights` reports the normalized weights actually used (with `null` for signals that were unavailable).
 - `markdown` — drop directly into a PR comment or issue
 
 ---
