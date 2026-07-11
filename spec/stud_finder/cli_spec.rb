@@ -396,6 +396,54 @@ RSpec.describe StudFinder::CLI do
     end
   end
 
+  it 'disables newness and emits a structured warning for shallow clones' do
+    make_repo(file_count: 5) do |root|
+      3.times do |i|
+        File.open(File.join(root, 'app/models/model_0.rb'), 'a') { |file| file.puts "# mature change #{i}" }
+        system('git', '-C', root, 'add', '.')
+        system('git', '-C', root, 'commit', '-qm', "mature model_0 #{i}")
+      end
+
+      Dir.mktmpdir do |clone_parent|
+        shallow_root = File.join(clone_parent, 'shallow')
+        cloned = system('git', 'clone', '--depth', '1', "file://#{root}", shallow_root,
+                        out: File::NULL, err: File::NULL)
+        expect(cloned).to be(true)
+
+        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json'])
+        disabled_status, disabled_stdout, disabled_stderr = run_cli([
+                                                                      shallow_root, '--min-files', '5',
+                                                                      '--output', 'json', '--no-newness'
+                                                                    ])
+
+        expect(status).to eq(0), stderr
+        expect(disabled_status).to eq(0), disabled_stderr
+
+        payload = JSON.parse(stdout)
+        disabled_payload = JSON.parse(disabled_stdout)
+        warning = payload['warnings'].find do |item|
+          item.is_a?(Hash) && item['code'] == 'shallow_clone_newness_disabled'
+        end
+
+        expect(warning).not_to be_nil
+        expect(warning['message']).to include('shallow git clone detected; newness rules disabled')
+
+        rows = payload['ruby'] + payload['javascript']
+        disabled_rows_by_path = (disabled_payload['ruby'] + disabled_payload['javascript']).to_h do |row|
+          [row['path'], row]
+        end
+
+        expect(rows).not_to be_empty
+        rows.each do |row|
+          expect(row['new_file']).to be(false)
+          expect(row['age_days']).to eq(0)
+          expect(row['escalation']).to eq('')
+          expect(row['class']).to eq(disabled_rows_by_path.fetch(row['path'])['class'])
+        end
+      end
+    end
+  end
+
   it 'computes temporal coupling in the main scan and emits nonzero coupling columns' do
     make_repo(file_count: 5) do |root|
       # Co-change model_0 and model_1 together repeatedly so they cross the threshold.

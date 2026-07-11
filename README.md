@@ -110,6 +110,8 @@ A file is considered new when its first commit is within `--new-file-days` days 
 
 A stronger rule runs first: if a new file depends on a structurally `trunk` file through its fan-out edges, it escalates to `trunk` with `escalation=trunk_adjacent`. This highlights new code consuming critical interfaces, where contract-violation risk is highest. Use `--no-newness` to disable both newness rules.
 
+**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone, it auto-disables both newness rules and emits `shallow_clone_newness_disabled` so classifications match `--no-newness` instead of misclassifying mature files as new.
+
 ---
 
 ## Language Support

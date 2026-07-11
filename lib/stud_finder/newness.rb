@@ -9,6 +9,10 @@ module StudFinder
     DEFAULT_DAYS = 30
     DEFAULT_MIN_COMMITS = 3
     SECONDS_PER_DAY = 86_400
+    SHALLOW_CLONE_WARNING = {
+      code: 'shallow_clone_newness_disabled',
+      message: 'shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI for full newness behavior)'
+    }.freeze
 
     History = Struct.new(:first_commit_epoch, :total_commits, keyword_init: true)
 
@@ -54,8 +58,16 @@ module StudFinder
       end
     end
 
-    def self.disabled_metadata(files)
-      files.to_h { |file| [file, { new_file: false, age_days: 0, total_commits: 0 }] }
+    def self.disabled_metadata(files) = files.to_h { |file| [file, { new_file: false, age_days: 0, total_commits: 0 }] }
+
+    def self.shallow_repository?(repo_path)
+      repo_path = File.expand_path(repo_path)
+      stdout, _stderr, status = Open3.capture3('git', 'rev-parse', '--is-shallow-repository', chdir: repo_path)
+      return stdout.strip == 'true' if status.success?
+
+      git_shallow_file?(repo_path)
+    rescue Errno::ENOENT
+      git_shallow_file?(repo_path)
     end
 
     def self.newness_fields(metadata)
@@ -66,6 +78,16 @@ module StudFinder
         escalation: ''
       }
     end
+
+    def self.git_shallow_file?(repo_path)
+      return true if File.exist?(File.join(repo_path, '.git', 'shallow'))
+
+      stdout, _stderr, status = Open3.capture3('git', 'rev-parse', '--git-dir', chdir: repo_path)
+      status.success? && File.exist?(File.join(File.expand_path(stdout.strip, repo_path), 'shallow'))
+    rescue Errno::ENOENT
+      false
+    end
+    private_class_method :git_shallow_file?
 
     private
 

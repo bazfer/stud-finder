@@ -477,7 +477,10 @@ module StudFinder
     # rubocop:enable Metrics/ParameterLists
 
     def apply_newness(files, edges, rows)
-      metadata = if @options[:newness]
+      metadata = if @options[:newness] && Newness.shallow_repository?(@repo_path)
+                   @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
+                   Newness.disabled_metadata(files)
+                 elsif @options[:newness]
                    Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
                                min_commits: @options[:new_file_min_commits]).call
                  else
