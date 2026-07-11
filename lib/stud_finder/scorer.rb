@@ -4,7 +4,9 @@ require_relative 'normalizer'
 
 module StudFinder
   class Scorer
-    DEFAULT_WEIGHTS = { fan_in: 0.25, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.15 }.freeze
+    DEFAULT_WEIGHTS = {
+      fan_in: 0.20, fan_out: 0.10, complexity: 0.25, churn: 0.25, coverage: 0.10, interaction: 0.10
+    }.freeze
     RENORMALIZED_KEYS = %i[fan_in fan_out complexity churn].freeze
 
     class ValidationError < StandardError; end
@@ -83,8 +85,12 @@ module StudFinder
     def weighted_score(file, pcts)
       return active_weights_score(file, pcts) unless coverage_available?
 
-      structural_score(@normalized_weights, file, pcts) +
-        (@normalized_weights[:coverage] * pcts[:coverage].fetch(file))
+      base = structural_score(@normalized_weights, file, pcts) +
+             (@normalized_weights[:coverage] * pcts[:coverage].fetch(file))
+      interaction = @normalized_weights.fetch(:interaction, 0.0) * pcts[:fan_in].fetch(file) *
+                    pcts[:coverage].fetch(file)
+
+      (base + interaction).clamp(0.0, 1.0)
     end
 
     def active_weights_score(file, pcts)
