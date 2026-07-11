@@ -270,16 +270,51 @@ RSpec.describe StudFinder::Scorer do
     expect(scores).to eq(scores.sort.reverse)
   end
 
-  it 'uses a 50/50 composite of commit-count and line-count churn percentiles' do
+  it 're-percentile-ranks the 50/50 commit-count and line-count churn composite' do
     rows = scorer(churn: { 'a.rb' => 0, 'b.rb' => 1, 'c.rb' => 10, 'd.rb' => 0 },
                   churn_lines: { 'a.rb' => 100, 'b.rb' => 0, 'c.rb' => 0, 'd.rb' => 0 }).call
            .to_h { |row| [row[:path], row] }
 
     expect(rows['a.rb'][:churn_commits]).to eq(0)
     expect(rows['a.rb'][:churn_lines]).to eq(100)
-    expect(rows['a.rb'][:churn_pct]).to eq(0.5)
+    expect(rows['a.rb'][:churn_pct]).to eq(0.6667)
     expect(rows['b.rb'][:churn_pct]).to eq(0.3333)
-    expect(rows['c.rb'][:churn_pct]).to eq(0.5)
+    expect(rows['c.rb'][:churn_pct]).to eq(0.6667)
+  end
+
+  it 'spreads uncorrelated churn composites across the full percentile range' do
+    files = %w[min.rb count_low.rb mixed.rb count_high.rb max.rb]
+    rows = described_class.new(
+      files: files,
+      fan_in: { 'min.rb' => 0, 'count_low.rb' => 1, 'mixed.rb' => 2, 'count_high.rb' => 3, 'max.rb' => 4 },
+      fan_out: files.to_h { |file| [file, 0] },
+      complexity: files.to_h { |file| [file, 0] },
+      churn: { 'min.rb' => 0, 'count_low.rb' => 1, 'mixed.rb' => 2, 'count_high.rb' => 3, 'max.rb' => 4 },
+      churn_lines: { 'min.rb' => 0, 'count_low.rb' => 4, 'mixed.rb' => 2, 'count_high.rb' => 1, 'max.rb' => 3 }
+    ).call.to_h { |row| [row[:path], row] }
+
+    churn_pcts = rows.values.map { |row| row[:churn_pct] }
+    fan_in_pcts = rows.values.map { |row| row[:fan_in_pct] }
+
+    expect(churn_pcts.min).to eq(0.0)
+    expect(churn_pcts.max).to eq(1.0)
+    expect(churn_pcts.max - churn_pcts.min).to eq(fan_in_pcts.max - fan_in_pcts.min)
+  end
+
+  it 'keeps identical churn count and line composites tied' do
+    rows = scorer(churn: { 'a.rb' => 2, 'b.rb' => 2, 'c.rb' => 0, 'd.rb' => 4 },
+                  churn_lines: { 'a.rb' => 10, 'b.rb' => 10, 'c.rb' => 0, 'd.rb' => 20 }).call
+           .to_h { |row| [row[:path], row] }
+
+    expect(rows['a.rb'][:churn_pct]).to eq(rows['b.rb'][:churn_pct])
+  end
+
+  it 'returns zero churn percentiles when all churn counts and lines are identical' do
+    rows = scorer(churn: files.to_h { |file| [file, 3] },
+                  churn_lines: files.to_h { |file| [file, 9] }).call
+           .to_h { |row| [row[:path], row] }
+
+    expect(rows.values.map { |row| row[:churn_pct] }).to all(eq(0.0))
   end
 
   it 'percentile-ranks per-file instability into instability_pct' do
