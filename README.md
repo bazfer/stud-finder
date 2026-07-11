@@ -11,10 +11,10 @@ Ruby
  rank  language    file                              score  evidence  class   new  age_days  escalation  ...
    1   ruby        app/models/proficiency.rb         0.7304   1.0000  trunk   false  842                 ...
    2   ruby        app/services/payment_service.rb   0.6890   1.0000  trunk   false  611                 ...
-   3   ruby        app/controllers/orders_ctlr.rb    0.5721   0.6667  branch  false  520                 ...
+   3   ruby        app/controllers/orders_ctlr.rb    0.5721   1.0000  branch  false  520                 ...
 ```
 
-*Scores and evidence are illustrative. Row 3 has no coverage data (evidence capped at `0.6667 = (1.0 + 1.0 + 0.0) / 3`); rows 1–2 have full coverage (evidence `1.0000`). The `class` column reflects percentile rank of composite score within the repo — see Classification.*
+*Scores and evidence are illustrative. Row 3 has full history but no coverage data (evidence `1.0000` — coverage is a bonus, not a requirement); rows 1–2 have full coverage (evidence `1.0000`). The `class` column reflects percentile rank of composite score within the repo — see Classification.*
 
 The full table adds `fan_in`, `fan_out`, `instability`, `complexity`, `churn_commits`, `churn_lines`, `churn_pct`, `loc`, `loc_pct`, `max_coupling`, `max_coupling_partner`, `coupling_partners`, `coupling_pct`, and `coverage`. Use `--output json` for machine-readable output including a `warnings` section and full `meta`.
 
@@ -147,7 +147,7 @@ A file is considered new when its first commit is within `--new-file-days` days 
 
 A stronger rule runs first: if a new file depends on a structurally `trunk` file through its fan-out edges, it escalates to `trunk` with `escalation=trunk_adjacent`. This highlights new code consuming critical interfaces, where contract-violation risk is highest. Use `--no-newness` to disable both newness rules.
 
-**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone, it auto-disables both newness rules and emits `shallow_clone_newness_disabled` in `warnings` so classifications match `--no-newness` instead of misclassifying mature files as new.
+**CI usage:** newness rules require full git history. In GitHub Actions, set `fetch-depth: 0` before running Stud Finder. If Stud Finder detects a shallow clone it automatically runs `git fetch --unshallow` (45 second timeout) to recover full history before computing metadata. If the fetch fails (network error, timeout, offline runner), Stud Finder falls back to disabled newness and emits both `shallow_clone_newness_disabled` and `shallow_clone_unshallow_failed` in `warnings`. Pass `--no-auto-unshallow` to skip the fetch attempt entirely — on shallow clones only `shallow_clone_newness_disabled` fires and classifications match `--no-newness`.
 
 ---
 
@@ -155,9 +155,9 @@ A stronger rule runs first: if a new file depends on a structurally `trunk` file
 
 Every row carries an `evidence` value (0.0–1.0) alongside `score`. Score is the weighted signal composite. Evidence is a metadata confidence: how much history + coverage-data backing does that score have?
 
-Evidence combines file age, commit count, and whether coverage data was explicitly provided. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." A high score with high evidence is a strong claim.
+Evidence combines file age and commit count as its base, with coverage data as a bonus signal. The formula is `max(history_only, with_coverage)`, where `history_only = (age + commits) / 2` and `with_coverage = (age + commits + 1.0) / 3`. A mature file with full history always reaches `1.0` regardless of whether a coverage report is present — coverage can only raise evidence above the history baseline, never suppress it. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." A high score with high evidence is a strong claim.
 
-In shallow clones (git fetch-depth < full history), evidence is `null` on every row because file-metadata history is unavailable. The `shallow_clone_newness_disabled` warning also fires. See the CI note above.
+In shallow clones where auto-unshallow fails (or `--no-auto-unshallow` is set), evidence is `null` on every row because file-metadata history is unavailable. See the CI note above.
 
 **Gate consumers should threshold `class` for verdicts and `evidence` for confidence, not raw `score` alone.** Output is sorted by `(class_rank, score)` so trunks group above branches above leaves, and `--top N` no longer drops newness-escalated `trunk_adjacent` files behind high-score branches.
 
@@ -167,7 +167,8 @@ In shallow clones (git fetch-depth < full history), evidence is `null` on every 
 
 `analysis.warnings` (available in JSON output) surfaces conditions the run detected that a consumer should know about:
 
-- **`shallow_clone_newness_disabled`** — shallow git clone detected; newness rules auto-disabled.
+- **`shallow_clone_newness_disabled`** — shallow git clone detected; newness rules auto-disabled (auto-unshallow also failed, or `--no-auto-unshallow` was passed).
+- **`shallow_clone_unshallow_failed`** — `git fetch --unshallow` was attempted but failed (network error or timeout); evidence is unavailable. Use `fetch-depth: 0` in CI or pass `--no-auto-unshallow` to suppress the attempt.
 - **`insufficient_dispersion_<signal>`** — every file in the codebase has the same non-zero raw value for `<signal>`, so its percentile-ranked contribution collapsed to `0.0`. The score is unchanged; the warning flags that the signal is silently uninformative rather than genuinely absent. One per affected signal: `fan_in`, `fan_out`, `complexity`, `churn`, `coverage`, `interaction`, `coupling`.
 - Language-specific warnings such as `js_depcruise_no_config` when the JS pipeline had to fall back.
 
