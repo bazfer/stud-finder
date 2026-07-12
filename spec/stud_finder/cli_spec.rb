@@ -635,8 +635,7 @@ RSpec.describe StudFinder::CLI do
                         out: File::NULL, err: File::NULL)
         expect(cloned).to be(true)
 
-        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json',
-                                                        '--no-auto-unshallow'])
+        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json', '--no-auto-unshallow'])
         disabled_status, disabled_stdout, disabled_stderr = run_cli([
                                                                       shallow_root, '--min-files', '5',
                                                                       '--output', 'json', '--no-newness'
@@ -673,7 +672,9 @@ RSpec.describe StudFinder::CLI do
   context 'auto-unshallow on shallow clones' do
     it 'attempts unshallow and computes real metadata when fetch succeeds' do
       make_repo(file_count: 5) do |root|
-        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        # First call (from apply_newness) returns true to trigger unshallow;
+        # second call (from Newness#call after unshallow) returns false so history is computed.
+        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
         allow(Open3).to receive(:capture3).and_call_original
         success_status = instance_double(Process::Status, success?: true)
         allow(Open3).to receive(:capture3)
