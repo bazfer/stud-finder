@@ -675,11 +675,14 @@ RSpec.describe StudFinder::CLI do
         # First call (from apply_newness) returns true to trigger unshallow;
         # second call (from Newness#call after unshallow) returns false so history is computed.
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
-        allow(Open3).to receive(:capture3).and_call_original
+        allow(Open3).to receive(:popen3).and_call_original
         success_status = instance_double(Process::Status, success?: true)
-        allow(Open3).to receive(:capture3)
-          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
-          .and_return(['', '', success_status])
+        wait_thread = instance_double(Process::Waiter, pid: 11111)
+        allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
+        allow(wait_thread).to receive(:value).and_return(success_status)
+        allow(Open3).to receive(:popen3)
+          .with('git', '-C', anything, 'fetch', '--unshallow')
+          .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
 
         status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
 
@@ -697,11 +700,14 @@ RSpec.describe StudFinder::CLI do
     it 'falls back to disabled metadata and emits both warnings when unshallow fails' do
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
-        allow(Open3).to receive(:capture3).and_call_original
+        allow(Open3).to receive(:popen3).and_call_original
         fail_status = instance_double(Process::Status, success?: false)
-        allow(Open3).to receive(:capture3)
-          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
-          .and_return(['', '', fail_status])
+        wait_thread = instance_double(Process::Waiter, pid: 22222)
+        allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
+        allow(wait_thread).to receive(:value).and_return(fail_status)
+        allow(Open3).to receive(:popen3)
+          .with('git', '-C', anything, 'fetch', '--unshallow')
+          .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
 
         status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
 
@@ -731,14 +737,17 @@ RSpec.describe StudFinder::CLI do
       end
     end
 
-    it 'treats Timeout::Error from git fetch --unshallow as failure and emits both warnings' do
-      require 'timeout'
+    it 'treats a timed-out git fetch --unshallow as failure and emits both warnings' do
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
-        allow(Open3).to receive(:capture3).and_call_original
-        allow(Open3).to receive(:capture3)
-          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
-          .and_raise(Timeout::Error)
+        allow(Open3).to receive(:popen3).and_call_original
+        wait_thread = instance_double(Process::Waiter, pid: 33333)
+        allow(wait_thread).to receive(:join).with(45).and_return(nil)
+        allow(wait_thread).to receive(:join).with(5).and_return(wait_thread)
+        allow(Open3).to receive(:popen3)
+          .with('git', '-C', anything, 'fetch', '--unshallow')
+          .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
+        allow(Process).to receive(:kill)
 
         status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
 
@@ -747,6 +756,77 @@ RSpec.describe StudFinder::CLI do
         warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
         expect(warning_codes).to include('shallow_clone_newness_disabled')
         expect(warning_codes).to include('shallow_clone_unshallow_failed')
+      end
+    end
+
+    context 'zombie-child reaping' do
+      it 'sends TERM to the child process on timeout, no KILL if secondary join succeeds' do
+        make_repo(file_count: 5) do |root|
+          allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+          fake_pid = 44444
+          wait_thread = instance_double(Process::Waiter, pid: fake_pid)
+          allow(wait_thread).to receive(:join).with(45).and_return(nil)
+          allow(wait_thread).to receive(:join).with(5).and_return(wait_thread)
+          allow(Open3).to receive(:popen3).and_call_original
+          allow(Open3).to receive(:popen3)
+            .with('git', '-C', anything, 'fetch', '--unshallow')
+            .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
+
+          expect(Process).to receive(:kill).with('TERM', fake_pid)
+          expect(Process).not_to receive(:kill).with('KILL', fake_pid)
+
+          _status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+          payload = JSON.parse(stdout)
+          warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+          expect(warning_codes).to include('shallow_clone_unshallow_failed')
+        end
+      end
+
+      it 'does not kill any process when fetch exits non-zero' do
+        make_repo(file_count: 5) do |root|
+          allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+          fake_pid = 55555
+          wait_thread = instance_double(Process::Waiter, pid: fake_pid)
+          fail_status = instance_double(Process::Status, success?: false)
+          allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
+          allow(wait_thread).to receive(:value).and_return(fail_status)
+          allow(Open3).to receive(:popen3).and_call_original
+          allow(Open3).to receive(:popen3)
+            .with('git', '-C', anything, 'fetch', '--unshallow')
+            .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
+
+          expect(Process).not_to receive(:kill)
+
+          _status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+          payload = JSON.parse(stdout)
+          warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+          expect(warning_codes).to include('shallow_clone_unshallow_failed')
+        end
+      end
+
+      it 'does not kill any process on a successful fetch' do
+        make_repo(file_count: 5) do |root|
+          allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
+          fake_pid = 66666
+          wait_thread = instance_double(Process::Waiter, pid: fake_pid)
+          success_status = instance_double(Process::Status, success?: true)
+          allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
+          allow(wait_thread).to receive(:value).and_return(success_status)
+          allow(Open3).to receive(:popen3).and_call_original
+          allow(Open3).to receive(:popen3)
+            .with('git', '-C', anything, 'fetch', '--unshallow')
+            .and_yield(StringIO.new, StringIO.new, StringIO.new, wait_thread)
+
+          expect(Process).not_to receive(:kill)
+
+          _status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+          payload = JSON.parse(stdout)
+          warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+          expect(warning_codes).not_to include('shallow_clone_unshallow_failed')
+        end
       end
     end
   end

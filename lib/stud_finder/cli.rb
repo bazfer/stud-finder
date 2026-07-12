@@ -531,10 +531,14 @@ module StudFinder
     end
 
     def attempt_unshallow(files)
-      require 'timeout'
-      Timeout.timeout(45) do
-        _stdout, _stderr, status = Open3.capture3('git', 'fetch', '--unshallow', chdir: @repo_path)
-        raise 'unshallow failed' unless status.success?
+      progress('auto-unshallow: fetching full history to compute evidence (use --no-auto-unshallow to skip)')
+      Open3.popen3('git', '-C', @repo_path, 'fetch', '--unshallow') do |_stdin, _stdout, _stderr, wait_thread|
+        unless wait_thread.join(45)
+          Process.kill('TERM', wait_thread.pid)
+          Process.kill('KILL', wait_thread.pid) unless wait_thread.join(5)
+          raise 'unshallow timed out'
+        end
+        raise 'unshallow failed' unless wait_thread.value.success?
 
         Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
                     min_commits: @options[:new_file_min_commits]).call
