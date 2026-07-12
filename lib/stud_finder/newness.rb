@@ -112,7 +112,7 @@ module StudFinder
       history_only = (age_component + commits_component) / 2.0
       with_coverage = ((age_component + commits_component + 1.0) / 3.0) if explicit_coverage
 
-      ([history_only, with_coverage].compact.max).round(4)
+      [history_only, with_coverage].compact.max.round(4)
     end
 
     def self.git_shallow_file?(repo_path)

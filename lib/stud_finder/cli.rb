@@ -534,12 +534,10 @@ module StudFinder
       require 'timeout'
       Timeout.timeout(45) do
         _stdout, _stderr, status = Open3.capture3('git', 'fetch', '--unshallow', chdir: @repo_path)
-        if status.success?
-          Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
-                      min_commits: @options[:new_file_min_commits]).call
-        else
-          raise 'unshallow failed'
-        end
+        raise 'unshallow failed' unless status.success?
+
+        Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
+                    min_commits: @options[:new_file_min_commits]).call
       end
     rescue StandardError
       @options[:cli_warnings] << Newness::SHALLOW_CLONE_WARNING
