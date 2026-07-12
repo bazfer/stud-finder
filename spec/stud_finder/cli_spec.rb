@@ -677,7 +677,7 @@ RSpec.describe StudFinder::CLI do
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
         allow(Open3).to receive(:popen3).and_call_original
         success_status = instance_double(Process::Status, success?: true)
-        wait_thread = instance_double(Process::Waiter, pid: 11111)
+        wait_thread = instance_double(Process::Waiter, pid: 11_111)
         allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
         allow(wait_thread).to receive(:value).and_return(success_status)
         allow(Open3).to receive(:popen3)
@@ -702,7 +702,7 @@ RSpec.describe StudFinder::CLI do
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
         allow(Open3).to receive(:popen3).and_call_original
         fail_status = instance_double(Process::Status, success?: false)
-        wait_thread = instance_double(Process::Waiter, pid: 22222)
+        wait_thread = instance_double(Process::Waiter, pid: 22_222)
         allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
         allow(wait_thread).to receive(:value).and_return(fail_status)
         allow(Open3).to receive(:popen3)
@@ -741,7 +741,7 @@ RSpec.describe StudFinder::CLI do
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
         allow(Open3).to receive(:popen3).and_call_original
-        wait_thread = instance_double(Process::Waiter, pid: 33333)
+        wait_thread = instance_double(Process::Waiter, pid: 33_333)
         allow(wait_thread).to receive(:join).with(45).and_return(nil)
         allow(wait_thread).to receive(:join).with(5).and_return(wait_thread)
         allow(Open3).to receive(:popen3)
@@ -763,7 +763,7 @@ RSpec.describe StudFinder::CLI do
       it 'sends TERM to the child process on timeout, no KILL if secondary join succeeds' do
         make_repo(file_count: 5) do |root|
           allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
-          fake_pid = 44444
+          fake_pid = 44_444
           wait_thread = instance_double(Process::Waiter, pid: fake_pid)
           allow(wait_thread).to receive(:join).with(45).and_return(nil)
           allow(wait_thread).to receive(:join).with(5).and_return(wait_thread)
@@ -786,7 +786,7 @@ RSpec.describe StudFinder::CLI do
       it 'does not kill any process when fetch exits non-zero' do
         make_repo(file_count: 5) do |root|
           allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
-          fake_pid = 55555
+          fake_pid = 55_555
           wait_thread = instance_double(Process::Waiter, pid: fake_pid)
           fail_status = instance_double(Process::Status, success?: false)
           allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
@@ -809,7 +809,7 @@ RSpec.describe StudFinder::CLI do
       it 'does not kill any process on a successful fetch' do
         make_repo(file_count: 5) do |root|
           allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
-          fake_pid = 66666
+          fake_pid = 66_666
           wait_thread = instance_double(Process::Waiter, pid: fake_pid)
           success_status = instance_double(Process::Status, success?: true)
           allow(wait_thread).to receive(:join).with(45).and_return(wait_thread)
