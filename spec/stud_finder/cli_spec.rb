@@ -635,7 +635,7 @@ RSpec.describe StudFinder::CLI do
                         out: File::NULL, err: File::NULL)
         expect(cloned).to be(true)
 
-        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json'])
+        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json', '--no-auto-unshallow'])
         disabled_status, disabled_stdout, disabled_stderr = run_cli([
                                                                       shallow_root, '--min-files', '5',
                                                                       '--output', 'json', '--no-newness'
@@ -665,6 +665,88 @@ RSpec.describe StudFinder::CLI do
           expect(row['escalation']).to eq('')
           expect(row['class']).to eq(disabled_rows_by_path.fetch(row['path'])['class'])
         end
+      end
+    end
+  end
+
+  context 'auto-unshallow on shallow clones' do
+    it 'attempts unshallow and computes real metadata when fetch succeeds' do
+      make_repo(file_count: 5) do |root|
+        # First call (from apply_newness) returns true to trigger unshallow;
+        # second call (from Newness#call after unshallow) returns false so history is computed.
+        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true, false)
+        allow(Open3).to receive(:capture3).and_call_original
+        success_status = instance_double(Process::Status, success?: true)
+        allow(Open3).to receive(:capture3)
+          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
+          .and_return(['', '', success_status])
+
+        status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+        expect(status).to eq(0)
+        payload = JSON.parse(stdout)
+        rows = payload['ruby']
+        expect(rows).not_to be_empty
+        rows.each { |row| expect(row['evidence']).not_to be_nil }
+        warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+        expect(warning_codes).not_to include('shallow_clone_newness_disabled')
+        expect(warning_codes).not_to include('shallow_clone_unshallow_failed')
+      end
+    end
+
+    it 'falls back to disabled metadata and emits both warnings when unshallow fails' do
+      make_repo(file_count: 5) do |root|
+        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        allow(Open3).to receive(:capture3).and_call_original
+        fail_status = instance_double(Process::Status, success?: false)
+        allow(Open3).to receive(:capture3)
+          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
+          .and_return(['', '', fail_status])
+
+        status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+        expect(status).to eq(0)
+        payload = JSON.parse(stdout)
+        warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+        expect(warning_codes).to include('shallow_clone_newness_disabled')
+        expect(warning_codes).to include('shallow_clone_unshallow_failed')
+        rows = payload['ruby']
+        rows.each { |row| expect(row['evidence']).to be_nil }
+      end
+    end
+
+    it 'emits only shallow_clone_newness_disabled when --no-auto-unshallow is set' do
+      make_repo(file_count: 5) do |root|
+        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+
+        status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json', '--no-auto-unshallow'])
+
+        expect(status).to eq(0)
+        payload = JSON.parse(stdout)
+        warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+        expect(warning_codes).to include('shallow_clone_newness_disabled')
+        expect(warning_codes).not_to include('shallow_clone_unshallow_failed')
+        rows = payload['ruby']
+        rows.each { |row| expect(row['evidence']).to be_nil }
+      end
+    end
+
+    it 'treats Timeout::Error from git fetch --unshallow as failure and emits both warnings' do
+      require 'timeout'
+      make_repo(file_count: 5) do |root|
+        allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        allow(Open3).to receive(:capture3).and_call_original
+        allow(Open3).to receive(:capture3)
+          .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
+          .and_raise(Timeout::Error)
+
+        status, stdout, _stderr = run_cli([root, '--min-files', '5', '--output', 'json'])
+
+        expect(status).to eq(0)
+        payload = JSON.parse(stdout)
+        warning_codes = payload['warnings'].map { |w| w.is_a?(Hash) ? w['code'] : w }
+        expect(warning_codes).to include('shallow_clone_newness_disabled')
+        expect(warning_codes).to include('shallow_clone_unshallow_failed')
       end
     end
   end

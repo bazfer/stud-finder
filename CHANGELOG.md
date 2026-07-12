@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - Unreleased
+
+### Changed
+
+- BREAKING: Evidence formula changed — coverage is now a bonus, not a required third signal. The new formula is `max(history_only, with_coverage)` where `history_only = (age + commits) / 2`. Mature files without a coverage report now produce `evidence: 1.0` instead of the old ceiling of `0.6667`. Files with coverage data can only equal or exceed the history-only baseline, never fall below it.
+
+### Fixed
+
+- Shallow-clone evidence null in CI: when Stud Finder detects a depth-1 clone (GitHub Actions default), it now automatically runs `git fetch --unshallow` (45 second timeout) before computing newness metadata. Repos that used the default `actions/checkout` without `fetch-depth: 0` now get real evidence values instead of `null` on every row.
+
+### Added
+
+- `--no-auto-unshallow` flag: opt out of the automatic `git fetch --unshallow` on shallow clones. When set, Stud Finder behaves as before — shallow clone disables newness and emits only `shallow_clone_newness_disabled`.
+- `shallow_clone_unshallow_failed` warning code: fires when auto-unshallow was attempted but failed (network error, timeout, or non-zero exit). Appears alongside `shallow_clone_newness_disabled` so consumers can distinguish "unshallow was never tried" from "unshallow was tried and failed".
+
 ## [0.4.0] - Unreleased
 
 ### Changed

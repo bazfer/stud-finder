@@ -89,7 +89,7 @@ Three pieces of output serve three purposes. Confusing them causes gate consumer
 
 - **`score`** (0.0–1.0, four decimals) — the weighted composite. This is **evidence about the file's structural risk**, nothing more. Higher score means the signals concentrated more risk on this file.
 - **`class`** (`leaf` / `branch` / `trunk`) — the decision label. Driven by the composite-score PERCENTILE across the codebase against configurable thresholds (defaults: `branch` at top 50%, `trunk` at top 15%). This guarantees that some files are always trunk-tier relative to their repo — a file scoring 0.55 can be trunk if the rest of the codebase scores below it. This is what a gate should threshold on for verdicts.
-- **`evidence`** (0.0–1.0) — a metadata confidence value based on file age, commit count, and whether coverage data was explicitly provided. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." Gates should threshold `evidence` for confidence, not raw `score`.
+- **`evidence`** (0.0–1.0) — a metadata confidence value based on file age, commit count, and optionally coverage presence. The formula is `max(history_only, with_coverage)`, where `history_only = (age + commits) / 2` and `with_coverage = (age + commits + 1.0) / 3` (only included when coverage data is present). Coverage is a bonus: a mature file with full history always reaches `1.0` even without a coverage report. A high score with low evidence means "structural signals concentrated risk here, but we're not certain because the file is young or the history is thin." Gates should threshold `evidence` for confidence, not raw `score`.
 
 ### Absolute floors
 
