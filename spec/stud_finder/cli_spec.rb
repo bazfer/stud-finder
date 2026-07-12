@@ -635,7 +635,8 @@ RSpec.describe StudFinder::CLI do
                         out: File::NULL, err: File::NULL)
         expect(cloned).to be(true)
 
-        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json'])
+        status, stdout, stderr = run_cli([shallow_root, '--min-files', '5', '--output', 'json',
+                                                        '--no-auto-unshallow'])
         disabled_status, disabled_stdout, disabled_stderr = run_cli([
                                                                       shallow_root, '--min-files', '5',
                                                                       '--output', 'json', '--no-newness'
@@ -673,6 +674,7 @@ RSpec.describe StudFinder::CLI do
     it 'attempts unshallow and computes real metadata when fetch succeeds' do
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        allow(Open3).to receive(:capture3).and_call_original
         success_status = instance_double(Process::Status, success?: true)
         allow(Open3).to receive(:capture3)
           .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
@@ -694,6 +696,7 @@ RSpec.describe StudFinder::CLI do
     it 'falls back to disabled metadata and emits both warnings when unshallow fails' do
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        allow(Open3).to receive(:capture3).and_call_original
         fail_status = instance_double(Process::Status, success?: false)
         allow(Open3).to receive(:capture3)
           .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
@@ -731,6 +734,7 @@ RSpec.describe StudFinder::CLI do
       require 'timeout'
       make_repo(file_count: 5) do |root|
         allow(StudFinder::Newness).to receive(:shallow_repository?).and_return(true)
+        allow(Open3).to receive(:capture3).and_call_original
         allow(Open3).to receive(:capture3)
           .with('git', 'fetch', '--unshallow', hash_including(chdir: anything))
           .and_raise(Timeout::Error)
