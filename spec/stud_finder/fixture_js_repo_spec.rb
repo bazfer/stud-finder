@@ -22,6 +22,10 @@ RSpec.describe 'JavaScript fixture repo integration' do
     FileUtils.remove_entry(@repo_path) if @repo_path && File.exist?(@repo_path)
   end
 
+  def warning_codes(warnings)
+    warnings.map { |warning| warning.fetch('code') }
+  end
+
   it 'ranks the highest fan-in JavaScript file first and emits split JSON' do
     bin_path = File.expand_path('../../bin/stud-finder', __dir__)
     stdout, stderr, status = Open3.capture3('bundle', 'exec', 'ruby', bin_path, @repo_path, '--min-files', '5',
@@ -30,7 +34,9 @@ RSpec.describe 'JavaScript fixture repo integration' do
 
     expect(status).to be_success, stderr
     expect(payload.keys).to contain_exactly('meta', 'warnings', 'ruby', 'javascript')
-    expect(payload['warnings']).to include('coverage_unavailable')
+    expect(payload['meta']['schema_version']).to eq(1)
+    expect(payload['warnings']).to all(include('code', 'message'))
+    expect(warning_codes(payload['warnings'])).to include('coverage_unavailable')
     expect(payload.fetch('ruby')).to eq([])
     expect(payload.fetch('javascript').first['language']).to eq('javascript')
     expect(payload.fetch('javascript').first['path']).to eq('src/hub.js')

@@ -165,7 +165,7 @@ In shallow clones where auto-unshallow fails (or `--no-auto-unshallow` is set), 
 
 ## Warnings
 
-`analysis.warnings` (available in JSON output) surfaces conditions the run detected that a consumer should know about:
+`analysis.warnings` (available in JSON output) surfaces conditions the run detected that a consumer should know about. Starting in schema version `1`, every warning is an object with `code` and human-readable `message` fields; bare warning strings are no longer emitted.
 
 - **`shallow_clone_newness_disabled`** — shallow git clone detected; newness rules auto-disabled (auto-unshallow also failed, or `--no-auto-unshallow` was passed).
 - **`shallow_clone_unshallow_failed`** — `git fetch --unshallow` was attempted but failed (network error or timeout); evidence is unavailable. Use `fetch-depth: 0` in CI or pass `--no-auto-unshallow` to suppress the attempt.
@@ -245,7 +245,7 @@ Each language gets its own ranking section in the output — Ruby and JS are not
 
 - `table` — human-readable, aligned columns
 - `csv` — spreadsheet-friendly, pipe to a file
-- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections. `meta.formula` labels the active mode (`5-factor + coupling`, `5-factor`, `4-factor + coupling`, `4-factor`). `meta.weights` reports the normalized weights actually used (with `null` for signals that were unavailable).
+- `json` — machine-readable with `meta`, `warnings`, `ruby`, `javascript` sections. `meta.schema_version` is the integer JSON schema version (`1` as of Stud Finder 0.6.0). `meta.formula` labels the active mode (`5-factor + coupling`, `5-factor`, `4-factor + coupling`, `4-factor`). `meta.weights` reports the normalized weights actually used (with `null` for signals that were unavailable).
 - `markdown` — drop directly into a PR comment or issue
 
 ---
