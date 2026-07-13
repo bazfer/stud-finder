@@ -18,6 +18,10 @@ RSpec.describe StudFinder::CLI do
     [status, stdout.string, stderr.string]
   end
 
+  def warning_codes(warnings)
+    warnings.map { |warning| warning.fetch('code') }
+  end
+
   def make_repo(file_count: 5)
     Dir.mktmpdir do |dir|
       system('git', 'init', '-q', dir)
@@ -173,7 +177,9 @@ RSpec.describe StudFinder::CLI do
       rows = payload.fetch('ruby')
 
       expect(status).to eq(0), stderr
-      expect(payload.fetch('warnings')).to include('insufficient_dispersion_complexity')
+      expect(payload.fetch('meta').fetch('schema_version')).to eq(1)
+      expect(payload.fetch('warnings')).to all(include('code', 'message'))
+      expect(warning_codes(payload.fetch('warnings'))).to include('insufficient_dispersion_complexity')
       expect(rows).not_to be_empty
       expect(rows.map { |row| row.fetch('complexity_pct') }).to all(eq(0.0))
     end
@@ -198,7 +204,7 @@ RSpec.describe StudFinder::CLI do
       payload = JSON.parse(stdout)
 
       expect(status).to eq(0), stderr
-      expect(payload.fetch('warnings')).not_to include('insufficient_dispersion_complexity')
+      expect(warning_codes(payload.fetch('warnings'))).not_to include('insufficient_dispersion_complexity')
     end
   end
 
@@ -963,7 +969,7 @@ RSpec.describe StudFinder::CLI do
 
       expect(status).to eq(0)
       expect(stderr).to include('diff contains no changed files')
-      expect(payload['warnings']).to include('diff_filter_empty')
+      expect(warning_codes(payload['warnings'])).to include('diff_filter_empty')
     end
   end
 

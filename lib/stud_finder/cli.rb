@@ -9,6 +9,7 @@ require 'set'
 require 'time'
 require_relative 'churn'
 require_relative 'temporal_coupling'
+require_relative 'warnings'
 require_relative 'complexity'
 require_relative 'diff'
 require_relative 'coverage/detector'
@@ -722,7 +723,7 @@ module StudFinder
     def emit_json(path, analysis, ruby_rows, javascript_rows)
       @stdout.puts JSON.generate(
         meta: json_meta(path, analysis),
-        warnings: analysis.warnings,
+        warnings: Warnings.normalize(analysis.warnings),
         ruby: ruby_rows.map { |row| json_file(row) },
         javascript: javascript_rows.map { |row| json_file(row) }
       )
@@ -737,7 +738,8 @@ module StudFinder
         files_skipped: analysis.ruby.skipped_files.length + analysis.javascript.skipped_files.length,
         formula: json_formula(analysis),
         weights: json_weights(analysis.ruby.weights || analysis.javascript.weights),
-        warnings: analysis.warnings
+        schema_version: 1,
+        warnings: Warnings.normalize(analysis.warnings)
       }
       meta[:filtered] = true if @options[:filter_set]
       meta[:diff_base] = @options[:diff_base] if @options[:diff_base]

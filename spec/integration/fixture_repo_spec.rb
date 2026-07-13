@@ -20,6 +20,10 @@ RSpec.describe 'fixture repo integration' do
     FileUtils.remove_entry(repo_path)
   end
 
+  def warning_codes(warnings)
+    warnings.map { |warning| warning.fetch('code') }
+  end
+
   it 'ranks the sample app and emits valid table output' do
     stdout, stderr, status = run_cli('--min-files', '5')
 
@@ -39,8 +43,10 @@ RSpec.describe 'fixture repo integration' do
     expect(status).to be_success, stderr
     expect(payload.keys).to contain_exactly('meta', 'warnings', 'ruby', 'javascript')
     expect(payload['meta'].keys).to include('repo', 'analyzed_at', 'churn_days', 'file_count', 'files_skipped',
-                                            'formula', 'weights', 'warnings')
-    expect(payload['warnings']).to include('coverage_unavailable')
+                                            'formula', 'weights', 'schema_version', 'warnings')
+    expect(payload['meta']['schema_version']).to eq(1)
+    expect(payload['warnings']).to all(include('code', 'message'))
+    expect(warning_codes(payload['warnings'])).to include('coverage_unavailable')
     expect(payload['meta']['warnings']).to eq(payload['warnings'])
     expect(payload['javascript']).to eq([])
 
@@ -248,7 +254,7 @@ RSpec.describe 'fixture repo integration' do
 
     expect(status).to be_success, stderr
     expect(stderr).to include('no scored files matched the diff')
-    expect(payload['warnings']).to include('diff_no_scored_files')
+    expect(warning_codes(payload['warnings'])).to include('diff_no_scored_files')
     expect(payload['ruby']).to eq([])
     expect(payload['javascript']).to eq([])
   end
