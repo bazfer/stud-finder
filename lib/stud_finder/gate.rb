@@ -5,8 +5,8 @@ require 'json'
 module StudFinder
   class Gate
     CHECKS = %w[trunk_touched low_evidence_high_score newness_trunk_adjacent].freeze
-    HIGH_SCORE_THRESHOLD = 0.75
-    LOW_EVIDENCE_THRESHOLD = 0.50
+    DEFAULT_HIGH_SCORE_THRESHOLD = 0.50
+    LOW_EVIDENCE_THRESHOLD = 0.70
 
     Finding = Struct.new(:path, :language, :score, :evidence, :classification, :reason, keyword_init: true)
     Result = Struct.new(:checks, keyword_init: true) do
@@ -128,7 +128,7 @@ module StudFinder
 
     def low_evidence_high_score(rows)
       risky_rows = rows.select do |row|
-        row.fetch('score', 0).to_f >= HIGH_SCORE_THRESHOLD && low_evidence?(row['evidence'])
+        row.fetch('score', 0).to_f >= high_score_threshold && low_evidence?(row['evidence'])
       end
       risky_rows.map do |row|
         finding(row, reason: low_evidence_high_score_reason)
@@ -136,7 +136,16 @@ module StudFinder
     end
 
     def low_evidence_high_score_reason
-      "Score is >= #{HIGH_SCORE_THRESHOLD} while evidence is nil or < #{LOW_EVIDENCE_THRESHOLD}."
+      "Score is >= #{format('%.2f', high_score_threshold)} while evidence is nil or < " \
+        "#{format('%.2f', LOW_EVIDENCE_THRESHOLD)}."
+    end
+
+    def high_score_threshold
+      raw_threshold = @payload.fetch('meta', {})['branch_threshold']
+      return DEFAULT_HIGH_SCORE_THRESHOLD if raw_threshold.nil?
+
+      threshold = raw_threshold.to_f
+      threshold > 1 ? threshold / 100.0 : threshold
     end
 
     def newness_trunk_adjacent(rows)

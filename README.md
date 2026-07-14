@@ -76,6 +76,55 @@ bundle exec bin/stud-finder ./my-rails-app \
 
 ---
 
+## Gate
+
+`stud-finder gate` reads JSON output from a normal scan and renders a compact markdown gate report for a PR comment or CI step.
+
+```bash
+# Read scan JSON from a file
+bundle exec bin/stud-finder gate --input stud-finder.json
+
+# Read scan JSON from stdin
+bundle exec bin/stud-finder ./my-rails-app --output json | bundle exec bin/stud-finder gate
+
+# Enforce mode exits non-zero when any finding is present
+bundle exec bin/stud-finder gate --input stud-finder.json --enforce
+```
+
+Gate v1 runs three checks:
+
+- `trunk_touched` — a changed row is classified as `trunk`.
+- `low_evidence_high_score` — a row score meets the effective branch threshold (`meta.branch_threshold` when present, otherwise `0.50`) while evidence is missing or below `0.70`.
+- `newness_trunk_adjacent` — a new file was escalated because it is adjacent to a trunk file.
+
+Example markdown output:
+
+```markdown
+## Stud Finder gate
+
+**Mode:** observation
+**Summary:** 2 findings across 3 checks.
+
+- ⚠️ `trunk_touched` — 1 finding
+- ⚠️ `low_evidence_high_score` — 1 finding
+- ✅ `newness_trunk_adjacent` — 0 findings
+
+<details open>
+<summary><strong>trunk_touched</strong> — 1 finding</summary>
+
+| file | class | score | evidence | reason |
+| --- | --- | ---: | ---: | --- |
+| `app/models/user.rb` | trunk | 0.8123 | 1.0000 | Changed file is classified as trunk. |
+
+</details>
+```
+
+`--enforce` is available for CI experiments, but it is not recommended as a required merge gate until the Rec 3 calibrated rollout lands. Until then, prefer observation-mode PR comments and tune thresholds against real PR history.
+
+When both `--input FILE` and stdin are provided, `--input FILE` wins intentionally so explicit CI configuration beats ambient/noninteractive stdin.
+
+---
+
 ## Signals and weights
 
 Each file is scored on up to seven inputs — six direct signals plus one cross-term (`interaction`) that fires when coverage data is present. See [SIGNALS.md](SIGNALS.md) for the theory behind each signal; this section lists the current defaults.
