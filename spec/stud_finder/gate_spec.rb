@@ -5,8 +5,8 @@ require 'spec_helper'
 require 'stud_finder/gate'
 
 RSpec.describe StudFinder::Gate do
-  def payload(rows)
-    JSON.generate('meta' => { 'schema_version' => 1 }, 'warnings' => [], 'ruby' => rows, 'javascript' => [])
+  def payload(rows, meta: { 'schema_version' => 1 })
+    JSON.generate('meta' => meta, 'warnings' => [], 'ruby' => rows, 'javascript' => [])
   end
 
   def row(path:, score:, evidence:, classification: 'leaf', new_file: false, escalation: '')
@@ -31,14 +31,46 @@ RSpec.describe StudFinder::Gate do
     expect(result.checks.fetch('trunk_touched').map(&:path)).to eq(['app/models/user.rb'])
   end
 
-  it 'finds high-score rows with low or missing evidence' do
-    result = described_class.call(payload([
-                                            row(path: 'low.rb', score: 0.75, evidence: 0.49),
-                                            row(path: 'nil.rb', score: 0.9, evidence: nil),
-                                            row(path: 'ok.rb', score: 0.9, evidence: 0.5)
-                                          ]))
+  describe 'low-evidence high-score thresholds' do
+    it 'honors meta.branch_threshold as the high score threshold' do
+      result = described_class.call(payload([
+                                              row(path: 'below.rb', score: 0.69, evidence: 0.2),
+                                              row(path: 'at.rb', score: 0.7, evidence: 0.2)
+                                            ], meta: { 'schema_version' => 1, 'branch_threshold' => 0.7 }))
 
-    expect(result.checks.fetch('low_evidence_high_score').map(&:path)).to contain_exactly('low.rb', 'nil.rb')
+      findings = result.checks.fetch('low_evidence_high_score')
+      expect(findings.map(&:path)).to eq(['at.rb'])
+      expect(findings.first.reason).to include('Score is >= 0.70')
+    end
+
+    it 'defaults the high score threshold to 0.50 when meta is missing' do
+      result = described_class.call(payload([row(path: 'default.rb', score: 0.5, evidence: 0.2)], meta: {}))
+
+      findings = result.checks.fetch('low_evidence_high_score')
+      expect(findings.map(&:path)).to eq(['default.rb'])
+      expect(findings.first.reason).to include('Score is >= 0.50')
+    end
+
+    it 'does not treat evidence exactly or above 0.70 as low' do
+      result = described_class.call(payload([
+                                              row(path: 'exact.rb', score: 0.9, evidence: 0.7),
+                                              row(path: 'above.rb', score: 0.9, evidence: 0.71)
+                                            ]))
+
+      expect(result.checks.fetch('low_evidence_high_score')).to be_empty
+    end
+
+    it 'treats evidence below 0.70 or nil as low when score meets threshold' do
+      result = described_class.call(payload([
+                                              row(path: 'low.rb', score: 0.5, evidence: 0.69),
+                                              row(path: 'nil.rb', score: 0.5, evidence: nil),
+                                              row(path: 'score-too-low.rb', score: 0.49, evidence: nil)
+                                            ]))
+
+      findings = result.checks.fetch('low_evidence_high_score')
+      expect(findings.map(&:path)).to contain_exactly('low.rb', 'nil.rb')
+      expect(findings.first.reason).to include('evidence is nil or < 0.70')
+    end
   end
 
   it 'finds new trunk-adjacent rows' do
