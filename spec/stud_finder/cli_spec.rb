@@ -1317,3 +1317,100 @@ RSpec.describe StudFinder::CLI, 'LOC output routing' do
       .to eq('4-factor')
   end
 end
+
+RSpec.describe 'StudFinder::CLI gate subcommand' do
+  def gate_payload(rows)
+    JSON.generate('meta' => { 'schema_version' => 1 }, 'warnings' => [], 'ruby' => rows, 'javascript' => [])
+  end
+
+  def gate_row(path:, score:, evidence:, classification: 'leaf', new_file: false, escalation: '')
+    {
+      'path' => path,
+      'language' => 'ruby',
+      'score' => score,
+      'evidence' => evidence,
+      'class' => classification,
+      'new_file' => new_file,
+      'escalation' => escalation
+    }
+  end
+
+  def tty_input
+    Object.new.tap { |input| input.define_singleton_method(:tty?) { true } }
+  end
+
+  def run_gate(argv, stdin: tty_input)
+    stdout = StringIO.new
+    stderr = StringIO.new
+    status = StudFinder::CLI.new(argv, stdout: stdout, stderr: stderr, stdin: stdin).run
+    [status, stdout.string, stderr.string]
+  end
+
+  it 'reads JSON from --input and emits observation markdown' do
+    Dir.mktmpdir do |dir|
+      input = File.join(dir, 'risk.json')
+      File.write(input, gate_payload([gate_row(path: 'app/models/user.rb', score: 0.8, evidence: 1.0,
+                                               classification: 'trunk')]))
+
+      status, stdout, stderr = run_gate(['gate', '--input', input])
+
+      expect(status).to eq(0), stderr
+      expect(stdout).to include('**Mode:** observation')
+      expect(stdout).to include('trunk_touched')
+      expect(stdout).to include('`app/models/user.rb`')
+    end
+  end
+
+  it 'reads JSON from stdin when --input is omitted' do
+    stdin = StringIO.new(gate_payload([gate_row(path: 'app/models/new.rb', score: 0.4, evidence: 0.2,
+                                                new_file: true, escalation: 'trunk_adjacent')]))
+
+    status, stdout, stderr = run_gate(['gate'], stdin: stdin)
+
+    expect(status).to eq(0), stderr
+    expect(stdout).to include('newness_trunk_adjacent')
+    expect(stdout).to include('`app/models/new.rb`')
+  end
+
+  it 'lets --input take precedence when stdin is non-interactive' do
+    Dir.mktmpdir do |dir|
+      input = File.join(dir, 'risk.json')
+      File.write(input, gate_payload([gate_row(path: 'from-file.rb', score: 0.8, evidence: 1.0,
+                                               classification: 'trunk')]))
+      stdin = StringIO.new(gate_payload([gate_row(path: 'from-stdin.rb', score: 0.8, evidence: 1.0,
+                                                  classification: 'trunk')]))
+
+      status, stdout, stderr = run_gate(['gate', '--input', input], stdin: stdin)
+
+      expect(status).to eq(0), stderr
+      expect(stdout).to include('`from-file.rb`')
+      expect(stdout).not_to include('`from-stdin.rb`')
+    end
+  end
+
+  it 'rejects neither --input nor stdin' do
+    status, _stdout, stderr = run_gate(['gate'])
+
+    expect(status).to eq(1)
+    expect(stderr).to include('provide --input FILE or pipe JSON')
+  end
+
+  it 'returns non-zero in enforce mode when findings exist' do
+    stdin = StringIO.new(gate_payload([gate_row(path: 'app/models/user.rb', score: 0.8, evidence: 1.0,
+                                                classification: 'trunk')]))
+
+    status, stdout, stderr = run_gate(['gate', '--enforce'], stdin: stdin)
+
+    expect(status).to eq(1), stderr
+    expect(stdout).to include('**Mode:** enforce')
+  end
+
+  it 'returns zero in enforce mode when no findings exist' do
+    stdin = StringIO.new(gate_payload([gate_row(path: 'app/models/safe.rb', score: 0.2, evidence: 1.0)]))
+
+    status, stdout, stderr = run_gate(['gate', '--enforce'], stdin: stdin)
+
+    expect(status).to eq(0), stderr
+    expect(stdout).to include('0 findings')
+  end
+end
