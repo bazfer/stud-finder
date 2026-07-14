@@ -18,6 +18,7 @@ require_relative 'fan_in'
 require_relative 'js_fan_in'
 require_relative 'js_complexity'
 require_relative 'file_collector'
+require_relative 'gate'
 require_relative 'loc_counter'
 require_relative 'newness'
 require_relative 'scorer'
@@ -74,32 +75,40 @@ module StudFinder
 
     class ValidationError < StandardError; end
 
-    def initialize(argv, stdout: $stdout, stderr: $stderr)
+    def initialize(argv, stdout: $stdout, stderr: $stderr, stdin: $stdin)
       @argv = argv.dup
       @stdout = stdout
       @stderr = stderr
+      @stdin = stdin
       @options = Marshal.load(Marshal.dump(DEFAULT_OPTIONS))
     end
 
-    def self.start(argv = ARGV, stdout: $stdout, stderr: $stderr)
-      new(argv, stdout: stdout, stderr: stderr).run
+    def self.start(argv = ARGV, stdout: $stdout, stderr: $stderr, stdin: $stdin)
+      new(argv, stdout: stdout, stderr: stderr, stdin: stdin).run
     end
 
     def run
       parser = option_parser
+      return run_gate if shift_subcommand?('gate')
+      return run_edges_subcommand(parser) if shift_subcommand?('edges')
 
-      if @argv[0] == 'edges'
-        @argv.shift
-        parser.parse!(@argv)
-        target = @argv.shift
-        path = @argv.shift || '.'
-        raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
+      run_scan(parser)
+    rescue OptionParser::InvalidOption, OptionParser::MissingArgument, OptionParser::InvalidArgument, ValidationError,
+           FileCollector::Error, Gate::Error, Churn::Error, Complexity::Error, Coverage::Cobertura::Error,
+           Coverage::Detector::Error, Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Newness::Error,
+           Scorer::ValidationError => e
+      @stderr.puts e.message
+      1
+    end
 
-        @repo_path = File.expand_path(path)
-        validate_options!
-        return run_edges(target, path)
-      end
+    def shift_subcommand?(name)
+      return false unless @argv[0] == name
 
+      @argv.shift
+      true
+    end
+
+    def run_scan(parser)
       parser.parse!(@argv)
       path = @argv.shift || '.'
       raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
@@ -122,11 +131,41 @@ module StudFinder
       analysis = warn_if_no_scored_files(analysis)
       emit_results(@repo_path, result, analysis)
       0
-    rescue OptionParser::InvalidOption, OptionParser::MissingArgument, OptionParser::InvalidArgument, ValidationError,
-           FileCollector::Error, Churn::Error, Complexity::Error, Coverage::Cobertura::Error, Coverage::Detector::Error,
-           Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Newness::Error, Scorer::ValidationError => e
-      @stderr.puts e.message
-      1
+    end
+
+    def run_edges_subcommand(parser)
+      parser.parse!(@argv)
+      target = @argv.shift
+      path = @argv.shift || '.'
+      raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
+
+      @repo_path = File.expand_path(path)
+      validate_options!
+      run_edges(target, path)
+    end
+
+    def run_gate
+      gate_options = { input: nil, enforce: false }
+      OptionParser.new do |opts|
+        opts.banner = 'Usage: stud-finder gate [--input FILE] [--enforce]'
+        opts.on('--input FILE', 'Read stud-finder JSON output from FILE') { |value| gate_options[:input] = value }
+        opts.on('--enforce', 'Exit non-zero when gate findings are present') { gate_options[:enforce] = true }
+      end.parse!(@argv)
+      raise ValidationError, "Error: unexpected arguments: #{@argv.join(' ')}" unless @argv.empty?
+
+      json = gate_input(gate_options[:input])
+      result = Gate.call(json)
+      @stdout.puts Gate.markdown(result, enforce: gate_options[:enforce])
+      gate_options[:enforce] && result.findings? ? 1 : 0
+    end
+
+    def gate_input(input_path)
+      return File.read(input_path) if input_path
+      return @stdin.read if !@stdin.respond_to?(:tty?) || !@stdin.tty?
+
+      raise ValidationError, 'Error: provide --input FILE or pipe JSON to stdin.'
+    rescue Errno::ENOENT
+      raise ValidationError, "Error: input file not found: #{input_path}"
     end
 
     def run_edges(target, path)

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - Unreleased
+
+### Added
+
+- Added `stud-finder gate`, an observation-first markdown gate subcommand for JSON scan output. v1 includes hardcoded checks for touched trunks, high-score files with low/missing evidence, and new files escalated by trunk adjacency.
+- Added `--input FILE`/stdin input handling and an `--enforce` flag for gate failures. `--enforce` exists for CI experiments, but do not recommend it as a required merge gate until the Rec 3 rollout lands and teams have calibrated thresholds on real PRs.
+
 ## [0.6.0] - Unreleased
 
 ### Changed
