@@ -1,0 +1,969 @@
+{
+  "date": "2026-09-18",
+  "upstream_commit": "fbfdd201c3901eb8b28259affa87f323c43c50ef",
+  "host": "arm64 macOS; Ruby 4.0.5 benchmark; Ruby 3.3.12 also tested",
+  "results": {
+    "gitlabhq": {
+      "first_session_seconds": 8.801491999998689,
+      "warm_full_seconds": [
+        3.872594999964349,
+        4.020752000040375,
+        3.8755349999992177
+      ],
+      "warm_diff_seconds": [
+        4.0224689999595284,
+        3.9086479999823496,
+        3.8818240000400692
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 3.9493110000621527,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 14765,
+      "javascript_files": 2692,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 3.8755349999992177,
+      "warm_diff_median_seconds": 3.9086479999823496,
+      "previous_warm_full_seconds": 7.747255999944173,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/ci/bridge.rb",
+      "repository_commit": "fc6aab242377bc381c7516a48dda0d5d73ff1227",
+      "original_full_seconds": 100.83558699989226,
+      "original_diff_seconds": 100.37336800002959
+    },
+    "canvas-lms": {
+      "first_session_seconds": 20.441223999951035,
+      "warm_full_seconds": [
+        17.316285999957472,
+        17.59569600003306
+      ],
+      "warm_diff_seconds": [
+        17.773936000070535,
+        17.108539000037126
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 17.742599999997765,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 3380,
+      "javascript_files": 6390,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 17.455990999995265,
+      "warm_diff_median_seconds": 17.44123750005383,
+      "previous_warm_full_seconds": 19.040190000087023,
+      "sample_count": 2,
+      "rerun_after_sleep": true,
+      "edited_path": "app/models/course.rb",
+      "repository_commit": "5eb81b77a0c663a49b4c8da974026ed069a73858",
+      "original_full_seconds": 68.2027470000321,
+      "original_diff_seconds": 62.299698999966495
+    },
+    "discourse": {
+      "first_session_seconds": 3.2835489999270067,
+      "warm_full_seconds": [
+        1.8552289999788627,
+        1.8247180000180379
+      ],
+      "warm_diff_seconds": [
+        1.8820219999179244,
+        1.8690899999346584
+      ],
+      "diff_ref": "32c0b7c434e61d48fff58693b01cbcdd87c3d5b7",
+      "ruby_edit_seconds": 1.9560620000120252,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 5760,
+      "javascript_files": 2756,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 1.8399734999984503,
+      "warm_diff_median_seconds": 1.8755559999262914,
+      "previous_warm_full_seconds": 3.0356160000665113,
+      "sample_count": 2,
+      "rerun_after_sleep": true,
+      "edited_path": "app/models/topic.rb",
+      "repository_commit": "fb8ef7ee72f062074782f676794c01dd93bf4a14",
+      "original_full_seconds": 46.626752999960445,
+      "original_diff_seconds": 43.39175800001249
+    },
+    "openproject": {
+      "first_session_seconds": 338.2249709999887,
+      "warm_full_seconds": [
+        1.8521239999681711,
+        1.80929699994158,
+        305.26344300003257
+      ],
+      "warm_diff_seconds": [
+        1.9628970000194386,
+        305.8394159999443,
+        2.0196470000082627
+      ],
+      "diff_ref": "c85472a1fa9e26e70191269d886af936dc8ff94a",
+      "ruby_edit_seconds": 1.839934999938123,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 6624,
+      "javascript_files": 1441,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 1.8521239999681711,
+      "warm_diff_median_seconds": 2.0196470000082627,
+      "previous_warm_full_seconds": 3.376598000060767,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/user.rb",
+      "repository_commit": "5996ad5cacb9712e77cd583a515cff428943b586",
+      "original_full_seconds": 42.53462099994067,
+      "original_diff_seconds": 44.45891000004485
+    },
+    "zammad": {
+      "first_session_seconds": 306.27885200001765,
+      "warm_full_seconds": [
+        0.8395589999854565,
+        0.8538369999732822,
+        0.841147999977693
+      ],
+      "warm_diff_seconds": [
+        0.9422840001061559,
+        0.8859739999752492,
+        304.3375320000341
+      ],
+      "diff_ref": "7a9da358796f56d07ee91e2c8a3696a086a08e18",
+      "ruby_edit_seconds": 0.8973139999434352,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 2782,
+      "javascript_files": 1726,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.841147999977693,
+      "warm_diff_median_seconds": 0.9422840001061559,
+      "previous_warm_full_seconds": 1.4046589999925345,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/ticket.rb",
+      "repository_commit": "d681245fc4bbc487513e01a9bf13e94cd264e037",
+      "original_full_seconds": 18.228275999892503,
+      "original_diff_seconds": 18.49426599999424
+    },
+    "katello": {
+      "first_session_seconds": 1.6034770000260323,
+      "warm_full_seconds": [
+        0.725124999997206,
+        304.78568500000983,
+        0.6916859999764711
+      ],
+      "warm_diff_seconds": [
+        0.7448670000303537,
+        0.7070379999931902,
+        0.6971090000588447
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.7491239999653772,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 867,
+      "javascript_files": 2548,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.725124999997206,
+      "warm_diff_median_seconds": 0.7070379999931902,
+      "previous_warm_full_seconds": 1.068544999929145,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/katello/content_view.rb",
+      "repository_commit": "79fa7bd10b08160d279714e7a3714098a3968e70",
+      "original_full_seconds": 13.719823000021279,
+      "original_diff_seconds": 11.795195000013337
+    },
+    "cartodb": {
+      "first_session_seconds": 305.9280700000236,
+      "warm_full_seconds": [
+        0.5397389999125153,
+        0.5267159999348223,
+        0.5332799999741837
+      ],
+      "warm_diff_seconds": [
+        0.6030740001006052,
+        0.5864730000030249,
+        0.5955789999570698
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.6013159999856725,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 940,
+      "javascript_files": 1809,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.5332799999741837,
+      "warm_diff_median_seconds": 0.5955789999570698,
+      "previous_warm_full_seconds": 1.0626150000607595,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/user.rb",
+      "repository_commit": "0af73ea4937f33b5862c55c24b85e9f00eeb7a12",
+      "original_full_seconds": 14.643439000006765,
+      "original_diff_seconds": 13.935978000052273
+    },
+    "coursemology2": {
+      "first_session_seconds": 1.1781770000234246,
+      "warm_full_seconds": [
+        0.49272400001063943,
+        0.48353600001428276,
+        0.47187099989969283
+      ],
+      "warm_diff_seconds": [
+        0.5378769999369979,
+        252.8496429999359,
+        0.645992000005208
+      ],
+      "diff_ref": "618ef215c8aad9b012a5f007346bfcc7025017ea",
+      "ruby_edit_seconds": 0.5505519999423996,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 928,
+      "javascript_files": 1781,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.48353600001428276,
+      "warm_diff_median_seconds": 0.645992000005208,
+      "previous_warm_full_seconds": 0.7539129999931902,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/course/lesson_plan/item.rb",
+      "repository_commit": "df582ddf400a794a32007238318c6e3c78b2019c",
+      "original_full_seconds": 10.246832999982871,
+      "original_diff_seconds": 9.8728500000434
+    },
+    "gumroad": {
+      "first_session_seconds": 1.7236269999993965,
+      "warm_full_seconds": [
+        0.564903000020422,
+        0.5692050000652671,
+        0.5713619999587536
+      ],
+      "warm_diff_seconds": [
+        0.6566070000408217,
+        0.5873310000170022,
+        304.6507519999286
+      ],
+      "diff_ref": "782a69f79530870bed4351f99dd7922b890f8337",
+      "ruby_edit_seconds": 0.8959999999497086,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 1626,
+      "javascript_files": 776,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.5692050000652671,
+      "warm_diff_median_seconds": 0.6566070000408217,
+      "previous_warm_full_seconds": 0.8362879999913275,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/purchase.rb",
+      "repository_commit": "b506c8e408f3f412bfd5a31d8ac071b74e97641a",
+      "original_full_seconds": 10.920731000020169,
+      "original_diff_seconds": 10.648332000011578
+    },
+    "mastodon": {
+      "first_session_seconds": 1.3866179999895394,
+      "warm_full_seconds": [
+        0.4672749999444932,
+        0.46846899995580316,
+        0.46940400009043515
+      ],
+      "warm_diff_seconds": [
+        0.534226999967359,
+        0.5140629999805242,
+        0.49696500005666167
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.5060730000259355,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 1429,
+      "javascript_files": 815,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.46846899995580316,
+      "warm_diff_median_seconds": 0.5140629999805242,
+      "previous_warm_full_seconds": 0.8162409999640658,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/lib/feed_manager.rb",
+      "repository_commit": "bd16e3f63e1b0a288982e4e6423e2cdb4ae0dc82",
+      "original_full_seconds": 10.994150999933481,
+      "original_diff_seconds": 9.737958999932744
+    }
+  },
+  "initial_replay_including_sleep": {
+    "gitlabhq": {
+      "first_session_seconds": 8.801491999998689,
+      "warm_full_seconds": [
+        3.872594999964349,
+        4.020752000040375,
+        3.8755349999992177
+      ],
+      "warm_diff_seconds": [
+        4.0224689999595284,
+        3.9086479999823496,
+        3.8818240000400692
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 3.9493110000621527,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 14765,
+      "javascript_files": 2692,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 3.8755349999992177,
+      "warm_diff_median_seconds": 3.9086479999823496,
+      "previous_warm_full_seconds": 7.747255999944173,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/ci/bridge.rb"
+    },
+    "canvas-lms": {
+      "first_session_seconds": 21.051029999973252,
+      "warm_full_seconds": [
+        1699.4919119999977,
+        929.9040490000043,
+        930.7717600000324
+      ],
+      "warm_diff_seconds": [
+        824.4494949999498,
+        928.729931000038,
+        959.3857569999527
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 857.4978479999118,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 3380,
+      "javascript_files": 6390,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ]
+    },
+    "discourse": {
+      "first_session_seconds": 4.553172999992967,
+      "warm_full_seconds": [
+        305.9768230000045,
+        1.800686000031419,
+        1.7928679999895394
+      ],
+      "warm_diff_seconds": [
+        305.58206399995834,
+        1.805731000029482,
+        306.02453900000546
+      ],
+      "diff_ref": "32c0b7c434e61d48fff58693b01cbcdd87c3d5b7",
+      "ruby_edit_seconds": 1.975616000010632,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 5760,
+      "javascript_files": 2756,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ]
+    },
+    "openproject": {
+      "first_session_seconds": 338.2249709999887,
+      "warm_full_seconds": [
+        1.8521239999681711,
+        1.80929699994158,
+        305.26344300003257
+      ],
+      "warm_diff_seconds": [
+        1.9628970000194386,
+        305.8394159999443,
+        2.0196470000082627
+      ],
+      "diff_ref": "c85472a1fa9e26e70191269d886af936dc8ff94a",
+      "ruby_edit_seconds": 1.839934999938123,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 6624,
+      "javascript_files": 1441,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 1.8521239999681711,
+      "warm_diff_median_seconds": 2.0196470000082627,
+      "previous_warm_full_seconds": 3.376598000060767,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/user.rb"
+    },
+    "zammad": {
+      "first_session_seconds": 306.27885200001765,
+      "warm_full_seconds": [
+        0.8395589999854565,
+        0.8538369999732822,
+        0.841147999977693
+      ],
+      "warm_diff_seconds": [
+        0.9422840001061559,
+        0.8859739999752492,
+        304.3375320000341
+      ],
+      "diff_ref": "7a9da358796f56d07ee91e2c8a3696a086a08e18",
+      "ruby_edit_seconds": 0.8973139999434352,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 2782,
+      "javascript_files": 1726,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.841147999977693,
+      "warm_diff_median_seconds": 0.9422840001061559,
+      "previous_warm_full_seconds": 1.4046589999925345,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/ticket.rb"
+    },
+    "katello": {
+      "first_session_seconds": 1.6034770000260323,
+      "warm_full_seconds": [
+        0.725124999997206,
+        304.78568500000983,
+        0.6916859999764711
+      ],
+      "warm_diff_seconds": [
+        0.7448670000303537,
+        0.7070379999931902,
+        0.6971090000588447
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.7491239999653772,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 867,
+      "javascript_files": 2548,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.725124999997206,
+      "warm_diff_median_seconds": 0.7070379999931902,
+      "previous_warm_full_seconds": 1.068544999929145,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/katello/content_view.rb"
+    },
+    "cartodb": {
+      "first_session_seconds": 305.9280700000236,
+      "warm_full_seconds": [
+        0.5397389999125153,
+        0.5267159999348223,
+        0.5332799999741837
+      ],
+      "warm_diff_seconds": [
+        0.6030740001006052,
+        0.5864730000030249,
+        0.5955789999570698
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.6013159999856725,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 940,
+      "javascript_files": 1809,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.5332799999741837,
+      "warm_diff_median_seconds": 0.5955789999570698,
+      "previous_warm_full_seconds": 1.0626150000607595,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/user.rb"
+    },
+    "coursemology2": {
+      "first_session_seconds": 1.1781770000234246,
+      "warm_full_seconds": [
+        0.49272400001063943,
+        0.48353600001428276,
+        0.47187099989969283
+      ],
+      "warm_diff_seconds": [
+        0.5378769999369979,
+        252.8496429999359,
+        0.645992000005208
+      ],
+      "diff_ref": "618ef215c8aad9b012a5f007346bfcc7025017ea",
+      "ruby_edit_seconds": 0.5505519999423996,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 928,
+      "javascript_files": 1781,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.48353600001428276,
+      "warm_diff_median_seconds": 0.645992000005208,
+      "previous_warm_full_seconds": 0.7539129999931902,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/course/lesson_plan/item.rb"
+    },
+    "gumroad": {
+      "first_session_seconds": 1.7236269999993965,
+      "warm_full_seconds": [
+        0.564903000020422,
+        0.5692050000652671,
+        0.5713619999587536
+      ],
+      "warm_diff_seconds": [
+        0.6566070000408217,
+        0.5873310000170022,
+        304.6507519999286
+      ],
+      "diff_ref": "782a69f79530870bed4351f99dd7922b890f8337",
+      "ruby_edit_seconds": 0.8959999999497086,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 1626,
+      "javascript_files": 776,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.5692050000652671,
+      "warm_diff_median_seconds": 0.6566070000408217,
+      "previous_warm_full_seconds": 0.8362879999913275,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/models/purchase.rb"
+    },
+    "mastodon": {
+      "first_session_seconds": 1.3866179999895394,
+      "warm_full_seconds": [
+        0.4672749999444932,
+        0.46846899995580316,
+        0.46940400009043515
+      ],
+      "warm_diff_seconds": [
+        0.534226999967359,
+        0.5140629999805242,
+        0.49696500005666167
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 0.5060730000259355,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 1429,
+      "javascript_files": 815,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 0.46846899995580316,
+      "warm_diff_median_seconds": 0.5140629999805242,
+      "previous_warm_full_seconds": 0.8162409999640658,
+      "sample_count": 3,
+      "rerun_after_sleep": false,
+      "edited_path": "app/lib/feed_manager.rb"
+    }
+  },
+  "awake_recheck": {
+    "canvas-lms": {
+      "first_session_seconds": 20.441223999951035,
+      "warm_full_seconds": [
+        17.316285999957472,
+        17.59569600003306
+      ],
+      "warm_diff_seconds": [
+        17.773936000070535,
+        17.108539000037126
+      ],
+      "diff_ref": "HEAD~1",
+      "ruby_edit_seconds": 17.742599999997765,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 3380,
+      "javascript_files": 6390,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 17.455990999995265,
+      "warm_diff_median_seconds": 17.44123750005383,
+      "previous_warm_full_seconds": 19.040190000087023,
+      "sample_count": 2,
+      "rerun_after_sleep": true,
+      "edited_path": "app/models/course.rb"
+    },
+    "discourse": {
+      "first_session_seconds": 3.2835489999270067,
+      "warm_full_seconds": [
+        1.8552289999788627,
+        1.8247180000180379
+      ],
+      "warm_diff_seconds": [
+        1.8820219999179244,
+        1.8690899999346584
+      ],
+      "diff_ref": "32c0b7c434e61d48fff58693b01cbcdd87c3d5b7",
+      "ruby_edit_seconds": 1.9560620000120252,
+      "full_parity": true,
+      "diff_parity": true,
+      "edited_pristine_oracle_parity": true,
+      "restored_parity": true,
+      "ruby_files": 5760,
+      "javascript_files": 2756,
+      "warnings": [
+        {
+          "code": "coverage_unavailable",
+          "message": "coverage data was not provided; coverage and interaction signals are unavailable"
+        },
+        {
+          "code": "zero_churn_majority",
+          "message": "most files have zero churn in the selected window; churn may be less informative"
+        }
+      ],
+      "warm_full_median_seconds": 1.8399734999984503,
+      "warm_diff_median_seconds": 1.8755559999262914,
+      "previous_warm_full_seconds": 3.0356160000665113,
+      "sample_count": 2,
+      "rerun_after_sleep": true,
+      "edited_path": "app/models/topic.rb"
+    }
+  },
+  "verification": {
+    "ruby_4_0_5": {
+      "examples": 378,
+      "failures": 0
+    },
+    "ruby_3_3_12": {
+      "examples": 378,
+      "failures": 0
+    },
+    "rubocop": {
+      "files": 77,
+      "offenses": 0
+    },
+    "mixed_toolchain": {
+      "passed": [
+        "initial mixed pipeline with aliases, dynamic imports and CommonJS",
+        "warm cache inside repository",
+        "changed import with preserved mtime",
+        "directory import before package metadata",
+        "new package metadata changes resolution without source edits",
+        "edited package metadata changes resolution",
+        "deleted package metadata restores directory resolution",
+        "rename and import update",
+        "deleted imported module",
+        "new module resolves previously missing import",
+        "TypeScript alias configuration change",
+        "coverage inputs and coverage-weighted scoring",
+        "coverage update changes scores",
+        "new session with corrupt graph cache",
+        "unsupported graph filter uses full backend"
+      ]
+    }
+  },
+  "notes": [
+    "Full and diff outputs match original golden reports; every edited report was compared with a newly executed pristine upstream process. Restoring each edit restored the matching original full report.",
+    "The Canvas/Discourse awake replays reuse the freshly established pristine golden reports for identical edit states; they do not rerun the upstream process a second time.",
+    "Canvas/Discourse initial wall timings include system sleep. Power logs show repeated 304\u2013305-second sleep intervals. Raw observations are retained; final results use a scoped caffeinate -i rerun.",
+    "Three warm observations per category for eight repositories; two for Canvas/Discourse awake rerun. One Ruby edit sample per repository. No p95/p99 or SLO guarantee.",
+    "All application edits occurred in isolated benchmark clones. Original applications were not modified.",
+    "Coverage absent and recent history sparse in archived snapshots. Actual application Node dependencies and complete alias resolution are not established by this harness.",
+    "Time.now fixed to 2026-09-17T12:00:00Z for report equality; only meta.analyzed_at removed.",
+    "Final source adds repository Ruby-target selection, target cache invalidation/scan validation, parsed-history reuse, and validated directory inventories. No new managed-update API or unsaved-buffer support is claimed."
+  ],
+  "gitlab_final_phase_profile": {
+    "seconds": 3.945319000049494,
+    "phases": [
+      [
+        "StudFinder::FileCollector",
+        "collect",
+        0.5908940000226721
+      ],
+      [
+        "StudFinder::GitCache",
+        "initialize",
+        0.12996799999382347
+      ],
+      [
+        "StudFinder::SourceSnapshot",
+        "initialize",
+        0.595852000056766
+      ],
+      [
+        "StudFinder::TemporalCoupling",
+        "call",
+        0.00026599992997944355
+      ],
+      [
+        "StudFinder::FanIn",
+        "call",
+        0.6231279999483377
+      ],
+      [
+        "StudFinder::Complexity",
+        "call",
+        0.3040960000362247
+      ],
+      [
+        "StudFinder::Churn",
+        "call",
+        0.012909999932162464
+      ],
+      [
+        "StudFinder::LocCounter",
+        "call",
+        0.2512420000275597
+      ],
+      [
+        "StudFinder::Scorer",
+        "call",
+        0.2099640000378713
+      ],
+      [
+        "StudFinder::Newness",
+        "call",
+        0.012941000051796436
+      ],
+      [
+        "StudFinder::JsFanIn",
+        "call",
+        0.30205399997066706
+      ],
+      [
+        "StudFinder::JsComplexity",
+        "call",
+        0.037708999938331544
+      ],
+      [
+        "StudFinder::Churn",
+        "call",
+        0.001782999956049025
+      ],
+      [
+        "StudFinder::LocCounter",
+        "call",
+        0.05483299994375557
+      ],
+      [
+        "StudFinder::Scorer",
+        "call",
+        0.02682299993466586
+      ],
+      [
+        "StudFinder::Newness",
+        "call",
+        0.0015790000325068831
+      ],
+      [
+        "StudFinder::SourceSnapshot",
+        "verify!",
+        0.5718670000787824
+      ]
+    ],
+    "js_nonzero": 1055
+  }
+}
