@@ -26,7 +26,7 @@ Gem::Specification.new do |spec|
   spec.metadata['rubygems_mfa_required'] = 'true'
 
   spec.files = Dir.chdir(__dir__) do
-    Dir['bin/*', 'lib/**/*.rb', 'README.md', 'SIGNALS.md', 'CHANGELOG.md', 'LICENSE*']
+    Dir['bin/*', 'lib/**/*.rb', 'lib/**/*.mjs', 'README.md', 'PIPELINE.md', 'SIGNALS.md', 'CHANGELOG.md', 'LICENSE*']
   end
   spec.bindir = 'bin'
   spec.executables = ['stud-finder']

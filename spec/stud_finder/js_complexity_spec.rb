@@ -78,6 +78,21 @@ RSpec.describe StudFinder::JsComplexity do
     end
   end
 
+  it 'maps physical ESLint paths back to a repository opened through a symlink' do
+    make_js_repo(%w[src/a.js]) do |root, files|
+      alias_path = File.join(root, 'alias')
+      File.symlink(root, alias_path)
+      write_eslint(root, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo v9.1.0; exit 0; fi
+        echo '[{"filePath":"#{File.realpath(root)}/src/a.js","messages":[
+          {"message":"Function has a complexity of 5. Maximum allowed is 0."}]}]'
+      SH
+
+      expect(call(alias_path, files).counts).to eq('src/a.js' => 5)
+    end
+  end
+
   it 'uses v9 flat config and deletes the temporary config' do
     make_repo do |root, files|
       args_file = File.join(root, 'args.txt')

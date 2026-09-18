@@ -32,6 +32,24 @@ RSpec.describe StudFinder::JsFanIn do
     warnings.map { |warning| warning.is_a?(Hash) ? warning.fetch(:code) : warning }
   end
 
+  it 'passes an explicit sidecar configuration to the uncached command' do
+    make_repo do |root|
+      engine = described_class.new(repo_path: root, files: ['src/a.js'], js_config: '/analysis/config.json')
+      allow(engine).to receive(:node_available?).and_return(true)
+      allow(engine).to receive(:depcruise_binary).and_return('/tools/depcruise')
+      status = instance_double(Process::Status, success?: true)
+      expect(Open3).to receive(:capture3).with('/tools/depcruise', '--output-type', 'json', '.',
+                                               '--config', '/analysis/config.json', chdir: root)
+                                         .and_return(['{"modules":[]}', '', status])
+      expect(engine.call.counts).to eq('src/a.js' => 0)
+    end
+  end
+
+  it 'retains the useful error line after a tool prints blank lines' do
+    engine = described_class.new(repo_path: '/repo', files: [])
+    expect(engine.send(:first_line, "\n  Configuration is invalid\nDetails")).to eq('Configuration is invalid')
+  end
+
   it 'counts incoming edges, deduplicates source-target pairs, and filters self/external deps' do
     make_repo do |root|
       files = %w[src/a.js src/b.ts src/c.jsx src/d.tsx]
