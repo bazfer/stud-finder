@@ -25,7 +25,8 @@ module StudFinder
 
     class Error < StandardError; end
 
-    def initialize(repo_path:, files:, days:, stderr: $stderr)
+    def initialize(repo_path:, files:, days:, stderr: $stderr, git_cache: nil)
+      @git_cache = git_cache
       @repo_path = File.expand_path(repo_path)
       @files = files
       @days = days
@@ -66,7 +67,7 @@ module StudFinder
     private
 
     def git_log
-      Open3.capture3(
+      (@git_cache || Open3).capture3(
         'git', '-C', @repo_path, 'log',
         "--since=#{@days} days ago",
         '--format=tformat:',

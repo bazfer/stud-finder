@@ -3,6 +3,7 @@
 require 'json'
 require 'open3'
 require 'tempfile'
+require_relative 'fact_cache'
 
 module StudFinder
   class Complexity
@@ -24,13 +25,18 @@ module StudFinder
         Max: 0
     YAML
 
-    def initialize(repo_path:, files:, stderr: $stderr)
+    def initialize(repo_path:, files:, stderr: $stderr, cache_dir: nil)
       @repo_path = File.expand_path(repo_path)
       @files = files
       @stderr = stderr
+      @cache_dir = cache_dir
     end
 
+    attr_reader :cache_stats
+
     def call
+      return cached_call if @cache_dir
+
       counts = zero_counts
       skipped = []
 
@@ -48,7 +54,72 @@ module StudFinder
       raise Error, "Error: failed to parse RuboCop JSON output: #{e.message}"
     end
 
+    # A subprocess discovers Ruby's target from its repository cwd. The host
+    # process may analyze several roots and must never change its global cwd.
+    # This config object supplies the discovery base without reading the app's
+    # RuboCop configuration (the subprocess also uses an explicit temp config).
+    def self.target_ruby_version(repo_path)
+      require 'rubocop'
+      context = RuboCop::Config.new({ 'AllCops' => {} }, File.join(repo_path, '.rubocop-stud-finder-context.yml'))
+      context.target_ruby_version
+    end
+
     private
+
+    def cached_call
+      require 'rubocop'
+      @target_ruby_version = self.class.target_ruby_version(@repo_path)
+      cache = FactCache.new(directory: @cache_dir, namespace: cache_namespace, stderr: @stderr)
+      fingerprints = @files.to_h { |file| [file, Digest::SHA256.file(File.join(@repo_path, file)).hexdigest] }
+      counts = {}
+      skipped = []
+      missing = []
+      @files.each do |file|
+        value = cache.fetch(file, fingerprints[file])
+        if value.is_a?(Integer) && value >= 0
+          counts[file] = value
+        else
+          missing << file
+        end
+      end
+      @cache_stats = { hits: @files.length - missing.length, misses: missing.length }
+      unless missing.empty?
+        result = run_embedded(missing)
+        counts.merge!(result.counts)
+        skipped = result.skipped_files
+        result.counts.each { |file, count| cache.store(file, fingerprints[file], count) }
+      end
+      cache.retain(@files)
+      cache.save
+      Result.new(counts: counts, skipped_files: skipped)
+    end
+
+    def cache_namespace
+      ['complexity-v2', RUBY_VERSION, RUBY_PLATFORM, RUBOCOP_CONFIG, @target_ruby_version,
+       Gem.loaded_specs.values.map { |spec| [spec.name, spec.version.to_s] }.sort,
+       Digest::SHA256.file(__FILE__).hexdigest].join(':')
+    end
+
+    # Use the same RuboCop runner/configuration/JSON formatter as the command,
+    # without starting another Ruby process for a one-file edit. The uncached
+    # subprocess implementation remains available as the comparison oracle.
+    def run_embedded(files)
+      Tempfile.create(['stud-finder-rubocop', '.yml']) do |config|
+        config.write(RUBOCOP_CONFIG.sub('  DisabledByDefault:',
+                                        "  TargetRubyVersion: #{@target_ruby_version}\n  DisabledByDefault:"))
+        config.flush
+        Tempfile.create(['stud-finder-complexity', '.json']) do |output|
+          store = RuboCop::ConfigStore.new
+          store.options_config = config.path
+          options = { cache: false, parallel: false, formatters: [['json', output.path]], raise_cop_error: true }
+          runner = RuboCop::Runner.new(options, store)
+          runner.run(files.map { |file| File.join(@repo_path, file) })
+          raise Error, 'Error: embedded RuboCop failed.' unless runner.errors.empty?
+
+          parse(File.read(output.path), files)
+        end
+      end
+    end
 
     def run_batch(batch)
       stdout, stderr, status = run_rubocop(batch)
@@ -130,6 +201,9 @@ module StudFinder
 
     def normalize_path(path)
       absolute = File.expand_path(path, @repo_path)
+      physical_root = File.realpath(@repo_path) if File.exist?(@repo_path)
+      return absolute.delete_prefix("#{physical_root}/") if physical_root && absolute.start_with?("#{physical_root}/")
+
       absolute.start_with?("#{@repo_path}/") ? absolute.delete_prefix("#{@repo_path}/") : path
     end
 

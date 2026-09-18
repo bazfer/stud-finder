@@ -8,7 +8,9 @@ module StudFinder
 
     SHA_PATTERN = /\A[0-9a-f]{40}\z/
 
-    def initialize(repo_path:, files:, days:, min_co_changes: 5, coupling_threshold: 0.30, max_commit_files: 50)
+    def initialize(repo_path:, files:, days:, min_co_changes: 5, coupling_threshold: 0.30, max_commit_files: 50,
+                   git_cache: nil)
+      @git_cache = git_cache
       @repo_path = File.expand_path(repo_path)
       @file_set = files.to_h { |f| [f, true] }
       @days = days
@@ -32,7 +34,7 @@ module StudFinder
     private
 
     def git_log
-      Open3.capture3(
+      (@git_cache || Open3).capture3(
         'git', '-C', @repo_path, 'log',
         "--since=#{@days} days ago",
         '--diff-filter=ACDMR',

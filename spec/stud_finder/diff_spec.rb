@@ -2,6 +2,7 @@
 
 require 'spec_helper'
 require 'stud_finder/diff'
+require 'stud_finder/git_cache'
 
 RSpec.describe StudFinder::Diff do
   around do |example|
@@ -57,6 +58,18 @@ RSpec.describe StudFinder::Diff do
     paths = described_class.new(repo_path: @repo, base_ref: 'HEAD').changed_paths
 
     expect(paths).to eq([])
+  end
+
+  it 'invalidates a cached comparison when the base branch moves with HEAD unchanged' do
+    cache = StudFinder::GitCache.new(repo_path: @repo, directory: File.join(@repo, 'cache'))
+    diff = described_class.new(repo_path: @repo, base_ref: 'base', git_cache: cache)
+    expected = ['app/models/post.rb', 'app/services/new_service.rb']
+    expect(diff.changed_paths).to match_array(expected)
+    expect(diff.changed_paths).to match_array(expected)
+    git('branch', '-f', 'base', 'HEAD')
+    expect(diff.changed_paths).to eq([])
+    git('branch', '-f', 'base', 'HEAD~1')
+    expect(diff.changed_paths).to match_array(expected)
   end
 
   it 'raises a clear error when the base ref does not exist' do
