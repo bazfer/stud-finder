@@ -76,6 +76,26 @@ bundle exec bin/stud-finder ./my-rails-app \
 
 ---
 
+## Complete-pipeline caching and local sessions
+
+Use `--cache-dir PATH` to reuse validated Ruby reference facts, complexity, line counts and Git history. Supported JavaScript toolchains also reuse a graph and per-file ESLint results. Coverage, whole-repository scoring, ranks and diff selection remain current.
+
+```bash
+bundle exec bin/stud-finder ./my-rails-app --cache-dir ./tmp/stud-finder-cache --diff-base origin/main
+```
+
+For repeated editor or agent requests, keep the analyzers loaded:
+
+```bash
+bundle exec bin/stud-finder serve ./my-rails-app --cache-dir ./tmp/stud-finder-cache --no-auto-unshallow
+```
+
+Send `{}` or `{"args":["--diff-base","HEAD~1"]}` on stdin, one request per line. Each response contains a source-generation token and the normal JSON report, or an error. The library exposes `StudFinder::Session#scan` and `#close`. It reads saved files on demand; editor overlays and automatic save integration are not implemented.
+
+`--js-config PATH` selects an analysis configuration without adding it to the application checkout. Fast JavaScript updates currently require the supported declarative profile; other configurations use full dependency analysis. Cache-enabled traversal prunes excluded directories and reports that excluded-file totals inside them were not counted. Source changes during a scan cause retries in session mode rather than publication of a mixed-source report.
+
+See [PIPELINE.md](PIPELINE.md) for the protocol, supported frontend configuration, freshness limits, CI behavior and full-pipeline benchmark. Caches are optional/disposable and should remain outside version control. Interactive warm-session timings are not fresh-process or CI-startup guarantees.
+
 ## Signals and weights
 
 Each file is scored on up to seven inputs — six direct signals plus one cross-term (`interaction`) that fires when coverage data is present. See [SIGNALS.md](SIGNALS.md) for the theory behind each signal; this section lists the current defaults.
@@ -272,3 +292,5 @@ Don't run it as a hard blocker on raw `score` — `score` is evidence, not a dec
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+See [full-pipeline benchmark results](docs/full-pipeline-benchmarks.md) for measurements on ten public Rails applications, report-parity verification, and remaining performance limits.

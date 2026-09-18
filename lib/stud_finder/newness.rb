@@ -24,7 +24,9 @@ module StudFinder
     class Error < StandardError; end
 
     def initialize(repo_path:, files:, days: DEFAULT_DAYS, min_commits: DEFAULT_MIN_COMMITS, enabled: true,
-                   now: Time.now)
+                   now: Time.now, git_cache: nil, shallow: nil)
+      @git_cache = git_cache
+      @shallow = shallow
       @repo_path = File.expand_path(repo_path)
       @files = files
       @days = days
@@ -35,7 +37,7 @@ module StudFinder
 
     def call
       return self.class.disabled_metadata(@files) unless @enabled
-      return self.class.disabled_metadata(@files) if self.class.shallow_repository?(@repo_path)
+      return self.class.disabled_metadata(@files) if shallow_repository?
 
       history = git_history
       @files.to_h do |file|
@@ -127,14 +129,36 @@ module StudFinder
 
     private
 
+    def shallow_repository?
+      @shallow.nil? ? self.class.shallow_repository?(@repo_path) : @shallow
+    end
+
     def empty_history
       History.new(first_commit_epoch: {}, total_commits: {})
     end
 
     def git_history
+      return read_git_history unless @git_cache
+
+      population = Digest::SHA256.hexdigest(JSON.generate([@repo_path, @files]))
+      key = ['newness-history-v1', Digest::SHA256.file(__FILE__).hexdigest, population]
+      value = @git_cache.derive(key, valid: method(:valid_history?)) do
+        history = read_git_history
+        [history.first_commit_epoch, history.total_commits]
+      end
+      History.new(first_commit_epoch: value[0], total_commits: value[1])
+    end
+
+    def valid_history?(value)
+      value.is_a?(Array) && value.length == 2 && value.all? do |field|
+        field.is_a?(Hash) && field.all? { |path, number| path.is_a?(String) && number.is_a?(Integer) }
+      end
+    end
+
+    def read_git_history
       # Use committer time (%ct), not author time, because newness is about when code landed in this repo.
       # Cherry-picked or imported files can carry old author dates while still being newly introduced here.
-      stdout, _stderr, status = Open3.capture3(
+      stdout, _stderr, status = (@git_cache || Open3).capture3(
         'git', '-C', @repo_path, 'log',
         '--format=%x1e%ct',
         '--name-status',
@@ -290,7 +314,7 @@ module StudFinder
     def git_toplevel
       return @git_toplevel if defined?(@git_toplevel)
 
-      stdout, _stderr, status = Open3.capture3('git', '-C', @repo_path, 'rev-parse', '--show-toplevel')
+      stdout, _stderr, status = (@git_cache || Open3).capture3('git', '-C', @repo_path, 'rev-parse', '--show-toplevel')
       @git_toplevel = status.success? ? File.realpath(stdout.strip) : nil
     end
 

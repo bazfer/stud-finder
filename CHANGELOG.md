@@ -9,8 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Complete-pipeline `--cache-dir` support, a local JSON-lines `serve` process, and `StudFinder::Session` for repeated full scans.
+- Per-file RuboCop complexity and LOC caches, shared/persistent Git logs with history-window expiry, and a bounded incremental JavaScript adapter for ESLint 9/dependency-cruiser 18.
+- `--js-config PATH` for sidecar analysis configuration, source-generation tokens and source-change detection/retries.
+- Cached committed diffs keyed by freshly resolved base commits, plus reusable JavaScript configuration directory inventories with change-stamp validation.
+- A full-pipeline parity/timing benchmark and session/cache regression tests.
+
+- Added opt-in `--cache-dir PATH` for portable Ruby reference facts, library cache hit/miss statistics, and an incremental reference-analysis benchmark with fresh-run parity checks.
 - Added `stud-finder gate`, an observation-first markdown gate subcommand for JSON scan output. v1 includes hardcoded checks for touched trunks, high-score files with low/missing evidence, and new files escalated by trunk adjacency.
 - Added `--input FILE`/stdin input handling and an `--enforce` flag for gate failures. `--enforce` exists for CI experiments, but do not recommend it as a required merge gate until the Rec 3 rollout lands and teams have calibrated thresholds on real PRs.
+
+### Changed
+
+- Cache parsed Git newness history under the validated history identity and file population while recomputing time-dependent fields.
+- Reuse session directory inventories with inode/mtime/ctime invalidation and fresh source/header reads.
+
+- Cache-enabled discovery prunes fully excluded directories and reports pruned-directory counts instead of claiming exact excluded-file totals. Git metadata directories are excluded by default.
+- Scan and edges commands share analysis orchestration, so edge output now uses the same temporal-coupling-aware scoring as normal reports.
+
+- Ruby fan-in counting uses a reference-frequency index instead of an all-files scan per constant. Ruby ownership and reference extraction share one parse per file within a run.
+
+### Fixed
+
+- Preserve the analyzed repository's Ruby target in embedded complexity analysis; invalidate facts and detect target changes during scans.
+
+- Ruby reference-analysis warnings are included in scan reports.
+- ESLint complexity results using physical paths map correctly when the repository root is a symlink.
 
 ## [0.6.0] - Unreleased
 

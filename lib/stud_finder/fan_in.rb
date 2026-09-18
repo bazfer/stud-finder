@@ -3,6 +3,7 @@
 require 'rubocop'
 require 'set'
 require_relative 'rails_inference'
+require_relative 'fact_cache'
 
 module StudFinder
   # rubocop:disable Metrics/ClassLength
@@ -13,18 +14,42 @@ module StudFinder
     PATH_ROOTS = %w[app lib test].freeze
     CLASS_OR_MODULE_TYPES = %i[class module].freeze
 
-    def initialize(repo_path:, files:, stderr: $stderr, rails_inference: true)
+    attr_reader :cache_stats
+
+    def initialize(repo_path:, files:, stderr: $stderr, rails_inference: true, cache_dir: nil)
       @repo_path = File.expand_path(repo_path)
       @files = files
       @stderr = stderr
       @rails_inference = rails_inference
+      @cache_dir = cache_dir
     end
 
     def call
-      @warnings = []
+      reset_analysis
       constants = constant_ownership
       references = resolved_reference_sets(@files, constants)
+      result = build_graph(constants, references)
+      @cache&.retain(@files)
+      @cache&.save
+      result
+    end
+
+    private
+
+    def reset_analysis
+      @warnings = []
+      @facts = {}
+      @asts = {}
+      @sources = {}
+      @reference_candidate_cache = {}
+      @cache_stats = { hits: 0, misses: 0 }
+      @cache = FactCache.new(directory: @cache_dir, namespace: cache_namespace, stderr: @stderr) if @cache_dir
+    end
+
+    def build_graph(constants, references)
       reverse_constants = constants.invert
+      frequencies = Hash.new(0)
+      references.each_value { |refs| refs.each { |constant| frequencies[constant] += 1 } }
 
       counts = @files.to_h { |file| [file, 0] }
       fan_out_counts = @files.to_h { |file| [file, 0] }
@@ -33,9 +58,9 @@ module StudFinder
 
       @files.each do |file|
         constant = constants[file]
-        counts[file] = constant ? fan_in_count(file, constant, references) : 0
+        counts[file] = indexed_fan_in(file, constant, references, frequencies)
 
-        references[file]&.each do |ref_constant|
+        references[file].each do |ref_constant|
           dep_file = reverse_constants[ref_constant]
           next unless dep_file && dep_file != file
 
@@ -52,11 +77,16 @@ module StudFinder
       Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: @warnings)
     end
 
-    private
+    def indexed_fan_in(file, constant, references, frequencies)
+      return 0 unless constant
+
+      self_reference = references[file].include?(constant) ? 1 : 0
+      frequencies[constant] - self_reference
+    end
 
     def constant_ownership
       @files.filter_map do |file|
-        constant = zeitwerk_constant(file) || primary_constant(file)
+        constant = facts_for(file)[:constant]
         [file, constant] if constant
       end.to_h
     end
@@ -66,7 +96,7 @@ module StudFinder
       known_namespace_prefixes = namespace_prefixes(known_constants)
 
       source_files.to_h do |file|
-        [file, resolve_references(references_for(file), known_constants, known_namespace_prefixes)]
+        [file, resolve_references(facts_for(file)[:references], known_constants, known_namespace_prefixes)]
       end
     end
 
@@ -115,8 +145,66 @@ module StudFinder
       end
     end
 
-    def fan_in_count(file, constant, references)
-      references.count { |source_file, source_refs| source_file != file && source_refs.include?(constant) }
+    def cache_namespace
+      versions = %w[rubocop rubocop-ast parser prism].map { |name| [name, Gem.loaded_specs[name]&.version.to_s] }
+      implementation = [__FILE__, File.join(__dir__, 'rails_inference.rb')].map { |path| Digest::SHA256.file(path).hexdigest }
+      JSON.generate(['ruby-references-v1', RUBY_ENGINE, RUBY_VERSION, versions, implementation, @rails_inference])
+    end
+
+    def facts_for(file)
+      return @facts[file] if @facts.key?(file)
+
+      source = source_for(file)
+      fingerprint = Digest::SHA256.hexdigest(source) if source
+      cached = @cache&.fetch(file, fingerprint) if fingerprint
+      if valid_cached_facts?(cached)
+        @cache_stats[:hits] += 1
+        refs = cached['references'].map do |namespace, name, absolute, candidates|
+          ReferenceCandidate.new(namespace: namespace, name: name, absolute: absolute, candidates: candidates)
+        end
+        return @facts[file] = { constant: cached['constant'], references: Set.new(refs) }
+      end
+
+      @cache_stats[:misses] += 1
+      @facts[file] = extract_facts(file, fingerprint)
+    ensure
+      @sources.delete(file)
+      @asts.delete(file)
+    end
+
+    def extract_facts(file, fingerprint)
+      previous_warnings = @warnings
+      @warnings = []
+      facts = { constant: zeitwerk_constant(file) || primary_constant(file), references: references_for(file) }
+      if fingerprint && @warnings.empty? && @asts[file]
+        @cache&.store(file, fingerprint, { 'constant' => facts[:constant],
+                                           'references' => facts[:references].map(&:to_a) })
+      end
+      facts
+    ensure
+      @warnings = (previous_warnings + @warnings).uniq
+    end
+
+    def valid_cached_facts?(facts)
+      return false unless facts.is_a?(Hash) && facts.key?('constant') && facts['references'].is_a?(Array)
+      return false unless facts['constant'].nil? || facts['constant'].is_a?(String)
+
+      facts['references'].all? do |ref|
+        valid_cached_reference?(ref)
+      end
+    end
+
+    def valid_cached_reference?(ref)
+      ref.is_a?(Array) && ref.length == 4 && ref[1].is_a?(String) && [true, false].include?(ref[2]) &&
+        [0, 3].all? { |index| ref[index].is_a?(Array) && ref[index].all?(String) }
+    end
+
+    def source_for(file)
+      return @sources[file] if @sources.key?(file)
+
+      @sources[file] = File.read(File.join(@repo_path, file))
+    rescue Errno::ENOENT
+      @sources[file] = nil
     end
 
     def primary_constant(file)
@@ -210,10 +298,12 @@ module StudFinder
     end
 
     def parse(file)
-      source = File.read(File.join(@repo_path, file))
-      RuboCop::ProcessedSource.new(source, RUBY_VERSION.to_f, file).ast
+      return @asts[file] if @asts.key?(file)
+
+      source = source_for(file)
+      @asts[file] = source && RuboCop::ProcessedSource.new(source, RUBY_VERSION.to_f, file).ast
     rescue EncodingError, Errno::ENOENT, Parser::SyntaxError
-      nil
+      @asts[file] = nil
     end
 
     def constant_name(node)

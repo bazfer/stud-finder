@@ -8,6 +8,7 @@ require 'pathname'
 require 'set'
 require 'time'
 require_relative 'churn'
+require_relative 'git_cache'
 require_relative 'temporal_coupling'
 require_relative 'warnings'
 require_relative 'complexity'
@@ -55,7 +56,9 @@ module StudFinder
       ruby_coverage_path: nil,
       js_coverage_path: nil,
       js_timeout: 60,
+      js_config: nil,
       rails_inference: true,
+      cache_dir: nil,
       diff_base: nil,
       only_paths: nil,
       filter_set: nil,
@@ -75,30 +78,64 @@ module StudFinder
 
     class ValidationError < StandardError; end
 
-    def initialize(argv, stdout: $stdout, stderr: $stderr, stdin: $stdin)
+    def initialize(argv, stdout: $stdout, stderr: $stderr, stdin: $stdin, js_worker: nil, directory_index: nil)
       @argv = argv.dup
       @stdout = stdout
       @stderr = stderr
       @stdin = stdin
+      @js_worker = js_worker
+      @directory_index = directory_index
       @options = Marshal.load(Marshal.dump(DEFAULT_OPTIONS))
     end
 
-    def self.start(argv = ARGV, stdout: $stdout, stderr: $stderr, stdin: $stdin)
-      new(argv, stdout: stdout, stderr: stderr, stdin: stdin).run
+    def self.start(argv = ARGV, stdout: $stdout, stderr: $stderr, stdin: $stdin, js_worker: nil, directory_index: nil)
+      new(argv, stdout: stdout, stderr: stderr, stdin: stdin, js_worker: js_worker,
+                directory_index: directory_index).run
+    end
+
+    def source_generation
+      @source_snapshot&.generation
     end
 
     def run
       parser = option_parser
+      return run_session if shift_subcommand?('serve')
       return run_gate if shift_subcommand?('gate')
       return run_edges_subcommand(parser) if shift_subcommand?('edges')
 
       run_scan(parser)
+    rescue SourceSnapshot::Changed => e
+      @stderr.puts e.message
+      2
     rescue OptionParser::InvalidOption, OptionParser::MissingArgument, OptionParser::InvalidArgument, ValidationError,
            FileCollector::Error, Gate::Error, Churn::Error, Complexity::Error, Coverage::Cobertura::Error,
            Coverage::Detector::Error, Coverage::Lcov::Error, Coverage::Resultset::Error, Diff::Error, Newness::Error,
            Scorer::ValidationError => e
       @stderr.puts e.message
       1
+    end
+
+    def run_session
+      require_relative 'session'
+      session = Session.new(@argv, stderr: @stderr)
+      @stdin.each_line do |line|
+        begin
+          request = JSON.parse(line)
+          raise ValidationError, 'Expected an object with an optional args array.' unless request.is_a?(Hash)
+
+          args = request.fetch('args', [])
+          raise ValidationError, 'args must be an array of strings.' unless args.is_a?(Array) && args.all?(String)
+
+          result = session.scan(extra_args: args)
+          @stdout.puts(JSON.generate(generation: session.generation, result: result))
+        rescue JSON::ParserError, ValidationError => e
+          @stdout.puts(JSON.generate(error: e.message))
+        end
+        @stdout.flush
+      end
+      0
+    ensure
+      session&.close
     end
 
     def shift_subcommand?(name)
@@ -116,21 +153,12 @@ module StudFinder
       @repo_path = File.expand_path(path)
       validate_options!
 
-      result = FileCollector.new(
-        path: path,
-        excludes: @options[:excludes],
-        min_files: @options[:min_files],
-        stderr: @stderr
-      ).collect
-      progress("collecting files... #{result.files.length} found")
-
-      @options[:filter_set] = resolve_filter_set(@repo_path)
-
-      coupling = compute_coupling(@repo_path, result.files)
-      analysis = analyze(@repo_path, result.files, result.languages, coupling)
+      result, analysis = analyze_repository(path, filter: true)
       analysis = warn_if_no_scored_files(analysis)
       emit_results(@repo_path, result, analysis)
       0
+    ensure
+      @owned_js_worker&.close
     end
 
     def run_edges_subcommand(parser)
@@ -170,26 +198,13 @@ module StudFinder
 
     def run_edges(target, path)
       @repo_path = File.expand_path(path)
-      result = FileCollector.new(path: path, excludes: @options[:excludes],
-                                 min_files: @options[:min_files], stderr: @stderr).collect
-      progress("collecting files... #{result.files.length} found")
-      analysis = analyze(@repo_path, result.files, result.languages)
+      _result, analysis = analyze_repository(path)
       all_rows = analysis.ruby.rows + analysis.javascript.rows
       all_edges = analysis.ruby.edges.merge(analysis.javascript.edges)
 
-      progress("computing temporal coupling (git log, #{@options[:churn_days]} days)...")
-      coupling_result = TemporalCoupling.new(
-        repo_path: @repo_path,
-        files: result.files,
-        days: @options[:churn_days],
-        min_co_changes: @options[:coupling_min_commits],
-        coupling_threshold: @options[:coupling_threshold],
-        max_commit_files: @options[:coupling_max_commit_files]
-      ).call
-
       Edges.new(
         target: target, rows: all_rows, edges: all_edges,
-        coupling: coupling_result.pairs,
+        coupling: @coupling_pairs,
         churn_days: @options[:churn_days],
         coupling_min_commits: @options[:coupling_min_commits],
         coupling_threshold: @options[:coupling_threshold],
@@ -198,6 +213,8 @@ module StudFinder
     rescue FileCollector::Error, Churn::Error, Complexity::Error, Newness::Error, Scorer::ValidationError => e
       @stderr.puts e.message
       1
+    ensure
+      @owned_js_worker&.close
     end
 
     private
@@ -248,6 +265,12 @@ module StudFinder
         end
         opts.on('--no-rails-inference', 'Disable Rails association/string fan-in inference') do
           @options[:rails_inference] = false
+        end
+        opts.on('--js-config PATH', 'Dependency-cruiser configuration outside or inside the repository') do |value|
+          @options[:js_config] = File.expand_path(value)
+        end
+        opts.on('--cache-dir PATH', 'Persist validated analysis facts in PATH') do |value|
+          @options[:cache_dir] = File.expand_path(value)
         end
         opts.on('--trunk-threshold N', Integer,
                 'score percentile cutoff for trunk classification, integer 1-99 ' \
@@ -370,6 +393,8 @@ module StudFinder
         raise ValidationError, 'Error: --coupling-threshold must be between 0.0 and 1.0.'
       end
 
+      validate_js_config!
+
       validate_coverage_paths!
       validate_filter_options!
       validate_weights! if @options[:custom_weights]
@@ -380,6 +405,12 @@ module StudFinder
       return unless @options[:new_file_min_commits].negative?
 
       raise ValidationError, 'Error: --new-file-min-commits must be zero or positive.'
+    end
+
+    def validate_js_config!
+      return unless @options[:js_config] && !File.file?(@options[:js_config])
+
+      raise ValidationError, "Error: JavaScript config not found: #{@options[:js_config]}"
     end
 
     def validate_coverage_paths!
@@ -431,6 +462,65 @@ module StudFinder
       raise ValidationError, format('Error: weights must sum to 1.0; actual sum is %.4f.', active_sum)
     end
 
+    def analyze_repository(path, filter: false)
+      prepare_cache_directory
+      result = FileCollector.new(
+        path: path,
+        excludes: @options[:excludes],
+        min_files: @options[:min_files],
+        prune: !@options[:cache_dir].nil?, directory_index: @directory_index,
+        stderr: @stderr
+      ).collect
+      prepare_git_cache
+      prepare_source_snapshot(result)
+      progress("collecting files... #{result.files.length} found")
+
+      @options[:filter_set] = resolve_filter_set(@repo_path) if filter
+
+      @owned_js_worker = @js_worker = JsWorker.new if @options[:cache_dir] && !@js_worker
+      coupling = compute_coupling(@repo_path, result.files)
+      analysis = analyze(@repo_path, result.files, result.languages, coupling)
+      @source_snapshot&.verify!
+      [result, analysis]
+    end
+
+    def prepare_cache_directory
+      directory = @options[:cache_dir]
+      return unless directory
+
+      if @repo_path == directory || @repo_path.start_with?("#{directory}/")
+        raise ValidationError, 'Error: cache directory must not contain the analysis root.'
+      end
+
+      FileUtils.mkdir_p(directory)
+    rescue SystemCallError => e
+      @stderr.puts "Warning: cache directory unavailable: #{e.class}"
+    end
+
+    def prepare_source_snapshot(result)
+      return unless @options[:cache_dir]
+
+      extra = result.input_files + [@options[:ruby_coverage_path], @options[:js_coverage_path],
+                                    @options[:js_config], typescript_config_input]
+      @source_snapshot = SourceSnapshot.new(root: @repo_path, files: result.files,
+                                            directories: result.directories, extra_files: extra,
+                                            cache_dir: @options[:cache_dir], head: @git_cache&.head)
+    end
+
+    def typescript_config_input
+      config = @options[:js_config] || File.join(@repo_path, '.dependency-cruiser.json')
+      filename = JSON.parse(File.read(config)).dig('options', 'tsConfig', 'fileName')
+      File.expand_path(filename, @repo_path) if filename.is_a?(String)
+    rescue SystemCallError, JSON::ParserError, TypeError, NoMethodError
+      nil
+    end
+
+    def prepare_git_cache
+      return unless @options[:cache_dir]
+
+      @git_cache = GitCache.new(repo_path: @repo_path, directory: @options[:cache_dir], stderr: @stderr)
+    end
+
     # Computes temporal coupling once over the full collected file set (all languages
     # together, so cross-language co-change is captured) and aggregates each file's
     # partners into { file => { max_coupling: Float, max_coupling_partner: String, partners: Integer } }.
@@ -444,8 +534,9 @@ module StudFinder
         days: @options[:churn_days],
         min_co_changes: @options[:coupling_min_commits],
         coupling_threshold: @options[:coupling_threshold],
-        max_commit_files: @options[:coupling_max_commit_files]
+        max_commit_files: @options[:coupling_max_commit_files], git_cache: @git_cache
       ).call
+      @coupling_pairs = result.pairs
       record_coupling_warnings(result.warnings)
       result.pairs.transform_values { |partners| aggregate_partners(partners) }
     end
@@ -488,32 +579,36 @@ module StudFinder
     def analyze_ruby(path, files, coupling = nil)
       progress('computing Ruby fan_in + fan_out (rubocop-ast)...')
       fan_in_result = FanIn.new(repo_path: path, files: files, stderr: @stderr,
-                                rails_inference: @options[:rails_inference]).call
+                                rails_inference: @options[:rails_inference], cache_dir: @options[:cache_dir]).call
 
       progress('computing Ruby complexity (rubocop)...')
-      complexity_result = Complexity.new(repo_path: path, files: files, stderr: @stderr).call
+      complexity_result = Complexity.new(repo_path: path, files: files, stderr: @stderr,
+                                         cache_dir: @options[:cache_dir]).call
       analysis_files = files - complexity_result.skipped_files
 
       progress("computing Ruby churn (git log, #{@options[:churn_days]} days)...")
       churn_result = Churn.new(repo_path: path, files: analysis_files, days: @options[:churn_days],
-                               stderr: @stderr).call
+                               stderr: @stderr, git_cache: @git_cache).call
 
-      loc = LocCounter.new(repo_path: path, files: analysis_files).call
+      loc = LocCounter.new(repo_path: path, files: analysis_files, cache_dir: @options[:cache_dir]).call
       score_group(analysis_files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
                   complexity_result.counts, churn_result, loc, complexity_result.skipped_files,
                   ruby_coverage(path, analysis_files),
-                  language_by_file: analysis_files.to_h { |file| [file, :ruby] }, coupling: coupling)
+                  language_by_file: analysis_files.to_h { |file| [file, :ruby] },
+                  extra_warnings: fan_in_result.warnings, coupling: coupling)
     end
 
     def analyze_javascript(path, files, languages, coupling = nil)
       progress('computing JavaScript fan_in + fan_out (dependency-cruiser)...')
       fan_in_result = JsFanIn.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
-                                  stderr: @stderr).call
+                                  stderr: @stderr, worker: @js_worker, cache_dir: @options[:cache_dir],
+                                  js_config: @options[:js_config]).call
       progress('computing JavaScript complexity (eslint)...')
       complexity_result = JsComplexity.new(repo_path: path, files: files, js_timeout: @options[:js_timeout],
-                                           stderr: @stderr).call
-      churn_result = Churn.new(repo_path: path, files: files, days: @options[:churn_days], stderr: @stderr).call
-      loc = LocCounter.new(repo_path: path, files: files).call
+                                           stderr: @stderr, cache_dir: @options[:cache_dir], worker: @js_worker).call
+      churn_result = Churn.new(repo_path: path, files: files, days: @options[:churn_days], stderr: @stderr,
+                               git_cache: @git_cache).call
+      loc = LocCounter.new(repo_path: path, files: files, cache_dir: @options[:cache_dir]).call
       score_group(files, fan_in_result.counts, fan_in_result.fan_out_counts, fan_in_result.edges,
                   complexity_result.counts, churn_result, loc, [], js_coverage(path, files),
                   language_by_file: languages, extra_warnings: fan_in_result.warnings + complexity_result.warnings,
@@ -553,8 +648,14 @@ module StudFinder
     end
     # rubocop:enable Metrics/ParameterLists
 
+    def shallow_repository?
+      return @shallow_repository if defined?(@shallow_repository)
+
+      @shallow_repository = Newness.shallow_repository?(@repo_path)
+    end
+
     def apply_newness(files, edges, rows, coverage_result = nil)
-      metadata = if @options[:newness] && Newness.shallow_repository?(@repo_path)
+      metadata = if @options[:newness] && shallow_repository?
                    if @options[:auto_unshallow]
                      attempt_unshallow(files)
                    else
@@ -563,7 +664,8 @@ module StudFinder
                    end
                  elsif @options[:newness]
                    Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
-                               min_commits: @options[:new_file_min_commits]).call
+                               min_commits: @options[:new_file_min_commits], git_cache: @git_cache,
+                               shallow: @shallow_repository).call
                  else
                    Newness.disabled_metadata(files)
                  end
@@ -579,6 +681,9 @@ module StudFinder
           raise 'unshallow timed out'
         end
         raise 'unshallow failed' unless wait_thread.value.success?
+
+        @shallow_repository = false
+        @git_cache = nil
 
         Newness.new(repo_path: @repo_path, files: files, days: @options[:new_file_days],
                     min_commits: @options[:new_file_min_commits]).call
@@ -643,7 +748,7 @@ module StudFinder
     def resolve_filter_set(path)
       paths =
         if @options[:diff_base]
-          Diff.new(repo_path: path, base_ref: @options[:diff_base]).changed_paths
+          Diff.new(repo_path: path, base_ref: @options[:diff_base], git_cache: @git_cache).changed_paths
         else
           @options[:only_paths]
         end
@@ -683,7 +788,7 @@ module StudFinder
     end
 
     def git_toplevel(analysis_path)
-      stdout, _stderr, status = Open3.capture3(
+      stdout, _stderr, status = (@git_cache || Open3).capture3(
         'git', '-C', File.expand_path(analysis_path), 'rev-parse', '--show-toplevel'
       )
       status.success? ? File.realpath(stdout.strip) : nil
@@ -968,7 +1073,11 @@ module StudFinder
       skipped_count = analysis.ruby.skipped_files.length + analysis.javascript.skipped_files.length
       parts = ["#{file_count} files analyzed."]
       parts << "#{skipped_count} files skipped (parse errors — run --verbose to see)." if skipped_count.positive?
-      parts << "#{result.default_excluded_count} files excluded by default rules."
+      parts << if result.pruned_directories.to_i.positive?
+                 "#{result.pruned_directories} excluded directories pruned; excluded-file totals not counted."
+               else
+                 "#{result.default_excluded_count} files excluded by default rules."
+               end
       parts.join(' ')
     end
 

@@ -3,9 +3,12 @@
 require 'json'
 require 'open3'
 require 'timeout'
+require_relative 'js_worker_client'
 
 module StudFinder
   class JsComplexity
+    include JsWorkerClient
+
     Result = Struct.new(:counts, :warnings, keyword_init: true)
 
     ESLINT_MISSING = 'js_eslint_missing'
@@ -16,15 +19,19 @@ module StudFinder
     BATCH_SIZE = 500
     TS_EXTENSIONS = %w[.ts .tsx].freeze
 
-    def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr)
+    def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr, cache_dir: nil, worker: nil)
       @repo_path = File.expand_path(repo_path)
       @files = files
       @js_timeout = js_timeout
       @stderr = stderr
+      @worker = worker
       @warnings = []
+      @cache_dir = cache_dir
     end
 
     def call
+      return worker_call if @worker && @cache_dir
+
       eslint = eslint_binary
       return missing_eslint unless eslint
 
@@ -43,6 +50,14 @@ module StudFinder
     end
 
     private
+
+    def worker_operation
+      'complexity'
+    end
+
+    def worker_result(payload)
+      Result.new(counts: payload.fetch('counts'), warnings: [])
+    end
 
     def eslint_binary
       local = File.join(@repo_path, 'node_modules/.bin/eslint')
@@ -176,6 +191,11 @@ module StudFinder
       prefix = "#{@repo_path}/"
       return expanded.delete_prefix(prefix) if expanded.start_with?(prefix)
 
+      real_prefix = "#{File.realpath(@repo_path)}/"
+      return expanded.delete_prefix(real_prefix) if expanded.start_with?(real_prefix)
+
+      path.delete_prefix('./')
+    rescue Errno::ENOENT
       path.delete_prefix('./')
     end
 

@@ -4,9 +4,12 @@ require 'json'
 require 'open3'
 require 'set'
 require 'timeout'
+require_relative 'js_worker_client'
 
 module StudFinder
   class JsFanIn
+    include JsWorkerClient
+
     Result = Struct.new(:counts, :fan_out_counts, :edges, :warnings, keyword_init: true)
 
     TOOL_MISSING = 'js_tools_missing'
@@ -16,14 +19,19 @@ module StudFinder
 
     FALLBACK_SUCCESS_MESSAGE = 'configured depcruise failed; retried with --no-config; fan_in may be undercounted'
 
-    def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr)
+    def initialize(repo_path:, files:, js_timeout: 60, stderr: $stderr, worker: nil, cache_dir: nil, js_config: nil)
       @repo_path = File.expand_path(repo_path)
       @files = files
       @js_timeout = js_timeout
       @stderr = stderr
+      @worker = worker
+      @cache_dir = cache_dir
+      @js_config = js_config
     end
 
     def call
+      return worker_call if @worker && @cache_dir
+
       return missing_tools unless node_available?
 
       depcruise = depcruise_binary
@@ -43,6 +51,15 @@ module StudFinder
     end
 
     private
+
+    def worker_operation
+      'dependencies'
+    end
+
+    def worker_result(payload)
+      counts, fan_out_counts, edges = parse(JSON.generate('modules' => payload.fetch('modules')))
+      Result.new(counts: counts, fan_out_counts: fan_out_counts, edges: edges, warnings: [])
+    end
 
     def node_available?
       _stdout, _stderr, status = Open3.capture3('node', '--version')
@@ -65,8 +82,9 @@ module StudFinder
 
     def run_depcruise(depcruise)
       Timeout.timeout(@js_timeout) do
-        primary_stdout, primary_stderr, primary_status = Open3.capture3(depcruise, '--output-type', 'json', '.',
-                                                                        chdir: @repo_path)
+        args = [depcruise, '--output-type', 'json', '.']
+        args += ['--config', @js_config] if @js_config
+        primary_stdout, primary_stderr, primary_status = Open3.capture3(*args, chdir: @repo_path)
         return [primary_stdout, primary_stderr, primary_status, []] if primary_status.success?
 
         retry_stdout, retry_stderr, retry_status = Open3.capture3(
@@ -143,7 +161,7 @@ module StudFinder
     end
 
     def first_line(text)
-      text.to_s.lines.first.to_s.strip
+      text.to_s.lines.map(&:strip).find { |line| !line.empty? }.to_s
     end
 
     def zero_counts

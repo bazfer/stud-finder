@@ -11,9 +11,10 @@ module StudFinder
   class Diff
     class Error < StandardError; end
 
-    def initialize(repo_path:, base_ref:)
+    def initialize(repo_path:, base_ref:, git_cache: nil)
       @repo_path = File.expand_path(repo_path)
       @base_ref = base_ref
+      @git_cache = git_cache
     end
 
     def validate_ref!
@@ -21,9 +22,11 @@ module StudFinder
     end
 
     def changed_paths
-      verify_ref!
-      stdout, stderr, status = Open3.capture3(
-        'git', '-C', @repo_path, 'diff', '--name-only', '--diff-filter=d', "#{@base_ref}...HEAD"
+      base_commit = verify_ref!
+      reader = @git_cache || Open3
+      comparison = @git_cache ? "#{base_commit}...HEAD" : "#{@base_ref}...HEAD"
+      stdout, stderr, status = reader.capture3(
+        'git', '-C', @repo_path, 'diff', '--name-only', '--diff-filter=d', comparison
       )
       raise Error, diff_error(stderr) unless status.success?
 
@@ -35,10 +38,10 @@ module StudFinder
     private
 
     def verify_ref!
-      _stdout, _stderr, status = Open3.capture3(
+      stdout, _stderr, status = Open3.capture3(
         'git', '-C', @repo_path, 'rev-parse', '--verify', '--quiet', "#{@base_ref}^{commit}"
       )
-      return if status.success?
+      return stdout.strip if status.success?
 
       raise Error, "Error: diff base ref not found: #{@base_ref}"
     end

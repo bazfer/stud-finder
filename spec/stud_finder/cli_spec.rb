@@ -22,6 +22,29 @@ RSpec.describe StudFinder::CLI do
     warnings.map { |warning| warning.fetch('code') }
   end
 
+  it 'preserves full report results when reusing Ruby reference facts' do
+    make_repo do |dir|
+      cache = File.join(dir, 'tmp', 'facts')
+      args = [dir, '--output', 'json', '--min-files', '5']
+      reports = [args, args + ['--cache-dir', cache], args + ['--cache-dir', cache]].map do |argv|
+        status, stdout, = run_cli(argv)
+        expect(status).to eq(0)
+        JSON.parse(stdout).tap { |report| report['meta'].delete('analyzed_at') }
+      end
+      expect(reports.uniq.length).to eq(1)
+      expect(Dir[File.join(cache, '*.json')]).not_to be_empty
+    end
+  end
+
+  it 'includes Ruby reference analysis warnings in the report' do
+    make_repo do |dir|
+      allow_any_instance_of(StudFinder::FanIn).to receive(:lexical_namespace).and_raise(StandardError, 'failure')
+      status, stdout, = run_cli([dir, '--output', 'json'])
+      expect(status).to eq(0)
+      expect(warning_codes(JSON.parse(stdout)['warnings'])).to include('fan_in_reference_resolution_failed')
+    end
+  end
+
   def make_repo(file_count: 5)
     Dir.mktmpdir do |dir|
       system('git', 'init', '-q', dir)
