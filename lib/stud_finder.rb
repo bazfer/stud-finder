@@ -12,3 +12,5 @@ require_relative 'stud_finder/coverage/lcov'
 require_relative 'stud_finder/coverage/resultset'
 require_relative 'stud_finder/scorer'
 require_relative 'stud_finder/cli'
+
+require_relative 'stud_finder/session'
