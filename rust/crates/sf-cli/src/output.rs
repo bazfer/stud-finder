@@ -1,21 +1,31 @@
 //! Output format emitters for sf-cli: `table` (the default from the
-//! earlier slices), `json`, `csv`, `markdown`. Each format emits the
-//! Ruby and (when present) JavaScript sections side-by-side; the Ruby
-//! section carries the full 7-signal shape (fan_in / fan_out /
-//! complexity / churn / coupling / coverage / score / class), the JS
-//! section a narrower fan_in / fan_out / complexity shape.
+//! earlier slices), `json`, `csv`, `markdown`.
 //!
-//! JSON: one top-level object `{ ruby: [...], javascript: [...] }`
-//! with every ScoredFile field on each row (raw + percentile +
-//! composite + class + evidence + coverage partner). Missing
-//! sections are dropped (never present as empty arrays).
-//! CSV: one header row per section; the JS section prefaced by a
-//! `# JavaScript` comment line matching the table output.
-//! Markdown: pipe-tables with headers, one block per section headed
-//! `# Ruby` / `# JavaScript`.
+//! **IMPORTANT — these are sf-rust-native formats, NOT drop-in
+//! Ruby-compatible replacements.** Ohm's PR #82 review flagged that
+//! stud-finder Ruby's JSON contract includes `meta` + `warnings` +
+//! both section arrays (always present, never dropped) with row
+//! fields like `score` (not `composite`), `rank`, `language`,
+//! `newness`, `instability`, `loc`, `escalation`, and
+//! `coupling_partners` — none of which are implemented yet. Ruby
+//! CSV is a single stream with a `language` column and a
+//! RESULT_COLUMNS header, not two comment-separated sections.
 //!
-//! All emitters leave empty sections silent — a repo with no Ruby
-//! files emits only the JS block, and vice versa.
+//! Treat these formats as a partial initial implementation. The
+//! parity surface is tracked as a compatibility backlog on the
+//! stud-finder Rust port (see PR #82 discussion + ATTRIBUTION.md).
+//!
+//! Current shape:
+//!
+//! - JSON: `{ ruby: [...], javascript: [...] }`. Missing sections
+//!   drop out. Row fields = every ScoredFile field (raw signals +
+//!   `_pct` percentiles + composite + class + evidence + coupling
+//!   partner). No meta or warnings block yet.
+//! - CSV: `# Ruby` / `# JavaScript` comment headers separating two
+//!   independent sections with their own column headers.
+//! - Markdown: pipe-tables with headers + separator rows per section.
+//!
+//! All emitters leave empty sections silent.
 
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
@@ -151,12 +161,32 @@ fn emit_csv_js(rows: &[ScoredFile]) {
 }
 
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    // Per RFC 4180 fields containing ',', '"', CR, or LF must be
+    // double-quoted and inner quotes doubled.
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         let escaped = s.replace('"', "\"\"");
         format!("\"{escaped}\"")
     } else {
         s.to_string()
     }
+}
+
+/// Escape a cell value for a Markdown pipe-table row. Pipes must be
+/// backslash-escaped so they don't terminate the cell; newlines and
+/// carriage returns are HTML-encoded (`&#10;` / `&#13;`) so the row
+/// stays on one line. Ohm's non-blocking note on PR #82 flagged
+/// pipe/newline paths corrupting the table.
+fn md_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '|' => out.push_str("\\|"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn emit_markdown(sections: Sections<'_>) {
@@ -189,7 +219,7 @@ fn emit_markdown_ruby(rows: &[ScoredFile]) {
             r.churn_commits,
             format_ratio(r.max_coupling),
             format_ratio(r.coverage),
-            r.path.display(),
+            md_escape(&r.path.display().to_string()),
         );
     }
 }
@@ -205,7 +235,7 @@ fn emit_markdown_js(rows: &[ScoredFile]) {
             r.fan_in,
             r.fan_out,
             r.complexity,
-            r.path.display(),
+            md_escape(&r.path.display().to_string()),
         );
     }
 }

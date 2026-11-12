@@ -46,11 +46,13 @@ struct Cli {
     /// `csv` and `markdown` emit one headed section per language.
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     output: OutputFormat,
-    /// Keep only the top `N` rows per section (after sorting). `0` or
-    /// absent = keep all. Applies to the Ruby and JavaScript sections
+    /// Keep only the top `N` rows per section (after sorting). N
+    /// must be a positive integer (matches Ruby, which rejects
+    /// `--top 0` or negative with `--top must be positive`). Absent =
+    /// keep all. Applies to the Ruby and JavaScript sections
     /// independently.
-    #[arg(long, default_value_t = 0usize)]
-    top: usize,
+    #[arg(long, value_parser = parse_positive_top)]
+    top: Option<usize>,
     /// Only emit rows for files changed between `<REF>` and HEAD.
     /// Resolves by shelling out to `git diff --name-only <REF>...HEAD`
     /// (merge-base-based three-dot). Non-git-repo or git failure
@@ -150,27 +152,29 @@ fn main() -> Result<()> {
     };
 
     // --- Diff-base filter (applied BEFORE --top) ---
+    // An explicitly-requested --diff-base that CAN'T be satisfied
+    // (missing git, non-repo, bad ref) is a hard failure: exit
+    // non-zero rather than silently emitting the whole repo. Matches
+    // Ruby `Diff` which raises on the same conditions. An empty-but-
+    // successful diff is a valid filter — the result is the empty
+    // set, not "no filter".
     if let Some(base) = cli.diff_base.as_deref() {
         match diff_names(&cli.path, base) {
-            Ok(Some(changed)) => {
+            Ok(changed) => {
                 ruby_rows.retain(|r| changed.contains(&r.path));
                 js_rows.retain(|r| changed.contains(&r.path));
             }
-            Ok(None) => {
-                eprintln!(
-                    "stud-finder: --diff-base yielded no filter (not a git repo or empty diff); emitting all rows"
-                );
-            }
             Err(err) => {
-                eprintln!("stud-finder: --diff-base failed ({err}); emitting all rows");
+                eprintln!("stud-finder: --diff-base failed: {err}");
+                std::process::exit(2);
             }
         }
     }
 
     // --- Top-N filter (applied per section, AFTER diff filter) ---
-    if cli.top > 0 {
-        ruby_rows.truncate(cli.top);
-        js_rows.truncate(cli.top);
+    if let Some(n) = cli.top {
+        ruby_rows.truncate(n);
+        js_rows.truncate(n);
     }
 
     // --- Emit ---
@@ -199,6 +203,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn parse_positive_top(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| "--top must be a positive integer".to_string())?;
+    if n == 0 {
+        // Matches Ruby `--top must be positive` validation. Avoids the
+        // "0 = unlimited" ambiguity that masks a caller passing 0 by
+        // mistake.
+        return Err("--top must be positive".to_string());
+    }
+    Ok(n)
+}
+
 fn sort_rows(rows: &mut [ScoredFile]) {
     rows.sort_by(|a, b| {
         a.class
@@ -213,40 +230,68 @@ fn sort_rows(rows: &mut [ScoredFile]) {
     });
 }
 
-/// Returns the set of repo-root-relative paths that changed between
-/// `base` and HEAD via `git diff --name-only <base>...HEAD`. Returns
-/// `Ok(None)` for a clean "no filter" degradation (missing git, not
-/// a repo). Any other git failure returns `Err` with a descriptive
-/// message the CLI surfaces as a stderr warning.
-fn diff_names(repo_root: &Path, base: &str) -> Result<Option<HashSet<PathBuf>>, String> {
+/// Returns the set of SCAN-ROOT-RELATIVE paths that changed between
+/// `base` and HEAD. Uses `--relative` so paths are emitted relative
+/// to the `-C` directory (= the scan root), matching the identity the
+/// CLI uses for scored rows — fixes nested-scan drops where the scan
+/// root is a subdirectory of the repo (Ohm's P1 on PR #82). `-z`
+/// makes the stream NUL-delimited so paths with tabs, newlines, or
+/// non-ASCII bytes come through unquoted — git's default output
+/// quotes such paths, which broke the previous lossy-UTF8 split.
+///
+/// Returns `Err` on missing git, non-repo, bad ref, any other git
+/// failure, or non-UTF8 path bytes we can't form a `PathBuf` from.
+/// An empty but successful diff returns `Ok(empty set)`, NOT no-
+/// filter — matches Ruby `Diff` semantics so "nothing changed" means
+/// zero scored rows, not the whole repo.
+fn diff_names(repo_root: &Path, base: &str) -> Result<HashSet<PathBuf>, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("diff")
         .arg("--name-only")
+        .arg("-z")
+        .arg("--relative")
         .arg(format!("{base}...HEAD"))
         .stdin(Stdio::null())
         .output();
     let output = match output {
         Ok(o) => o,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(None); // git not installed → no filter.
+            return Err("git not found in PATH".to_string());
         }
         Err(err) => return Err(err.to_string()),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("not a git repository") {
-            return Ok(None);
-        }
         return Err(stderr.trim().to_string());
     }
-    let changed: HashSet<PathBuf> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect();
-    Ok(Some(changed))
+    // `-z` splits records on NUL, no trailing NUL required but
+    // typically present. Each record is the raw path bytes — no git
+    // quoting applied. Skip empties from a trailing NUL.
+    let mut changed: HashSet<PathBuf> = HashSet::new();
+    for chunk in output.stdout.split(|&b| b == 0u8) {
+        if chunk.is_empty() {
+            continue;
+        }
+        // On Unix, path bytes can be any non-NUL. Use from_utf8 since
+        // our file-set is already keyed by String-compatible paths
+        // (walkdir -> strip_prefix -> PathBuf). Non-UTF8 paths would
+        // also fail that pipeline, so refuse here consistently rather
+        // than let a mismatched pair silently drop a row.
+        match std::str::from_utf8(chunk) {
+            Ok(s) => {
+                changed.insert(PathBuf::from(s));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "git diff emitted a path with non-UTF8 bytes ({} bytes); unsupported",
+                    chunk.len()
+                ));
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
