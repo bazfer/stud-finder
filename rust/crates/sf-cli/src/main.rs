@@ -6,12 +6,13 @@
 //! (class rank, score desc, path asc). JS/TS files are still
 //! unprocessed this slice — they land with `sf-js` in a later PR.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
 use sf_core::{DependencyGraph, FileRef, Language};
-use sf_score::{ScoredFile, Scorer};
+use sf_score::{ScoredFile, Scorer, Signals};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -33,8 +34,12 @@ fn main() -> Result<()> {
     // distribution and depress Ruby percentiles). sf-js builds its own
     // graph in a later slice; each language gets its own ranking
     // section, matching the Ruby implementation.
-    let graph = build_graph(&cli.path, &files);
-    let scored = Scorer::new().score(&graph);
+    let (graph, complexity) = build_signals(&cli.path, &files);
+    let signals = Signals {
+        graph: &graph,
+        complexity,
+    };
+    let scored = Scorer::new().score_with_signals(signals);
     let mut rows = scored;
     rows.sort_by(|a, b| {
         a.class
@@ -85,8 +90,9 @@ fn collect(root: &Path) -> Vec<FileRef> {
     out
 }
 
-fn build_graph(root: &Path, files: &[FileRef]) -> DependencyGraph {
+fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
     let mut graph = DependencyGraph::new();
+    let mut complexity: HashMap<PathBuf, usize> = HashMap::new();
     // Register only Ruby files — JS/TS files have no reference extractor
     // this slice and would otherwise distort the percentile distribution
     // (every JS file would sit at fan_in=0, fan_out=0 and push the Ruby
@@ -106,8 +112,9 @@ fn build_graph(root: &Path, files: &[FileRef]) -> DependencyGraph {
         for r in sf_ruby::extract_refs(&file.path, &source) {
             graph.add_reference(file.path.clone(), r.name);
         }
+        complexity.insert(file.path.clone(), sf_ruby::max_complexity(&source));
     }
-    graph
+    (graph, complexity)
 }
 
 fn print_table(rows: &[ScoredFile]) {
@@ -129,31 +136,41 @@ fn print_table(rows: &[ScoredFile]) {
         .max()
         .unwrap_or(1)
         .max("fan_out".len());
+    let complexity_width = rows
+        .iter()
+        .map(|r| width_of(r.complexity))
+        .max()
+        .unwrap_or(1)
+        .max("complexity".len());
     let score_width = "0.0000".len();
 
     println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  file",
+        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  file",
         "class",
         "score",
         "fan_in",
         "fan_out",
+        "complexity",
         cw = class_width,
         sw = score_width,
         fi = fan_in_width,
         fo = fan_out_width,
+        cx = complexity_width,
     );
     for r in rows {
         println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {}",
+            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {}",
             r.class.as_str(),
             r.composite,
             r.fan_in,
             r.fan_out,
+            r.complexity,
             r.path.display(),
             cw = class_width,
             sw = score_width,
             fi = fan_in_width,
             fo = fan_out_width,
+            cx = complexity_width,
         );
     }
 }
