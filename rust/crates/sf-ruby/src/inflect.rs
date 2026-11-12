@@ -21,7 +21,11 @@
 /// `plural` is true for `has_many` and `has_and_belongs_to_many`; the name
 /// gets singularized before the Pascal pass.
 pub fn associate_to_class(name: &str, plural: bool) -> String {
-    let singular = if plural { singularize(name) } else { name.to_string() };
+    let singular = if plural {
+        singularize(name)
+    } else {
+        name.to_string()
+    };
     pascalize(&singular)
 }
 

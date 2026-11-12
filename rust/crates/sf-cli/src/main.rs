@@ -36,7 +36,13 @@ fn collect(root: &Path) -> Vec<FileRef> {
         let entry = match result {
             Ok(entry) => entry,
             Err(err) => {
-                eprintln!("stud-finder: skip {}: {}", err.path().map(Path::display).map_or_else(|| "<unknown>".to_string(), |p| p.to_string()), err);
+                eprintln!(
+                    "stud-finder: skip {}: {}",
+                    err.path()
+                        .map(Path::display)
+                        .map_or_else(|| "<unknown>".to_string(), |p| p.to_string()),
+                    err
+                );
                 continue;
             }
         };
@@ -94,7 +100,7 @@ fn print_table(graph: &DependencyGraph, files: &[FileRef]) {
         .unwrap_or(1)
         .max("fan_in".len());
 
-    println!("{:>width$}  {}", "fan_in", "file", width = widest);
+    println!("{:>width$}  file", "fan_in", width = widest);
     for (fan_in, path) in rows {
         println!("{:>width$}  {}", fan_in, path.display(), width = widest);
     }

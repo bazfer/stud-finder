@@ -81,9 +81,7 @@ impl Visitor {
         // at the top of a class body, with no receiver. `some_obj.has_many(:xs)`
         // is a user call on an unrelated object — not a Rails edge.
         let receiver = call.receiver();
-        let receiverless = receiver
-            .as_ref()
-            .is_none_or(|r| r.as_self_node().is_some());
+        let receiverless = receiver.as_ref().is_none_or(|r| r.as_self_node().is_some());
 
         let association_plural = match method {
             b"has_many" | b"has_and_belongs_to_many" => Some(true),
@@ -160,10 +158,7 @@ fn extract_class_name_option(call: &CallNode<'_>) -> Option<String> {
             let value = assoc.value();
             if let Some(str_node) = value.as_string_node() {
                 if let Ok(literal) = std::str::from_utf8(str_node.unescaped()) {
-                    let normalized = literal
-                        .strip_prefix("::")
-                        .unwrap_or(literal)
-                        .to_string();
+                    let normalized = literal.strip_prefix("::").unwrap_or(literal).to_string();
                     if !normalized.is_empty() {
                         return Some(normalized);
                     }

@@ -85,9 +85,7 @@ impl DependencyGraph {
         let defining_set: HashSet<&Path> = defining.iter().map(PathBuf::as_path).collect();
         self.outgoing
             .iter()
-            .filter(|(from, refs)| {
-                !defining_set.contains(from.as_path()) && refs.contains(&class)
-            })
+            .filter(|(from, refs)| !defining_set.contains(from.as_path()) && refs.contains(&class))
             .count()
     }
 

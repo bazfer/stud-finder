@@ -4,7 +4,7 @@
 //! kinds we care about this slice: bare constants, constant paths, Rails
 //! associations (singular + plural), and `class_name:` literal overrides.
 
-use sf_ruby::{extract_refs, RefKind, RubyRef};
+use sf_ruby::{RefKind, RubyRef, extract_refs};
 use std::path::Path;
 
 fn names(refs: &[RubyRef], kind: RefKind) -> Vec<&str> {
@@ -39,10 +39,7 @@ fn extracts_constant_paths() {
     "#;
     let refs = extract_refs(Path::new("app/services/thing.rb"), src);
     let constants = names(&refs, RefKind::Constant);
-    assert!(
-        constants.contains(&"Billing::Invoice"),
-        "got {constants:?}"
-    );
+    assert!(constants.contains(&"Billing::Invoice"), "got {constants:?}");
     assert!(
         constants.contains(&"Admin::Reports::Daily"),
         "got {constants:?}"
@@ -98,10 +95,7 @@ fn class_name_option_overrides_name() {
     let refs = extract_refs(Path::new("app/models/post.rb"), src);
     let overrides = names(&refs, RefKind::ClassNameOption);
     assert!(overrides.contains(&"User"), "got {overrides:?}");
-    assert!(
-        overrides.contains(&"Admin::Reviewer"),
-        "got {overrides:?}"
-    );
+    assert!(overrides.contains(&"Admin::Reviewer"), "got {overrides:?}");
 }
 
 #[test]
