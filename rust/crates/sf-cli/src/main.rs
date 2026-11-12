@@ -40,7 +40,14 @@ fn main() -> Result<()> {
 
 fn collect(root: &Path) -> Vec<FileRef> {
     let mut out = Vec::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+    for result in WalkDir::new(root) {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!("stud-finder: skip {}: {}", err.path().map(Path::display).map_or_else(|| "<unknown>".to_string(), |p| p.to_string()), err);
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
