@@ -2,7 +2,7 @@ name: Stud Finder self-scan
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, rust]
 
 permissions:
   contents: read
