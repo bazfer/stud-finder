@@ -2,6 +2,7 @@
 name = "sf-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -15,3 +16,4 @@ anyhow.workspace = true
 clap.workspace = true
 walkdir.workspace = true
 sf-core.workspace = true
+sf-ruby = { path = "../sf-ruby" }

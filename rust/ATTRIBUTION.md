@@ -36,10 +36,10 @@ to ripple so lifts can reference it directly.
 
 ## Lifts
 
-None yet. Entries get added here as code is adapted. Each row names the
-local path, the ripple source commit and path, and a one-line note on
-what was kept or changed.
+Entries get added here as code is adapted. Each row names the local
+path, the ripple source commit and path, and a one-line note on what was
+kept or changed.
 
 | Local path | ripple source (commit : path) | Notes |
 |------------|-------------------------------|-------|
-| _(none yet)_ | | |
+| `rust/crates/sf-ruby/src/visitor.rs` | 6604d76 : `crates/ripple-ruby/src/rails.rs` | Adapted — kept the DSL trigger set, the receiverless-call dispatch on the method name as bytes, and the pattern of walking `CallNode` nodes. Reduced scope to this slice's four reference kinds (bare constants, constant paths, Rails association DSL, `class_name:` option) and dropped the controller/action, HTTP-request, `require`/`require_relative`, `constantize`/`const_get`, render/layout, and serializer-model logic. Preserved MIT copyright + permission notice naming Saugat Khadka as copyright holder for the lifted portions, at the top of the receiving file. |
