@@ -42,6 +42,7 @@ fn signals_with_complexity<'a>(
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: None,
     }
 }
 
@@ -318,6 +319,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: None,
     };
     let rows_no_floor = no_cx_floor.score_with_signals(signals);
     let spiky_no_floor = row(&rows_no_floor, "spiky.rb");
@@ -330,6 +332,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: None,
     };
     let rows_default = Scorer::new().score_with_signals(default_signals);
     let spiky_default = row(&rows_default, "spiky.rb");
@@ -360,6 +363,7 @@ fn complexity_floor_never_downgrades_trunk_or_branch() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: None,
     };
     let rows = Scorer::new().score_with_signals(signals);
     let top = row(&rows, "top.rb");
@@ -390,6 +394,7 @@ fn signals_with_churn<'a>(
         churn_commits: churn_c,
         churn_lines: churn_l,
         coupling: HashMap::new(),
+        coverage: None,
     }
 }
 
@@ -528,6 +533,7 @@ fn coupling_appears_in_row_and_lifts_composite() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling,
+        coverage: None,
     };
     let rows = Scorer::new().score_with_signals(signals);
     let a = row(&rows, "a.rb");
@@ -579,6 +585,7 @@ fn empty_coupling_map_degenerates_to_four_signal_mode() {
             .map(|(p, _, l)| (PathBuf::from(*p), *l))
             .collect(),
         coupling: HashMap::new(),
+        coverage: None,
     };
     let rows_four_cp_empty = Scorer::new().score_with_signals(signals_four_empty_cp);
 
@@ -635,6 +642,7 @@ fn churn_composite_rounds_near_ties_before_ranking() {
         churn_commits: churn_c,
         churn_lines: churn_l,
         coupling: HashMap::new(),
+        coverage: None,
     };
     let rows = Scorer::new().score_with_signals(signals);
     let pct_for = |name: &str| {
@@ -661,6 +669,296 @@ fn churn_composite_rounds_near_ties_before_ranking() {
         pct_for("f0.rb"),
         pct_for("f3.rb")
     );
+}
+
+// --- 6- and 7-signal mode with coverage + interaction ---
+
+fn signals_with_coverage<'a>(
+    graph: &'a DependencyGraph,
+    complexities: &[(&str, usize)],
+    churn: &[(&str, usize, usize)],
+    coverage: &[(&str, f64)],
+) -> Signals<'a> {
+    let mut cx = HashMap::new();
+    for (p, c) in complexities {
+        cx.insert(PathBuf::from(*p), *c);
+    }
+    let mut churn_c = HashMap::new();
+    let mut churn_l = HashMap::new();
+    for (p, c, l) in churn {
+        churn_c.insert(PathBuf::from(*p), *c);
+        churn_l.insert(PathBuf::from(*p), *l);
+    }
+    let mut cov = HashMap::new();
+    for (p, v) in coverage {
+        cov.insert(PathBuf::from(*p), *v);
+    }
+    Signals {
+        graph,
+        complexity: cx,
+        churn_commits: churn_c,
+        churn_lines: churn_l,
+        coupling: HashMap::new(),
+        coverage: Some(cov),
+    }
+}
+
+#[test]
+fn six_signal_weights_renormalize_to_one() {
+    // With coverage active, Ruby's `active_total` becomes
+    // 0.19 + 0.095 + 0.2375 + 0.2375 + 0.095 (coverage) + 0.095 (interaction)
+    // = 0.95, and each weight divides through. Base ratio 4:2:5:5 stays.
+    let sum_six = BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION;
+    let w_fi = BASE_WEIGHT_FAN_IN / sum_six;
+    let w_fo = BASE_WEIGHT_FAN_OUT / sum_six;
+    let w_cx = BASE_WEIGHT_COMPLEXITY / sum_six;
+    let w_ch = BASE_WEIGHT_CHURN / sum_six;
+    let w_cov = BASE_WEIGHT_COVERAGE / sum_six;
+    let w_int = EXTRA_WEIGHT_INTERACTION / sum_six;
+    assert!((w_fi + w_fo + w_cx + w_ch + w_cov + w_int - 1.0).abs() < 1e-12);
+    // Base ratio preserved.
+    assert!((w_fi / w_fo - 2.0).abs() < 1e-9);
+    assert!((w_cx / w_fo - 2.5).abs() < 1e-9);
+    assert!((w_ch / w_fo - 2.5).abs() < 1e-9);
+    // Coverage shares w_fo's absolute value.
+    assert!((w_cov - w_fo).abs() < 1e-12);
+    // Interaction extra matches coverage magnitude.
+    assert!((w_int - w_cov).abs() < 1e-12);
+}
+
+#[test]
+fn seven_signal_renormalization_with_coupling_sums_to_one() {
+    let sum_seven = BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + EXTRA_WEIGHT_COUPLING
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION;
+    let total = (BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + EXTRA_WEIGHT_COUPLING
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION)
+        / sum_seven;
+    assert!((total - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn coverage_appears_in_row_and_lifts_composite() {
+    let mut g = DependencyGraph::new();
+    g.register_file("a.rb");
+    g.register_file("b.rb");
+    g.add_reference("a.rb", "External");
+    g.add_reference("b.rb", "External");
+
+    // a.rb has 100% coverage; b.rb has 0% coverage. Everything else
+    // equal (same fan_in / fan_out / complexity / churn). Per Ruby
+    // `coverage_risk_values = 1.0 - coverage`, b.rb's risk is 1.0
+    // (uncovered = risky) and a.rb's risk is 0.0, so coverage_pct
+    // = risk_pct flips the ordering: b now ranks higher on
+    // coverage_pct and so OUT-SCORES a on composite.
+    let signals = signals_with_coverage(&g, &[], &[], &[("a.rb", 1.0), ("b.rb", 0.0)]);
+    let rows = Scorer::new().score_with_signals(signals);
+    let a = row(&rows, "a.rb");
+    let b = row(&rows, "b.rb");
+    assert_eq!(a.coverage, 1.0);
+    assert_eq!(b.coverage, 0.0);
+    assert!(
+        (a.coverage_pct - 0.0).abs() < 1e-9,
+        "100%-covered file has risk 0.0 → risk_pct 0.0, got {}",
+        a.coverage_pct
+    );
+    assert!(
+        (b.coverage_pct - 1.0).abs() < 1e-9,
+        "0%-covered file has risk 1.0 → risk_pct 1.0, got {}",
+        b.coverage_pct
+    );
+    assert!(
+        b.composite > a.composite,
+        "risk-based composite must put the uncovered file above the covered one"
+    );
+}
+
+#[test]
+fn coverage_risk_direction_golden_at_0_50_100() {
+    // Ohm's P1 regression fixture: three otherwise-identical files at
+    // 0%, 50%, 100% coverage must receive DECREASING risk
+    // contributions (so the 0% file has the highest coverage_pct and
+    // 100% the lowest).
+    let mut g = DependencyGraph::new();
+    g.register_file("empty.rb");
+    g.register_file("half.rb");
+    g.register_file("full.rb");
+
+    let signals = signals_with_coverage(
+        &g,
+        &[],
+        &[],
+        &[("empty.rb", 0.0), ("half.rb", 0.5), ("full.rb", 1.0)],
+    );
+    let rows = Scorer::new().score_with_signals(signals);
+    let empty = row(&rows, "empty.rb");
+    let half = row(&rows, "half.rb");
+    let full = row(&rows, "full.rb");
+    // empty has the LOWEST raw coverage, so HIGHEST risk, so HIGHEST
+    // coverage_pct — matches Ruby `coverage_risk_pct` direction.
+    assert!(empty.coverage_pct > half.coverage_pct);
+    assert!(half.coverage_pct > full.coverage_pct);
+    // Composite follows: empty > half > full on risk-based composite.
+    assert!(empty.composite > half.composite);
+    assert!(half.composite > full.composite);
+}
+
+#[test]
+fn interaction_cross_term_is_fan_in_risk_product() {
+    // Ruby `interaction_score = w_int * fan_in_pct * pcts[:coverage]`
+    // where `pcts[:coverage]` is the risk percentile. The cross-term
+    // lifts the composite when BOTH fan_in and uncovered-risk are
+    // high — not when fan_in is high and coverage is high.
+    //
+    // Fixture: a load-bearing but UNCOVERED file (hot.rb: fan_in big,
+    // coverage 0.0 → risk 1.0) should score higher than an equally
+    // load-bearing but FULLY-COVERED file (safe.rb: same fan_in,
+    // coverage 1.0 → risk 0.0). The two leaves have identical graph
+    // signals; only coverage differs.
+    let mut g = DependencyGraph::new();
+    g.register_file("hot.rb");
+    g.register_file("safe.rb");
+    g.register_file("c.rb");
+    g.register_file("d.rb");
+    g.add_reference("c.rb", "Hot");
+    g.add_reference("c.rb", "Safe");
+    g.add_reference("d.rb", "Hot");
+    g.add_reference("d.rb", "Safe");
+
+    let signals = signals_with_coverage(
+        &g,
+        &[],
+        &[],
+        &[
+            ("hot.rb", 0.0),
+            ("safe.rb", 1.0),
+            ("c.rb", 0.5),
+            ("d.rb", 0.5),
+        ],
+    );
+    let rows = Scorer::new().score_with_signals(signals);
+    let hot = row(&rows, "hot.rb");
+    let safe = row(&rows, "safe.rb");
+    // Same fan_in (2 each), same graph signals.
+    assert_eq!(hot.fan_in, safe.fan_in);
+    // Opposite risk percentiles.
+    assert!(hot.coverage_pct > safe.coverage_pct);
+    // The interaction cross-term uses fan_in_pct * coverage_pct
+    // (where coverage_pct is now RISK percentile). Hot has
+    // fan_in_pct * ~1.0 contribution; safe has fan_in_pct * ~0.0.
+    // Hot must out-score safe on composite.
+    assert!(
+        hot.composite > safe.composite,
+        "uncovered load-bearing file should outscore its covered twin"
+    );
+}
+
+#[test]
+fn absent_coverage_degrades_to_five_signal_mode() {
+    // Ruby `coverage_available? = !@coverage.nil?`. When the caller
+    // passes `coverage: None`, coverage + interaction must drop out
+    // of the composite and the run matches the 5-signal path.
+    let g = tiny_graph();
+    let cx_entries: Vec<(&str, usize)> = vec![
+        ("app/models/order.rb", 5),
+        ("app/models/user.rb", 3),
+        ("app/models/profile.rb", 2),
+        ("app/services/checkout.rb", 4),
+        ("app/services/noop.rb", 1),
+    ];
+    let churn_entries: Vec<(&str, usize, usize)> = vec![
+        ("app/models/order.rb", 10, 100),
+        ("app/models/user.rb", 5, 60),
+        ("app/models/profile.rb", 3, 20),
+        ("app/services/checkout.rb", 7, 80),
+        ("app/services/noop.rb", 1, 5),
+    ];
+    let rows_four =
+        Scorer::new().score_with_signals(signals_with_churn(&g, &cx_entries, &churn_entries));
+    // Same signals but coverage explicitly None.
+    let rows_cov_empty = Scorer::new().score_with_signals(Signals {
+        graph: &g,
+        complexity: cx_entries
+            .iter()
+            .map(|(p, c)| (PathBuf::from(*p), *c))
+            .collect(),
+        churn_commits: churn_entries
+            .iter()
+            .map(|(p, c, _)| (PathBuf::from(*p), *c))
+            .collect(),
+        churn_lines: churn_entries
+            .iter()
+            .map(|(p, _, l)| (PathBuf::from(*p), *l))
+            .collect(),
+        coupling: HashMap::new(),
+        coverage: None,
+    });
+    assert_eq!(rows_four.len(), rows_cov_empty.len());
+    for a in &rows_four {
+        let b = rows_cov_empty.iter().find(|r| r.path == a.path).unwrap();
+        assert!((a.composite - b.composite).abs() < 1e-9);
+        assert_eq!(a.class, b.class);
+        assert_eq!(b.coverage, 0.0);
+        assert_eq!(b.coverage_pct, 0.0);
+    }
+}
+
+#[test]
+fn provided_empty_coverage_still_activates_signal() {
+    // Ruby `coverage_available? = !@coverage.nil?` — an explicitly
+    // provided empty report still activates coverage + interaction.
+    // Every file defaults to 0.0 coverage (risk 1.0) via
+    // `@coverage.fetch(file, 0.0)` in `coverage_risk_values`.
+    // Fixes Ohm's P2 on PR #80 (map-emptiness gate was collapsing
+    // this case into the "unavailable" branch).
+    let g = tiny_graph();
+    // Signals with coverage: Some(empty HashMap).
+    let signals = Signals {
+        graph: &g,
+        complexity: HashMap::new(),
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling: HashMap::new(),
+        coverage: Some(HashMap::new()),
+    };
+    let rows = Scorer::new().score_with_signals(signals);
+    // Every file defaulted to coverage = 0.0 (risk 1.0). That's an
+    // all-tied risk signal → insufficient dispersion → risk_pct = 0.0
+    // for every file. But the SIGNAL is still active (it's in the
+    // composite's weight denominator).
+    //
+    // Composite(two-signal baseline) uses active_total = 0.285 (fan_in + fan_out).
+    // Composite(two + coverage) uses active_total = 0.285 + 0.095 + 0.095 = 0.475.
+    // The fan_in_pct/fan_out_pct contributions are re-weighted: they
+    // get divided by a LARGER denominator, so each row's composite
+    // SHRINKS vs the two-signal baseline. Verify this by comparing.
+    let signals_baseline = Signals::from_graph(&g);
+    let baseline_rows = Scorer::new().score_with_signals(signals_baseline);
+    for r in &rows {
+        let b = baseline_rows.iter().find(|x| x.path == r.path).unwrap();
+        if b.composite > 0.0 {
+            assert!(
+                r.composite < b.composite,
+                "activating empty coverage must renormalize weights, shrinking composite; got {} vs baseline {}",
+                r.composite,
+                b.composite
+            );
+        }
+    }
 }
 
 #[test]

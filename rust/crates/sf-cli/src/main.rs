@@ -30,6 +30,12 @@ use walkdir::WalkDir;
 struct Cli {
     /// Repository path to scan.
     path: PathBuf,
+    /// Path to a coverage report (SimpleCov `resultset.json`, LCOV
+    /// `.info`, or Cobertura XML). Format is picked by extension.
+    /// When provided, enables the coverage signal + the interaction
+    /// cross-term in the composite.
+    #[arg(long)]
+    coverage: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -84,12 +90,20 @@ fn main() -> Result<()> {
         })
         .collect();
 
+    // Coverage (optional, from --coverage flag). `None` means the
+    // flag wasn't provided — coverage + interaction stay out of the
+    // composite. `Some(_)` activates both signals even if the loaded
+    // report ended up empty (Ruby `coverage_available? = !@coverage.nil?`
+    // semantics).
+    let coverage = load_coverage(cli.coverage.as_deref(), &cli.path, &ruby_refs);
+
     let signals = Signals {
         graph: &graph,
         complexity,
         churn_commits: history.churn_commits,
         churn_lines: history.churn_lines,
         coupling,
+        coverage,
     };
     let scored = Scorer::new().score_with_signals(signals);
     let mut rows = scored;
@@ -198,6 +212,50 @@ fn analyze_ruby_source(source: &str) -> Analysis {
     Analysis::Included(refs, report.complexity)
 }
 
+/// Load a coverage report when `--coverage <path>` is supplied.
+/// Errors are non-fatal — they print to stderr and the run proceeds
+/// with an empty coverage map (coverage + interaction drop out of
+/// the composite). Missing files reported by sf-coverage are logged
+/// as a single informational line, matching Ruby CLI behaviour.
+fn load_coverage(
+    path: Option<&Path>,
+    root: &Path,
+    files: &[&Path],
+) -> Option<HashMap<PathBuf, f64>> {
+    // `None` → user didn't pass --coverage; coverage + interaction
+    // stay out of the composite. `Some(_)` activates both signals
+    // even if the loaded map is empty (Ruby
+    // `coverage_available? = !@coverage.nil?`). On load failure we
+    // also return `None` so the run degrades cleanly instead of
+    // activating an all-risk-1.0 column that would mislead.
+    let path = path?;
+    match sf_coverage::load(path, root, files) {
+        Ok(report) => {
+            if !report.missing_files.is_empty() {
+                eprintln!(
+                    "stud-finder: {} files in the dependency graph had no coverage entry",
+                    report.missing_files.len()
+                );
+            }
+            for warning in &report.warnings {
+                match warning {
+                    sf_coverage::CoverageWarning::UnmatchedReportedPath(p) => eprintln!(
+                        "stud-finder: coverage report path `{p}` did not match any Ruby file"
+                    ),
+                }
+            }
+            Some(report.coverage_pct)
+        }
+        Err(err) => {
+            eprintln!(
+                "stud-finder: failed to load coverage report `{}`: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +343,7 @@ mod tests {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
+            coverage: None,
         });
         let clean_rows = scorer.score_with_signals(Signals {
             graph: &g_clean,
@@ -292,6 +351,7 @@ mod tests {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
+            coverage: None,
         });
 
         assert_eq!(
@@ -352,12 +412,12 @@ fn print_table(rows: &[ScoredFile]) {
         .max()
         .unwrap_or(1)
         .max("churn".len());
-    // coupling column is `0.00` style (ratio) — fixed width.
     let coupling_width = "0.00".len().max("coupling".len());
+    let coverage_width = "0.00".len().max("coverage".len());
     let score_width = "0.0000".len();
 
     println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$}  file",
+        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$}  {:>cv$}  file",
         "class",
         "score",
         "fan_in",
@@ -365,6 +425,7 @@ fn print_table(rows: &[ScoredFile]) {
         "complexity",
         "churn",
         "coupling",
+        "coverage",
         cw = class_width,
         sw = score_width,
         fi = fan_in_width,
@@ -372,10 +433,11 @@ fn print_table(rows: &[ScoredFile]) {
         cx = complexity_width,
         ch = churn_width,
         cp = coupling_width,
+        cv = coverage_width,
     );
     for r in rows {
         println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$.2}  {}",
+            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$.2}  {:>cv$.2}  {}",
             r.class.as_str(),
             r.composite,
             r.fan_in,
@@ -383,6 +445,7 @@ fn print_table(rows: &[ScoredFile]) {
             r.complexity,
             r.churn_commits,
             r.max_coupling,
+            r.coverage,
             r.path.display(),
             cw = class_width,
             sw = score_width,
@@ -391,6 +454,7 @@ fn print_table(rows: &[ScoredFile]) {
             cx = complexity_width,
             ch = churn_width,
             cp = coupling_width,
+            cv = coverage_width,
         );
     }
 }

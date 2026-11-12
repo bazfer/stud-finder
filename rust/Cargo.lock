@@ -232,6 +232,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "ruby-prism"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -324,6 +330,7 @@ dependencies = [
  "anyhow",
  "clap",
  "sf-core",
+ "sf-coverage",
  "sf-history",
  "sf-ruby",
  "sf-score",
@@ -334,6 +341,15 @@ dependencies = [
 [[package]]
 name = "sf-core"
 version = "0.0.0"
+
+[[package]]
+name = "sf-coverage"
+version = "0.0.0"
+dependencies = [
+ "roxmltree",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "sf-history"
