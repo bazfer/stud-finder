@@ -18,6 +18,7 @@ walkdir.workspace = true
 sf-core.workspace = true
 sf-coverage.workspace = true
 sf-history.workspace = true
+sf-js.workspace = true
 sf-ruby = { path = "../sf-ruby" }
 sf-score = { path = "../sf-score" }
 
