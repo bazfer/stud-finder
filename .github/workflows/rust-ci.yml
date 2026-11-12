@@ -1,0 +1,122 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main, rust]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-ci.yml'
+  pull_request:
+    branches: [main, rust]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-ci.yml'
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: check-workspace
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f rust/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_NAME}" = "rust" ] || [ "${GITHUB_BASE_REF}" = "rust" ]; then
+            echo "::error::rust/Cargo.toml is missing on a rust-targeted ref — the Rust CI gate cannot be skipped here."
+            exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::rust/ workspace absent on this ref (pre-port main) — skipping."
+          fi
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - if: steps.check-workspace.outputs.present == 'true'
+        run: cargo fmt --all --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: check-workspace
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f rust/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_NAME}" = "rust" ] || [ "${GITHUB_BASE_REF}" = "rust" ]; then
+            echo "::error::rust/Cargo.toml is missing on a rust-targeted ref — the Rust CI gate cannot be skipped here."
+            exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::rust/ workspace absent on this ref (pre-port main) — skipping."
+          fi
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - if: steps.check-workspace.outputs.present == 'true'
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: check-workspace
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f rust/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_NAME}" = "rust" ] || [ "${GITHUB_BASE_REF}" = "rust" ]; then
+            echo "::error::rust/Cargo.toml is missing on a rust-targeted ref — the Rust CI gate cannot be skipped here."
+            exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::rust/ workspace absent on this ref (pre-port main) — skipping."
+          fi
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - if: steps.check-workspace.outputs.present == 'true'
+        run: cargo test --locked --all-targets
+
+  msrv:
+    name: cargo check (MSRV 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: check-workspace
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f rust/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_NAME}" = "rust" ] || [ "${GITHUB_BASE_REF}" = "rust" ]; then
+            echo "::error::rust/Cargo.toml is missing on a rust-targeted ref — the Rust CI gate cannot be skipped here."
+            exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::rust/ workspace absent on this ref (pre-port main) — skipping."
+          fi
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@1.85
+      - if: steps.check-workspace.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - if: steps.check-workspace.outputs.present == 'true'
+        run: cargo check --locked --all-targets
