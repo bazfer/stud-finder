@@ -25,11 +25,13 @@
 //! scope resolution, non-trivial pluralization. All of those land in
 //! future slices.
 
+mod complexity;
 mod inflect;
 mod visitor;
 
 use std::path::{Path, PathBuf};
 
+pub use complexity::{ComplexityReport, max_complexity};
 pub use inflect::associate_to_class;
 
 /// A single reference pulled out of a Ruby file.
