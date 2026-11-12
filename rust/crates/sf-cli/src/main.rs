@@ -160,12 +160,13 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
     let mut graph = DependencyGraph::new();
     let mut complexity: HashMap<PathBuf, usize> = HashMap::new();
 
-    // Register every discovered JS/TS file first so refs can resolve
-    // via sf-core's registered-set check.
-    for file in files.iter().filter(|f| f.language == Language::JavaScript) {
-        graph.register_file(file.path.clone());
-    }
-
+    // Pre-flight parse each JS file so we know which ones to EXCLUDE
+    // from the scored population. Matches Ohm's exclusion-not-
+    // imputation policy from PR #78, now applied to JS: a file that
+    // fails to parse must not be registered + must not sink its
+    // neighbours' percentiles. Fixes Ohm's parse-error zero-imputation
+    // callout on PR #81.
+    let mut included: Vec<(&Path, String, usize)> = Vec::new();
     for file in files.iter().filter(|f| f.language == Language::JavaScript) {
         let abs = root.join(&file.path);
         let source = match std::fs::read_to_string(&abs) {
@@ -175,43 +176,30 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
                 continue;
             }
         };
-        let report = sf_js::max_complexity(&source);
+        let report = sf_js::max_complexity(&source, Some(file.path.as_path()));
         if !report.parsed_cleanly {
             eprintln!(
-                "stud-finder: {} had parse errors; excluding from JS complexity",
+                "stud-finder: {} had parse errors; excluding the file from the JS scored population",
                 file.path.display()
             );
             continue;
         }
-        complexity.insert(file.path.clone(), report.complexity);
-        // Resolve refs. sf_js returns extensionless targets; try the
-        // registered-set for `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs`
-        // and the `/index.*` form, matching the loop spec.
-        let refs = sf_js::extract_refs(&file.path, &source);
+        included.push((file.path.as_path(), source, report.complexity));
+    }
+
+    // Register only the Included files, then wire path-exact edges.
+    for (path, _, _) in &included {
+        graph.register_file(path.to_path_buf());
+    }
+    for (path, source, cx) in &included {
+        complexity.insert(path.to_path_buf(), *cx);
+        let refs = sf_js::extract_refs(path, source);
         for r in refs {
             if let Some(resolved) = resolve_js_module(&graph, &r.target) {
-                // Represent the edge as a "class" reference using the
-                // resolved target's stringified path. sf-core resolves
-                // the class name to a file via Zeitwerk basename; to
-                // bypass that for JS we just register this file with
-                // a sentinel-safe key that happens to be the raw path.
-                // Fan_in is populated by sf-core when another file
-                // references `TargetPath` where `TargetPath.basename`
-                // matches a registered JS file's basename.
-                //
-                // Zeitwerk-style resolution is a Ruby concept; for JS
-                // we want path-exact. Use `add_reference` with the
-                // target's filename stem (PascalCased), and lean on
-                // sf-core's basename resolver. If this mismatches, a
-                // later slice can add a JS-specific graph.
-                let stem = resolved
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !stem.is_empty() {
-                    graph.add_reference(file.path.clone(), pascal_case_from(&stem));
-                }
+                // Path-exact edge — bypasses sf-core's Zeitwerk
+                // basename resolver so `a/index.js` and `b/index.js`
+                // stay distinct. Fixes Ohm's P1 on PR #81.
+                graph.add_path_edge(path.to_path_buf(), resolved);
             }
         }
     }
@@ -219,40 +207,48 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
     (graph, complexity)
 }
 
-/// Resolves an extensionless target (produced by `sf_js::extract_refs`)
-/// against the files registered in `graph`. Tries each JS extension
-/// and the `/index.<ext>` directory form. Returns the registered
-/// `PathBuf` on first match, or `None`.
+const JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+
+/// Resolves a target produced by `sf_js::extract_refs` against the
+/// files registered in `graph`. Order (Ohm's P1 on PR #81):
+///   1. If the target already has one of the recognised JS extensions
+///      AND is registered exactly, use it as-is.
+///   2. Otherwise, if the target has NO recognised extension, try
+///      each `.ts/.tsx/.js/.jsx/.mjs/.cjs` suffix.
+///   3. Otherwise, try `<target>/index.<ext>` for each extension.
+///
+/// An explicit extension that doesn't match a registered file is NOT
+/// silently rewritten (that would create false edges).
 fn resolve_js_module(graph: &DependencyGraph, target: &Path) -> Option<PathBuf> {
-    const EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
-    for ext in EXTS {
+    let has_js_ext = target
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| JS_EXTS.contains(&ext));
+
+    if has_js_ext {
+        // Exact-extension spec: ONLY accept a registered file at that
+        // exact path. Don't fall through to extension inference.
+        if graph.files().any(|f| f == target) {
+            return Some(target.to_path_buf());
+        }
+        return None;
+    }
+
+    // Extensionless target: try each JS extension.
+    for ext in JS_EXTS {
         let candidate = target.with_extension(ext);
         if graph.files().any(|f| f == candidate.as_path()) {
             return Some(candidate);
         }
     }
-    for ext in EXTS {
+    // Directory-style: `<target>/index.<ext>`.
+    for ext in JS_EXTS {
         let candidate = target.join(format!("index.{ext}"));
         if graph.files().any(|f| f == candidate.as_path()) {
             return Some(candidate);
         }
     }
     None
-}
-
-/// PascalCase a module file stem for the sf-core basename resolver:
-/// `user_profile` → `UserProfile`, `auth-service` → `AuthService`.
-fn pascal_case_from(stem: &str) -> String {
-    stem.split(['_', '-', '.'])
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let mut c = p.chars();
-            match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect()
 }
 
 fn collect(root: &Path) -> Vec<FileRef> {
@@ -278,7 +274,7 @@ fn collect(root: &Path) -> Vec<FileRef> {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let language = match ext {
             "rb" => Language::Ruby,
-            "js" | "jsx" | "ts" | "tsx" => Language::JavaScript,
+            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Language::JavaScript,
             _ => continue,
         };
         out.push(FileRef {
@@ -515,9 +511,11 @@ mod tests {
 }
 
 fn print_js_table(rows: &[ScoredFile]) {
-    // Narrower JS table: class | score | fan_in | complexity | file.
-    // JS files don't carry churn / coupling / coverage in this slice
-    // — those were Ruby-only signals so far.
+    // JS table: class | score | fan_in | fan_out | complexity | file.
+    // fan_out is included because sf-score always activates it when
+    // the graph has any edges; the Ruby JS-section scorer uses only
+    // fan_in + complexity, but surfacing fan_out in the output keeps
+    // the composite's weighting explicit rather than hidden.
     let class_width = rows
         .iter()
         .map(|r| r.class.as_str().len())
@@ -530,6 +528,12 @@ fn print_js_table(rows: &[ScoredFile]) {
         .max()
         .unwrap_or(1)
         .max("fan_in".len());
+    let fan_out_width = rows
+        .iter()
+        .map(|r| width_of(r.fan_out))
+        .max()
+        .unwrap_or(1)
+        .max("fan_out".len());
     let complexity_width = rows
         .iter()
         .map(|r| width_of(r.complexity))
@@ -539,27 +543,31 @@ fn print_js_table(rows: &[ScoredFile]) {
     let score_width = "0.0000".len();
 
     println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>cx$}  file",
+        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  file",
         "class",
         "score",
         "fan_in",
+        "fan_out",
         "complexity",
         cw = class_width,
         sw = score_width,
         fi = fan_in_width,
+        fo = fan_out_width,
         cx = complexity_width,
     );
     for r in rows {
         println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>cx$}  {}",
+            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {}",
             r.class.as_str(),
             r.composite,
             r.fan_in,
+            r.fan_out,
             r.complexity,
             r.path.display(),
             cw = class_width,
             sw = score_width,
             fi = fan_in_width,
+            fo = fan_out_width,
             cx = complexity_width,
         );
     }

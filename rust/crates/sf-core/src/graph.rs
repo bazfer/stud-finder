@@ -34,6 +34,11 @@ pub struct DependencyGraph {
     registered: HashSet<PathBuf>,
     /// Map each file → the set of class names it references.
     outgoing: HashMap<PathBuf, HashSet<String>>,
+    /// Map each file → the set of *registered file paths* it references
+    /// explicitly, bypassing the Zeitwerk basename resolver. Used by
+    /// path-based consumers (sf-cli's JS wiring) so distinct paths that
+    /// share a basename (`a/index.js` vs `b/index.js`) do not collapse.
+    path_outgoing: HashMap<PathBuf, HashSet<PathBuf>>,
 }
 
 impl DependencyGraph {
@@ -64,6 +69,21 @@ impl DependencyGraph {
             .insert(class_name.into());
     }
 
+    /// Record that `from` references the file at `to` by exact path,
+    /// bypassing the Zeitwerk basename resolver. Used by consumers
+    /// (sf-cli's JS wiring) where paths carry the identity rather than
+    /// basenames. Duplicates are deduped per-file via the internal
+    /// `HashSet`, matching the "number of files pointing at a target"
+    /// semantics of `add_reference`. Self-references are stored but
+    /// filtered out at `fan_in`/`fan_out` time, same as the class-name
+    /// edges.
+    pub fn add_path_edge(&mut self, from: impl Into<PathBuf>, to: impl Into<PathBuf>) {
+        self.path_outgoing
+            .entry(from.into())
+            .or_default()
+            .insert(to.into());
+    }
+
     /// How many *other* files reference something the `path` defines.
     /// Returns 0 when `path` is unknown (not registered via
     /// `register_file`) or defines no class. An unregistered path that
@@ -73,20 +93,31 @@ impl DependencyGraph {
         if !self.registered.contains(path) {
             return 0;
         }
-        let Some(class) = primary_class_of(path) else {
-            return 0;
-        };
-        let Some(defining) = self.defined_by.get(&class) else {
-            return 0;
-        };
-        // Count files that reference `class` AND are not themselves
-        // in the defining set for `path`. Self-references and sibling
-        // same-class definitions do not add to fan_in.
-        let defining_set: HashSet<&Path> = defining.iter().map(PathBuf::as_path).collect();
-        self.outgoing
+        let mut count = 0usize;
+        // Class-name edges (Ruby-style Zeitwerk resolution). The two
+        // `if let`s are nested rather than a let-chain because this
+        // workspace targets MSRV 1.85; let-chains stabilized in 1.88.
+        #[allow(clippy::collapsible_if)]
+        if let Some(class) = primary_class_of(path) {
+            if let Some(defining) = self.defined_by.get(&class) {
+                let defining_set: HashSet<&Path> = defining.iter().map(PathBuf::as_path).collect();
+                count += self
+                    .outgoing
+                    .iter()
+                    .filter(|(from, refs)| {
+                        !defining_set.contains(from.as_path()) && refs.contains(&class)
+                    })
+                    .count();
+            }
+        }
+        // Path-exact edges (used by JS wiring). Count files other than
+        // `path` whose path_outgoing contains `path` exactly.
+        count += self
+            .path_outgoing
             .iter()
-            .filter(|(from, refs)| !defining_set.contains(from.as_path()) && refs.contains(&class))
-            .count()
+            .filter(|(from, targets)| from.as_path() != path && targets.contains(path))
+            .count();
+        count
     }
 
     /// How many distinct outgoing class references `path` makes. Returns 0
@@ -98,7 +129,16 @@ impl DependencyGraph {
         if !self.registered.contains(path) {
             return 0;
         }
-        self.outgoing.get(path).map(|refs| refs.len()).unwrap_or(0)
+        let class_edges = self.outgoing.get(path).map(|refs| refs.len()).unwrap_or(0);
+        let path_edges = self
+            .path_outgoing
+            .get(path)
+            .map(|targets| {
+                // Don't count self-references toward fan_out either.
+                targets.iter().filter(|t| t.as_path() != path).count()
+            })
+            .unwrap_or(0);
+        class_edges + path_edges
     }
 
     /// Iterator over all registered files.
@@ -220,6 +260,55 @@ mod tests {
     fn fan_out_zero_for_unregistered_path() {
         let g = DependencyGraph::new();
         assert_eq!(g.fan_out(Path::new("some/random/path.rb")), 0);
+    }
+
+    #[test]
+    fn path_edges_distinguish_same_basename() {
+        // Two files share a basename. Path-exact edges must keep them
+        // separate even though the Zeitwerk resolver would conflate
+        // them under class "Index".
+        let mut g = DependencyGraph::new();
+        g.register_file("a/index.js");
+        g.register_file("b/index.js");
+        g.register_file("caller.js");
+
+        g.add_path_edge("caller.js", "a/index.js");
+        assert_eq!(g.fan_in(Path::new("a/index.js")), 1);
+        assert_eq!(g.fan_in(Path::new("b/index.js")), 0);
+        assert_eq!(g.fan_out(Path::new("caller.js")), 1);
+    }
+
+    #[test]
+    fn path_edges_dedupe_per_file() {
+        let mut g = DependencyGraph::new();
+        g.register_file("target.js");
+        g.register_file("caller.js");
+        g.add_path_edge("caller.js", "target.js");
+        g.add_path_edge("caller.js", "target.js");
+        assert_eq!(g.fan_in(Path::new("target.js")), 1);
+    }
+
+    #[test]
+    fn path_edge_self_reference_is_ignored() {
+        let mut g = DependencyGraph::new();
+        g.register_file("a.js");
+        g.add_path_edge("a.js", "a.js");
+        assert_eq!(g.fan_in(Path::new("a.js")), 0);
+        assert_eq!(g.fan_out(Path::new("a.js")), 0);
+    }
+
+    #[test]
+    fn class_and_path_edges_coexist_in_fan_in() {
+        // A file can be targeted by BOTH class-name edges (Ruby) and
+        // path-exact edges (JS). fan_in sums distinct contributors.
+        let mut g = DependencyGraph::new();
+        g.register_file("app/models/order.rb");
+        g.register_file("app/services/checkout.rb");
+        g.register_file("scripts/batch.js");
+
+        g.add_reference("app/services/checkout.rb", "Order");
+        g.add_path_edge("scripts/batch.js", "app/models/order.rb");
+        assert_eq!(g.fan_in(Path::new("app/models/order.rb")), 2);
     }
 
     #[test]

@@ -113,12 +113,12 @@ fn unsupported_extension_returns_empty() {
 // --- max_complexity ---
 
 fn c(source: &str) -> usize {
-    max_complexity(source).complexity
+    max_complexity(source, None).complexity
 }
 
 #[test]
 fn empty_source_scores_zero() {
-    let r = max_complexity("");
+    let r = max_complexity("", None);
     assert_eq!(r.complexity, 0);
     assert!(r.parsed_cleanly);
 }
@@ -286,7 +286,7 @@ fn nested_function_does_not_inflate_outer_complexity() {
 #[test]
 fn parse_error_flips_parsed_cleanly_false() {
     let src = "function f( { ??? !!";
-    let r = max_complexity(src);
+    let r = max_complexity(src, None);
     assert!(!r.parsed_cleanly, "syntax error must flip the flag");
 }
 
@@ -295,7 +295,7 @@ fn ts_syntax_parses_cleanly() {
     let src = r#"
         function f<T>(x: T, y?: number): T { return x; }
     "#;
-    let r = max_complexity(src);
+    let r = max_complexity(src, None);
     assert!(r.parsed_cleanly, "valid TS should parse: {:?}", r);
     assert_eq!(r.complexity, 1);
 }
@@ -305,6 +305,156 @@ fn jsx_syntax_parses_cleanly() {
     let src = r#"
         const App = () => <div>hi</div>;
     "#;
-    let r = max_complexity(src);
+    let r = max_complexity(src, None);
     assert!(r.parsed_cleanly, "valid JSX should parse: {:?}", r);
+}
+
+// --- Ohm PR #81 regressions ---
+
+#[test]
+fn import_inside_function_body_is_collected() {
+    // Ohm P1: walker was ignoring function bodies. `import('./x')`
+    // inside an ordinary function must contribute an edge.
+    let src = r#"
+        function load() { return import('./x'); }
+    "#;
+    let refs = extract_refs(&p("src/a.js"), src);
+    assert!(
+        refs.iter().any(|r| r.target == p("src/x")),
+        "expected to find src/x in refs: {refs:?}"
+    );
+}
+
+#[test]
+fn require_inside_arrow_is_collected() {
+    let src = r#"
+        const load = () => require('./x');
+    "#;
+    let refs = extract_refs(&p("src/a.js"), src);
+    assert!(refs.iter().any(|r| r.target == p("src/x")));
+}
+
+#[test]
+fn require_chained_member_still_contributes_edge() {
+    // Ohm P1 example: `require('./x').foo` — the member expression
+    // on top of the require call must not hide it.
+    let src = r#"
+        const foo = require('./x').foo;
+    "#;
+    let refs = extract_refs(&p("src/a.js"), src);
+    assert!(
+        refs.iter().any(|r| r.target == p("src/x")),
+        "require().member should still be an edge: {refs:?}"
+    );
+}
+
+#[test]
+fn import_inside_class_method_is_collected() {
+    let src = r#"
+        export class C {
+          async load() { return import('./m'); }
+        }
+    "#;
+    let refs = extract_refs(&p("src/a.ts"), src);
+    assert!(refs.iter().any(|r| r.target == p("src/m")));
+}
+
+#[test]
+fn exported_function_body_is_scored_for_complexity() {
+    // Ohm P1: `export function f` was invisible to the collector,
+    // so its complexity landed as 0 for the file.
+    let src = r#"
+        export function f(x) {
+          if (x) return 1;
+          return 0;
+        }
+    "#;
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn class_method_body_is_scored_for_complexity() {
+    let src = r#"
+        class C {
+          f(x) {
+            if (x) return 1;
+            return 0;
+          }
+        }
+    "#;
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn export_default_function_body_is_scored() {
+    let src = r#"
+        export default function (x) {
+          if (x) return 1;
+          return 0;
+        }
+    "#;
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn object_method_body_is_scored() {
+    let src = r#"
+        const obj = {
+          f(x) {
+            if (x) return 1;
+            return 0;
+          },
+        };
+    "#;
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn decision_survives_binary_plus_wrapper() {
+    // Ohm P2 example: `return 1 + (a && b)` must count the `&&`.
+    let src = r#"
+        function f(a, b) { return 1 + (a && b); }
+    "#;
+    // 1 base + 1 (&&)
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn decision_survives_await_wrapper() {
+    let src = r#"
+        async function f(a, b) { return await (a || b); }
+    "#;
+    // 1 base + 1 (||)
+    assert_eq!(c(src), 2);
+}
+
+#[test]
+fn for_initializer_decisions_count() {
+    let src = r#"
+        function f(a, b) {
+          for (let i = a && b; i < 10; i++) {}
+        }
+    "#;
+    // 1 base + 1 for + 1 && = 3
+    assert_eq!(c(src), 3);
+}
+
+#[test]
+fn plain_ts_angle_bracket_cast_parses_cleanly() {
+    // Ohm body callout: `<Foo>value` is a TS type assertion. Parsed
+    // as TSX it reads as a JSX opening tag and errors. With the file
+    // suffix `.ts`, max_complexity must pick SourceType::ts().
+    let src = r#"
+        function f(x) {
+          const y = <string>x;
+          if (y) return 1;
+          return 0;
+        }
+    "#;
+    let r = max_complexity(src, Some(&p("src/app.ts")));
+    assert!(
+        r.parsed_cleanly,
+        "plain TS angle-bracket cast must parse as .ts source: {r:?}"
+    );
+    assert_eq!(r.complexity, 2, "if adds 1 → complexity 2");
 }
