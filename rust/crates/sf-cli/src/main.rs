@@ -12,8 +12,11 @@
 // the `analyze_ruby_source` function it exercises; print helpers follow.
 #![allow(clippy::items_after_test_module)]
 
-use std::collections::HashMap;
+mod output;
+
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,6 +24,8 @@ use sf_core::{DependencyGraph, FileRef, Language};
 use sf_history::{DEFAULT_WINDOW_DAYS, HistoryWarning};
 use sf_score::{CouplingSignal, ScoredFile, Scorer, Signals};
 use walkdir::WalkDir;
+
+use output::{OutputFormat, Sections};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,6 +41,22 @@ struct Cli {
     /// cross-term in the composite.
     #[arg(long)]
     coverage: Option<PathBuf>,
+    /// Output format for the final rows. `table` keeps the human
+    /// output (default), `json` emits a `{ruby, javascript}` root,
+    /// `csv` and `markdown` emit one headed section per language.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    output: OutputFormat,
+    /// Keep only the top `N` rows per section (after sorting). `0` or
+    /// absent = keep all. Applies to the Ruby and JavaScript sections
+    /// independently.
+    #[arg(long, default_value_t = 0usize)]
+    top: usize,
+    /// Only emit rows for files changed between `<REF>` and HEAD.
+    /// Resolves by shelling out to `git diff --name-only <REF>...HEAD`
+    /// (merge-base-based three-dot). Non-git-repo or git failure
+    /// degrades to no filter with a stderr warning.
+    #[arg(long)]
+    diff_base: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -106,7 +127,79 @@ fn main() -> Result<()> {
         coverage,
     };
     let scored = Scorer::new().score_with_signals(signals);
-    let mut rows = scored;
+    let mut ruby_rows = scored;
+    sort_rows(&mut ruby_rows);
+
+    // Build the JavaScript section on its own graph + complexity so
+    // JS files don't pool into the Ruby percentile distribution.
+    let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
+    let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
+        let js_signals = Signals {
+            graph: &js_graph,
+            complexity: js_complexity,
+            churn_commits: HashMap::new(),
+            churn_lines: HashMap::new(),
+            coupling: HashMap::new(),
+            coverage: None,
+        };
+        let mut rows = Scorer::new().score_with_signals(js_signals);
+        sort_rows(&mut rows);
+        rows
+    } else {
+        Vec::new()
+    };
+
+    // --- Diff-base filter (applied BEFORE --top) ---
+    if let Some(base) = cli.diff_base.as_deref() {
+        match diff_names(&cli.path, base) {
+            Ok(Some(changed)) => {
+                ruby_rows.retain(|r| changed.contains(&r.path));
+                js_rows.retain(|r| changed.contains(&r.path));
+            }
+            Ok(None) => {
+                eprintln!(
+                    "stud-finder: --diff-base yielded no filter (not a git repo or empty diff); emitting all rows"
+                );
+            }
+            Err(err) => {
+                eprintln!("stud-finder: --diff-base failed ({err}); emitting all rows");
+            }
+        }
+    }
+
+    // --- Top-N filter (applied per section, AFTER diff filter) ---
+    if cli.top > 0 {
+        ruby_rows.truncate(cli.top);
+        js_rows.truncate(cli.top);
+    }
+
+    // --- Emit ---
+    if cli.output.is_table() {
+        if !ruby_rows.is_empty() {
+            println!("# Ruby");
+            print_table(&ruby_rows);
+        }
+        if !js_rows.is_empty() {
+            if !ruby_rows.is_empty() {
+                println!();
+            }
+            println!("# JavaScript");
+            print_js_table(&js_rows);
+        }
+    } else {
+        output::emit(
+            cli.output,
+            Sections {
+                ruby: &ruby_rows,
+                js: &js_rows,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn sort_rows(rows: &mut [ScoredFile]) {
     rows.sort_by(|a, b| {
         a.class
             .rank()
@@ -118,42 +211,42 @@ fn main() -> Result<()> {
             })
             .then_with(|| a.path.cmp(&b.path))
     });
-    println!("# Ruby");
-    print_table(&rows);
+}
 
-    // Build the JavaScript section on its own graph + complexity so
-    // JS files don't pool into the Ruby percentile distribution.
-    // sf-score's availability-mode renormalization handles the
-    // "fan_in + complexity" subset cleanly — no coverage / churn /
-    // coupling on the JS side this slice.
-    let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
-    if js_graph.files().count() > 0 {
-        let js_signals = Signals {
-            graph: &js_graph,
-            complexity: js_complexity,
-            churn_commits: HashMap::new(),
-            churn_lines: HashMap::new(),
-            coupling: HashMap::new(),
-            coverage: None,
-        };
-        let mut js_rows = Scorer::new().score_with_signals(js_signals);
-        js_rows.sort_by(|a, b| {
-            a.class
-                .rank()
-                .cmp(&b.class.rank())
-                .then_with(|| {
-                    b.composite
-                        .partial_cmp(&a.composite)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        println!();
-        println!("# JavaScript");
-        print_js_table(&js_rows);
+/// Returns the set of repo-root-relative paths that changed between
+/// `base` and HEAD via `git diff --name-only <base>...HEAD`. Returns
+/// `Ok(None)` for a clean "no filter" degradation (missing git, not
+/// a repo). Any other git failure returns `Err` with a descriptive
+/// message the CLI surfaces as a stderr warning.
+fn diff_names(repo_root: &Path, base: &str) -> Result<Option<HashSet<PathBuf>>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("--name-only")
+        .arg(format!("{base}...HEAD"))
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None); // git not installed → no filter.
+        }
+        Err(err) => return Err(err.to_string()),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(stderr.trim().to_string());
     }
-
-    Ok(())
+    let changed: HashSet<PathBuf> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    Ok(Some(changed))
 }
 
 fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
