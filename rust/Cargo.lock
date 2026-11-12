@@ -695,6 +695,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "sf-core",
  "sf-coverage",
  "sf-history",

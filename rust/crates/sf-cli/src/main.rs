@@ -12,8 +12,11 @@
 // the `analyze_ruby_source` function it exercises; print helpers follow.
 #![allow(clippy::items_after_test_module)]
 
-use std::collections::HashMap;
+mod output;
+
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,6 +24,8 @@ use sf_core::{DependencyGraph, FileRef, Language};
 use sf_history::{DEFAULT_WINDOW_DAYS, HistoryWarning};
 use sf_score::{CouplingSignal, ScoredFile, Scorer, Signals};
 use walkdir::WalkDir;
+
+use output::{OutputFormat, Sections};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,6 +41,24 @@ struct Cli {
     /// cross-term in the composite.
     #[arg(long)]
     coverage: Option<PathBuf>,
+    /// Output format for the final rows. `table` keeps the human
+    /// output (default), `json` emits a `{ruby, javascript}` root,
+    /// `csv` and `markdown` emit one headed section per language.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    output: OutputFormat,
+    /// Keep only the top `N` rows per section (after sorting). N
+    /// must be a positive integer (matches Ruby, which rejects
+    /// `--top 0` or negative with `--top must be positive`). Absent =
+    /// keep all. Applies to the Ruby and JavaScript sections
+    /// independently.
+    #[arg(long, value_parser = parse_positive_top)]
+    top: Option<usize>,
+    /// Only emit rows for files changed between `<REF>` and HEAD.
+    /// Resolves by shelling out to `git diff --name-only <REF>...HEAD`
+    /// (merge-base-based three-dot). Non-git-repo or git failure
+    /// degrades to no filter with a stderr warning.
+    #[arg(long)]
+    diff_base: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -106,7 +129,94 @@ fn main() -> Result<()> {
         coverage,
     };
     let scored = Scorer::new().score_with_signals(signals);
-    let mut rows = scored;
+    let mut ruby_rows = scored;
+    sort_rows(&mut ruby_rows);
+
+    // Build the JavaScript section on its own graph + complexity so
+    // JS files don't pool into the Ruby percentile distribution.
+    let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
+    let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
+        let js_signals = Signals {
+            graph: &js_graph,
+            complexity: js_complexity,
+            churn_commits: HashMap::new(),
+            churn_lines: HashMap::new(),
+            coupling: HashMap::new(),
+            coverage: None,
+        };
+        let mut rows = Scorer::new().score_with_signals(js_signals);
+        sort_rows(&mut rows);
+        rows
+    } else {
+        Vec::new()
+    };
+
+    // --- Diff-base filter (applied BEFORE --top) ---
+    // An explicitly-requested --diff-base that CAN'T be satisfied
+    // (missing git, non-repo, bad ref) is a hard failure: exit
+    // non-zero rather than silently emitting the whole repo. Matches
+    // Ruby `Diff` which raises on the same conditions. An empty-but-
+    // successful diff is a valid filter — the result is the empty
+    // set, not "no filter".
+    if let Some(base) = cli.diff_base.as_deref() {
+        match diff_names(&cli.path, base) {
+            Ok(changed) => {
+                ruby_rows.retain(|r| changed.contains(&r.path));
+                js_rows.retain(|r| changed.contains(&r.path));
+            }
+            Err(err) => {
+                eprintln!("stud-finder: --diff-base failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // --- Top-N filter (applied per section, AFTER diff filter) ---
+    if let Some(n) = cli.top {
+        ruby_rows.truncate(n);
+        js_rows.truncate(n);
+    }
+
+    // --- Emit ---
+    if cli.output.is_table() {
+        if !ruby_rows.is_empty() {
+            println!("# Ruby");
+            print_table(&ruby_rows);
+        }
+        if !js_rows.is_empty() {
+            if !ruby_rows.is_empty() {
+                println!();
+            }
+            println!("# JavaScript");
+            print_js_table(&js_rows);
+        }
+    } else {
+        output::emit(
+            cli.output,
+            Sections {
+                ruby: &ruby_rows,
+                js: &js_rows,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_positive_top(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| "--top must be a positive integer".to_string())?;
+    if n == 0 {
+        // Matches Ruby `--top must be positive` validation. Avoids the
+        // "0 = unlimited" ambiguity that masks a caller passing 0 by
+        // mistake.
+        return Err("--top must be positive".to_string());
+    }
+    Ok(n)
+}
+
+fn sort_rows(rows: &mut [ScoredFile]) {
     rows.sort_by(|a, b| {
         a.class
             .rank()
@@ -118,42 +228,70 @@ fn main() -> Result<()> {
             })
             .then_with(|| a.path.cmp(&b.path))
     });
-    println!("# Ruby");
-    print_table(&rows);
+}
 
-    // Build the JavaScript section on its own graph + complexity so
-    // JS files don't pool into the Ruby percentile distribution.
-    // sf-score's availability-mode renormalization handles the
-    // "fan_in + complexity" subset cleanly — no coverage / churn /
-    // coupling on the JS side this slice.
-    let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
-    if js_graph.files().count() > 0 {
-        let js_signals = Signals {
-            graph: &js_graph,
-            complexity: js_complexity,
-            churn_commits: HashMap::new(),
-            churn_lines: HashMap::new(),
-            coupling: HashMap::new(),
-            coverage: None,
-        };
-        let mut js_rows = Scorer::new().score_with_signals(js_signals);
-        js_rows.sort_by(|a, b| {
-            a.class
-                .rank()
-                .cmp(&b.class.rank())
-                .then_with(|| {
-                    b.composite
-                        .partial_cmp(&a.composite)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        println!();
-        println!("# JavaScript");
-        print_js_table(&js_rows);
+/// Returns the set of SCAN-ROOT-RELATIVE paths that changed between
+/// `base` and HEAD. Uses `--relative` so paths are emitted relative
+/// to the `-C` directory (= the scan root), matching the identity the
+/// CLI uses for scored rows — fixes nested-scan drops where the scan
+/// root is a subdirectory of the repo (Ohm's P1 on PR #82). `-z`
+/// makes the stream NUL-delimited so paths with tabs, newlines, or
+/// non-ASCII bytes come through unquoted — git's default output
+/// quotes such paths, which broke the previous lossy-UTF8 split.
+///
+/// Returns `Err` on missing git, non-repo, bad ref, any other git
+/// failure, or non-UTF8 path bytes we can't form a `PathBuf` from.
+/// An empty but successful diff returns `Ok(empty set)`, NOT no-
+/// filter — matches Ruby `Diff` semantics so "nothing changed" means
+/// zero scored rows, not the whole repo.
+fn diff_names(repo_root: &Path, base: &str) -> Result<HashSet<PathBuf>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("--name-only")
+        .arg("-z")
+        .arg("--relative")
+        .arg(format!("{base}...HEAD"))
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err("git not found in PATH".to_string());
+        }
+        Err(err) => return Err(err.to_string()),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.trim().to_string());
     }
-
-    Ok(())
+    // `-z` splits records on NUL, no trailing NUL required but
+    // typically present. Each record is the raw path bytes — no git
+    // quoting applied. Skip empties from a trailing NUL.
+    let mut changed: HashSet<PathBuf> = HashSet::new();
+    for chunk in output.stdout.split(|&b| b == 0u8) {
+        if chunk.is_empty() {
+            continue;
+        }
+        // Our file-set is keyed by `PathBuf`s built from `&str` via
+        // walkdir -> strip_prefix. A non-UTF8 path on disk would
+        // already fail that pipeline on any platform, so refuse
+        // non-UTF8 here too rather than let a mismatched pair
+        // silently drop a row.
+        match std::str::from_utf8(chunk) {
+            Ok(s) => {
+                changed.insert(PathBuf::from(s));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "git diff emitted a path with non-UTF8 bytes ({} bytes); unsupported",
+                    chunk.len()
+                ));
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
