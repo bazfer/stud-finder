@@ -112,7 +112,15 @@ fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<Pa
         for r in sf_ruby::extract_refs(&file.path, &source) {
             graph.add_reference(file.path.clone(), r.name);
         }
-        complexity.insert(file.path.clone(), sf_ruby::max_complexity(&source));
+        let report = sf_ruby::max_complexity(&source);
+        if report.parsed_cleanly {
+            complexity.insert(file.path.clone(), report.complexity);
+        } else {
+            eprintln!(
+                "stud-finder: {} had parse errors; excluding complexity signal for this file",
+                file.path.display()
+            );
+        }
     }
     (graph, complexity)
 }

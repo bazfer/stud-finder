@@ -40,14 +40,34 @@ use ruby_prism::{
     UnlessNode, UntilNode, Visit, WhenNode, WhileNode,
 };
 
-/// Max cyclomatic complexity across the `def` nodes in `source`. Zero
-/// when the file has no method definitions.
-pub fn max_complexity(source: &str) -> usize {
+/// Outcome of a complexity run over one file. `parsed_cleanly == false`
+/// means ruby-prism emitted at least one parse error; the walker still
+/// scored the recovery AST it produced, but the caller should treat the
+/// complexity as unreliable (typically: warn with path + skip the entry
+/// from the composite).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComplexityReport {
+    pub complexity: usize,
+    pub parsed_cleanly: bool,
+}
+
+/// Max cyclomatic complexity across the `def` nodes in `source`, plus a
+/// flag indicating whether the parser accepted the file cleanly.
+///
+/// Zero complexity when the file has no non-empty method definitions.
+/// An empty `def` (bare `def foo; end` with no body) contributes 0,
+/// matching the Ruby/RuboCop stud-finder adapter — a method's score
+/// only exists once it has a body to count decisions in.
+pub fn max_complexity(source: &str) -> ComplexityReport {
     let parsed = ruby_prism::parse(source.as_bytes());
+    let parsed_cleanly = parsed.errors().count() == 0;
     let root = parsed.node();
     let mut collector = MethodCollector { max: 0 };
     collector.visit(&root);
-    collector.max
+    ComplexityReport {
+        complexity: collector.max,
+        parsed_cleanly,
+    }
 }
 
 /// Walks the tree looking for `def` nodes. For each one, scores its
@@ -60,10 +80,14 @@ struct MethodCollector {
 
 impl<'pr> Visit<'pr> for MethodCollector {
     fn visit_def_node(&mut self, node: &DefNode<'pr>) {
+        // Empty `def foo; end` with no body contributes 0, not 1 —
+        // matches the Ruby stud-finder adapter + how RuboCop's
+        // CyclomaticComplexity cop handles an empty method body.
+        let Some(body) = node.body() else {
+            return;
+        };
         let mut counter = DecisionCounter { decisions: 0 };
-        if let Some(body) = node.body() {
-            counter.visit(&body);
-        }
+        counter.visit(&body);
         let method_complexity = 1 + counter.decisions;
         if method_complexity > self.max {
             self.max = method_complexity;
@@ -159,9 +183,15 @@ impl<'pr> Visit<'pr> for DecisionCounter {
 mod tests {
     use super::*;
 
+    fn c(source: &str) -> usize {
+        max_complexity(source).complexity
+    }
+
     #[test]
     fn empty_file_has_zero_complexity() {
-        assert_eq!(max_complexity(""), 0);
+        let r = max_complexity("");
+        assert_eq!(r.complexity, 0);
+        assert!(r.parsed_cleanly);
     }
 
     #[test]
@@ -171,7 +201,16 @@ mod tests {
             y = x + 2
             puts y
         "#;
-        assert_eq!(max_complexity(src), 0);
+        assert_eq!(c(src), 0);
+    }
+
+    #[test]
+    fn empty_def_contributes_zero() {
+        // Ohm P1: `def foo; end` with no body is 0, not 1 — matches
+        // the stud-finder Ruby adapter.
+        assert_eq!(c("def foo\nend\n"), 0);
+        // A file of only empty defs is still 0.
+        assert_eq!(c("def a; end\ndef b; end\ndef c; end\n"), 0);
     }
 
     #[test]
@@ -183,7 +222,7 @@ mod tests {
               y
             end
         "#;
-        assert_eq!(max_complexity(src), 1);
+        assert_eq!(c(src), 1);
     }
 
     #[test]
@@ -195,7 +234,7 @@ mod tests {
               end
             end
         "#;
-        assert_eq!(max_complexity(src), 2);
+        assert_eq!(c(src), 2);
     }
 
     #[test]
@@ -211,7 +250,7 @@ mod tests {
               end
             end
         "#;
-        assert_eq!(max_complexity(src), 3);
+        assert_eq!(c(src), 3);
     }
 
     #[test]
@@ -221,7 +260,7 @@ mod tests {
               x > 0 ? :pos : :neg
             end
         "#;
-        assert_eq!(max_complexity(src), 2);
+        assert_eq!(c(src), 2);
     }
 
     #[test]
@@ -232,7 +271,7 @@ mod tests {
               x
             end
         "#;
-        assert_eq!(max_complexity(src), 2);
+        assert_eq!(c(src), 2);
     }
 
     #[test]
@@ -250,7 +289,7 @@ mod tests {
               end
             end
         "#;
-        assert_eq!(max_complexity(src), 1 + 3);
+        assert_eq!(c(src), 1 + 3);
     }
 
     #[test]
@@ -266,7 +305,7 @@ mod tests {
             end
         "#;
         // 1 base + 3 when clauses (else and case header don't count).
-        assert_eq!(max_complexity(src), 4);
+        assert_eq!(c(src), 4);
     }
 
     #[test]
@@ -285,7 +324,7 @@ mod tests {
         //  + 1 for `||`
         //  + 1 for `and`
         //  + 1 for `or`
-        assert_eq!(max_complexity(src), 7);
+        assert_eq!(c(src), 7);
     }
 
     #[test]
@@ -304,7 +343,7 @@ mod tests {
             end
         "#;
         // 1 base + 1 for the begin-with-rescue (regardless of clause count).
-        assert_eq!(max_complexity(src), 2);
+        assert_eq!(c(src), 2);
     }
 
     #[test]
@@ -333,7 +372,43 @@ mod tests {
         // Note: the `.each do |x|` block body's `if`/`elsif` count
         // toward `big` because the block is INSIDE big's body —
         // DecisionCounter walks through blocks.
-        let got = max_complexity(src);
+        let got = c(src);
         assert_eq!(got, 4, "expected big method to dominate; got {got}");
+    }
+
+    #[test]
+    fn parse_error_reported_as_not_clean() {
+        // Ohm P2: prism parse errors must be reachable. Syntax
+        // nonsense produces a recovery AST but `parsed_cleanly` is
+        // false so the caller can warn + exclude the file.
+        let src = r#"
+            class Foo
+              this is: not; valid! ruby !!
+            end
+        "#;
+        let r = max_complexity(src);
+        assert!(
+            !r.parsed_cleanly,
+            "syntax errors must flip parsed_cleanly to false"
+        );
+    }
+
+    #[test]
+    fn parse_error_still_returns_a_complexity_number() {
+        // We don't promise correctness on broken source, but we do
+        // return a number so the caller can decide (sf-cli warns +
+        // excludes; a different consumer might want the fallback).
+        let src = "def foo\n  if a then b end\n  broken: !!!\nend\n";
+        let r = max_complexity(src);
+        // Not asserting the value — just that it's defined and the
+        // flag is set.
+        let _ = r.complexity;
+        assert!(!r.parsed_cleanly);
+    }
+
+    #[test]
+    fn clean_source_reports_parsed_cleanly_true() {
+        let r = max_complexity("def foo; 1; end\n");
+        assert!(r.parsed_cleanly);
     }
 }

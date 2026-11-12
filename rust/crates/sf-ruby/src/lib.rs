@@ -31,7 +31,7 @@ mod visitor;
 
 use std::path::{Path, PathBuf};
 
-pub use complexity::max_complexity;
+pub use complexity::{ComplexityReport, max_complexity};
 pub use inflect::associate_to_class;
 
 /// A single reference pulled out of a Ruby file.
