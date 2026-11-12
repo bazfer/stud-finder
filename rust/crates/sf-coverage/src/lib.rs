@@ -129,6 +129,16 @@ pub fn load(path: &Path, root: &Path, files: &[&Path]) -> Result<CoverageReport,
             ));
         }
     };
+    // Filter output to the caller's requested files — matches Ruby's
+    // `reported.slice(*@files)` semantic. Without this, unmatched
+    // report entries would still land in `coverage_pct` and could
+    // activate downstream availability gates from unrelated files.
+    // Fixes Ohm's P2 on PR #80.
+    let file_set: HashSet<PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
+    let coverage_pct: HashMap<PathBuf, f64> = coverage_pct
+        .into_iter()
+        .filter(|(k, _)| file_set.contains(k))
+        .collect();
     let missing_files: Vec<PathBuf> = files
         .iter()
         .filter_map(|p| {
@@ -229,29 +239,34 @@ fn parse_resultset(
                 .unwrap_or_default(),
         };
 
-    // Merge lines across suites via per-position max. nil stays nil
-    // only if BOTH entries are nil.
-    let mut merged: HashMap<String, Vec<Option<i64>>> = HashMap::new();
+    // Normalize filenames INSIDE the merge loop so aliased reports
+    // (e.g. `/abs/lib/a.rb` from one suite + `lib/a.rb` from another)
+    // merge per-line on the same normalized key. Matches Ruby
+    // `Resultset#parse_report` which keys `merged` by normalize_filename.
+    // Fixes Ohm's P1 on PR #80 (alias collision / nondeterministic
+    // overwrite). nil stays nil only if BOTH entries are nil.
+    let mut merged: HashMap<PathBuf, Vec<Option<i64>>> = HashMap::new();
+    let mut warnings: Vec<CoverageWarning> = Vec::new();
     for coverage in &coverage_payloads {
         for (filename, details) in coverage.iter() {
-            let lines = extract_lines(details);
-            let Some(new_lines) = lines else { continue };
+            let Some(new_lines) = extract_lines(details) else {
+                continue;
+            };
+            let (key, warning) = ctx.normalize(filename);
+            if let Some(w) = warning {
+                warnings.push(w);
+            }
             merged
-                .entry(filename.clone())
+                .entry(key)
                 .and_modify(|previous| merge_lines(previous, &new_lines))
                 .or_insert(new_lines);
         }
     }
 
-    let mut coverage_pct: HashMap<PathBuf, f64> = HashMap::new();
-    let mut warnings: Vec<CoverageWarning> = Vec::new();
-    for (reported, lines) in &merged {
-        let (key, warning) = ctx.normalize(reported);
-        if let Some(w) = warning {
-            warnings.push(w);
-        }
-        coverage_pct.insert(key, line_rate(lines));
-    }
+    let coverage_pct: HashMap<PathBuf, f64> = merged
+        .iter()
+        .map(|(key, lines)| (key.clone(), line_rate(lines)))
+        .collect();
     Ok((coverage_pct, warnings))
 }
 
@@ -343,9 +358,19 @@ fn process_lcov_record(
         } else if let Some(rest) = line.strip_prefix("LH:") {
             lh = rest.parse::<usize>().ok();
         } else if let Some(rest) = line.strip_prefix("DA:") {
-            if let Some((_, count)) = rest.split_once(',') {
-                if let Ok(c) = count.parse::<u64>() {
-                    da_hits.push(c);
+            // `DA:<line>,<count>[,<checksum>]` — accept 2- or 3-field
+            // form. The old `split_once(',')` version left `count` as
+            // `"<count>,<checksum>"` and failed `u64::parse`, silently
+            // dropping any record that carried a checksum. Fixes
+            // Ohm's P2 on PR #80. Validate `line` too.
+            let mut parts = rest.splitn(3, ',');
+            let line_no = parts.next();
+            let count = parts.next();
+            if let (Some(l), Some(c)) = (line_no, count) {
+                if l.parse::<u64>().is_ok() {
+                    if let Ok(cnt) = c.parse::<u64>() {
+                        da_hits.push(cnt);
+                    }
                 }
             }
         }

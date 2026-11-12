@@ -169,13 +169,21 @@ pub struct Signals<'a> {
     /// unavailable. Only files whose pair cleared Ruby's
     /// min_co_changes / coupling_threshold filters appear here.
     pub coupling: HashMap<PathBuf, CouplingSignal>,
-    /// Per-file line coverage in `[0.0, 1.0]`. Non-empty = coverage
-    /// signal active, which pulls both the base coverage weight AND
-    /// the interaction cross-term into the composite (Ruby's
-    /// `coverage_available?` gate). Missing keys inside a non-empty
-    /// map default to 0.0 — matching the Ruby "requested but not
-    /// reported" shape via `Resultset#missing_files`.
-    pub coverage: HashMap<PathBuf, f64>,
+    /// Per-file line coverage in `[0.0, 1.0]`. `Some(_)` = coverage
+    /// signal AVAILABLE — matches Ruby's `coverage_available? =
+    /// !@coverage.nil?` gate; `Some(empty)` still activates the
+    /// signal and every requested file gets risk 1.0 (fetch-with-0.0
+    /// default). `None` = coverage not provided — both base-weight
+    /// coverage AND the interaction cross-term drop out of the
+    /// composite. Missing keys inside a `Some(_)` map default to
+    /// 0.0 coverage (risk 1.0), matching Ruby
+    /// `coverage_risk_values` using `.fetch(file, 0.0)`.
+    ///
+    /// The signal in the composite is `coverage_risk = 1.0 -
+    /// coverage` (via Ruby `coverage_risk_values`): low coverage is
+    /// high risk. Fixes Ohm's P1 on PR #80 — ranking raw coverage
+    /// instead of risk had reversed the scoring direction.
+    pub coverage: Option<HashMap<PathBuf, f64>>,
 }
 
 impl<'a> Signals<'a> {
@@ -188,7 +196,7 @@ impl<'a> Signals<'a> {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
-            coverage: HashMap::new(),
+            coverage: None,
         }
     }
 }
@@ -303,16 +311,31 @@ impl Scorer {
             })
             .collect();
 
-        // Coverage + interaction only activate together (Ruby's
-        // `coverage_available?` gate). Missing files in a non-empty
-        // coverage map default to 0.0 — matches Ruby
-        // `Resultset#missing_files` semantics where unreported files
-        // get no row and the scorer treats them as 0% covered.
-        let has_coverage = !signals.coverage.is_empty();
+        // Coverage + interaction activate together via the explicit
+        // `Option` gate — matches Ruby `coverage_available? =
+        // !@coverage.nil?`. A caller that successfully loaded an
+        // empty report still activates the signal; every requested
+        // file defaults to 0.0 coverage (risk 1.0). Fixes Ohm's P2
+        // on PR #80 (empty-provided coverage was incorrectly
+        // disabling the weights).
+        //
+        // The ranked signal is `coverage_risk = 1.0 - coverage` per
+        // Ruby `coverage_risk_values`. Raw coverage still lands in
+        // `ScoredFile.coverage` for display. Fixes Ohm's P1 on PR
+        // #80 (percentile-ranking raw coverage reversed the scoring
+        // direction).
+        let has_coverage = signals.coverage.is_some();
         let coverage_values: Vec<f64> = files
             .iter()
-            .map(|p| signals.coverage.get(*p).copied().unwrap_or(0.0))
+            .map(|p| {
+                signals
+                    .coverage
+                    .as_ref()
+                    .and_then(|m| m.get(*p).copied())
+                    .unwrap_or(0.0)
+            })
             .collect();
+        let coverage_risk_values: Vec<f64> = coverage_values.iter().map(|c| 1.0 - c).collect();
 
         let fan_in_pcts = percentile_rank_usize(&fan_ins);
         let fan_out_pcts = percentile_rank_usize(&fan_outs);
@@ -359,8 +382,13 @@ impl Scorer {
         } else {
             vec![0.0; files.len()]
         };
+        // Rank the RISK (= 1 - coverage), not the coverage itself —
+        // Ruby `coverage_risk_pct = Normalizer.percentile_rank(
+        // coverage_risk_values, @files)`. A 0%-covered file gets
+        // risk_pct ≈ 1.0 so it adds to the composite; a 100%-covered
+        // file gets risk_pct ≈ 0.0.
         let coverage_pcts = if has_coverage {
-            percentile_rank_f64(&coverage_values)
+            percentile_rank_f64(&coverage_risk_values)
         } else {
             vec![0.0; files.len()]
         };

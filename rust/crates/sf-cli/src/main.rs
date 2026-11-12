@@ -90,9 +90,11 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    // Coverage (optional, from --coverage flag). Non-fatal errors
-    // print to stderr and degrade to an empty coverage map so the
-    // run still produces a 5-signal composite.
+    // Coverage (optional, from --coverage flag). `None` means the
+    // flag wasn't provided — coverage + interaction stay out of the
+    // composite. `Some(_)` activates both signals even if the loaded
+    // report ended up empty (Ruby `coverage_available? = !@coverage.nil?`
+    // semantics).
     let coverage = load_coverage(cli.coverage.as_deref(), &cli.path, &ruby_refs);
 
     let signals = Signals {
@@ -215,10 +217,18 @@ fn analyze_ruby_source(source: &str) -> Analysis {
 /// with an empty coverage map (coverage + interaction drop out of
 /// the composite). Missing files reported by sf-coverage are logged
 /// as a single informational line, matching Ruby CLI behaviour.
-fn load_coverage(path: Option<&Path>, root: &Path, files: &[&Path]) -> HashMap<PathBuf, f64> {
-    let Some(path) = path else {
-        return HashMap::new();
-    };
+fn load_coverage(
+    path: Option<&Path>,
+    root: &Path,
+    files: &[&Path],
+) -> Option<HashMap<PathBuf, f64>> {
+    // `None` → user didn't pass --coverage; coverage + interaction
+    // stay out of the composite. `Some(_)` activates both signals
+    // even if the loaded map is empty (Ruby
+    // `coverage_available? = !@coverage.nil?`). On load failure we
+    // also return `None` so the run degrades cleanly instead of
+    // activating an all-risk-1.0 column that would mislead.
+    let path = path?;
     match sf_coverage::load(path, root, files) {
         Ok(report) => {
             if !report.missing_files.is_empty() {
@@ -234,14 +244,14 @@ fn load_coverage(path: Option<&Path>, root: &Path, files: &[&Path]) -> HashMap<P
                     ),
                 }
             }
-            report.coverage_pct
+            Some(report.coverage_pct)
         }
         Err(err) => {
             eprintln!(
                 "stud-finder: failed to load coverage report `{}`: {err}",
                 path.display()
             );
-            HashMap::new()
+            None
         }
     }
 }
@@ -333,7 +343,7 @@ mod tests {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
-            coverage: HashMap::new(),
+            coverage: None,
         });
         let clean_rows = scorer.score_with_signals(Signals {
             graph: &g_clean,
@@ -341,7 +351,7 @@ mod tests {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
-            coverage: HashMap::new(),
+            coverage: None,
         });
 
         assert_eq!(

@@ -276,3 +276,100 @@ fn file_not_found_is_error() {
     let err = load(&dir.path().join("nope.json"), dir.path(), &refs(&files));
     assert!(matches!(err, Err(CoverageError::FileNotFound(_))));
 }
+
+// --- Ohm PR #80 regressions ---
+
+#[test]
+fn simplecov_aliased_paths_across_suites_merge_per_line() {
+    // Ohm's P1 on PR #80: SimpleCov used to key `merged` by raw
+    // filename, then normalize AFTER rate calc. An absolute alias
+    // (`/abs/root/lib/a.rb`) and a relative one (`lib/a.rb`) that
+    // resolve to the same requested file would overwrite each other
+    // nondeterministically. With normalize-before-merge, the two
+    // entries combine via per-line max and get the correct rate.
+    //
+    // Fixture: suite A reports `[1, 0]`; suite B reports `[0, 1]`
+    // for the same file via two different path spellings. Per-line
+    // max is `[1, 1]` → rate 1.0. Pre-fix Rust gave 0.5 (whichever
+    // wrote last). Ruby gives 1.0.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let json = format!(
+        r#"{{
+            "RSpec":    {{ "coverage": {{ "{root}/lib/a.rb": [1, 0] }} }},
+            "Minitest": {{ "coverage": {{ "lib/a.rb":        [0, 1] }} }}
+        }}"#
+    );
+    let path = dir.path().join("rs.json");
+    std::fs::write(&path, &json).unwrap();
+    let files = files_vec(&["lib/a.rb"]);
+    let report = load(&path, dir.path(), &refs(&files)).unwrap();
+    let rate = report.coverage_pct[&PathBuf::from("lib/a.rb")];
+    assert!(
+        (rate - 1.0).abs() < 1e-9,
+        "aliased [1,0] + [0,1] should merge to [1,1] → rate 1.0, got {rate}"
+    );
+}
+
+#[test]
+fn lcov_da_record_with_checksum_is_parsed_not_dropped() {
+    // Ohm's P2 on PR #80: LCOV's DA record is
+    // `DA:<line>,<count>[,<checksum>]`. The old `split_once(',')`
+    // left `count` as `"<count>,<checksum>"` and failed u64 parsing,
+    // silently dropping the record.
+    let lcov = "SF:a.rb
+DA:1,5,abc
+DA:2,0,def
+DA:3,2,ghi
+DA:4,0,jkl
+end_of_record
+";
+    let (dir, path) = tmp_write("coverage.info", lcov);
+    let files = files_vec(&["a.rb"]);
+    let report = load(&path, dir.path(), &refs(&files)).unwrap();
+    // 4 DA lines, 2 positive → 0.5. Pre-fix was 0.0 because every
+    // record failed to parse and da_hits stayed empty → found = 0.
+    assert!((report.coverage_pct[&PathBuf::from("a.rb")] - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn unrelated_report_entries_do_not_leak_into_output() {
+    // Ohm's P2 on PR #80: Ruby does `reported.slice(*@files)` so an
+    // entry for an UNREQUESTED file is dropped from the output.
+    // Rust used to keep it, which could falsely activate downstream
+    // coverage gating from unrelated files.
+    let json = r#"{ "coverage": {
+        "requested.rb": [1, 0],
+        "unrelated.rb": [1, 1, 1]
+    } }"#;
+    let (dir, path) = tmp_write("rs.json", json);
+    let files = files_vec(&["requested.rb"]);
+    let report = load(&path, dir.path(), &refs(&files)).unwrap();
+    assert!(
+        report
+            .coverage_pct
+            .contains_key(&PathBuf::from("requested.rb"))
+    );
+    assert!(
+        !report
+            .coverage_pct
+            .contains_key(&PathBuf::from("unrelated.rb")),
+        "unrequested entries must not appear: {:?}",
+        report.coverage_pct
+    );
+}
+
+#[test]
+fn empty_report_for_requested_files_returns_empty_but_loaded() {
+    // Companion to the "empty-provided coverage still activates
+    // signal" case: a successfully loaded report with ZERO requested-
+    // file entries must return an Ok(_) with an empty coverage_pct
+    // and every requested file in missing_files. The CLI then decides
+    // whether to pass Some(empty) or None to sf-score.
+    let json = r#"{ "coverage": { "other.rb": [1, 1] } }"#;
+    let (dir, path) = tmp_write("rs.json", json);
+    let files = files_vec(&["requested.rb"]);
+    let report = load(&path, dir.path(), &refs(&files)).unwrap();
+    assert!(report.coverage_pct.is_empty());
+    assert_eq!(report.missing_files, vec![PathBuf::from("requested.rb")]);
+}
