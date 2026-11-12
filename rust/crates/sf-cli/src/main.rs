@@ -2,9 +2,13 @@
 //!
 //! Current behaviour: walks a path, parses every Ruby file with `sf-ruby`,
 //! builds a `sf-core::DependencyGraph`, scores it with `sf-score`, and
-//! prints the `class | score | fan_in | fan_out | file` table sorted by
-//! (class rank, score desc, path asc). JS/TS files are still
-//! unprocessed this slice — they land with `sf-js` in a later PR.
+//! prints the `class | score | fan_in | fan_out | complexity | file`
+//! table sorted by (class rank, score desc, path asc). JS/TS files are
+//! still unprocessed this slice — they land with `sf-js` in a later PR.
+
+// Tests sit mid-file so the exclusion regression lives right next to
+// the `analyze_ruby_source` function it exercises; print helpers follow.
+#![allow(clippy::items_after_test_module)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -93,13 +97,13 @@ fn collect(root: &Path) -> Vec<FileRef> {
 fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
     let mut graph = DependencyGraph::new();
     let mut complexity: HashMap<PathBuf, usize> = HashMap::new();
-    // Register only Ruby files — JS/TS files have no reference extractor
-    // this slice and would otherwise distort the percentile distribution
-    // (every JS file would sit at fan_in=0, fan_out=0 and push the Ruby
-    // percentiles up). sf-js will build its own graph in a later slice.
-    for file in files.iter().filter(|f| f.language == Language::Ruby) {
-        graph.register_file(file.path.clone());
-    }
+    // Read + pre-flight-parse every Ruby file. Files with prism parse
+    // errors are EXCLUDED from the scored population entirely — not
+    // just from the complexity map. Imputation would otherwise leave a
+    // parse-failed file with complexity defaulted to 0 but still
+    // present in the fan_in/fan_out graph, pulling down the complexity
+    // percentile of healthy neighbours. JS/TS files are skipped
+    // outright: no extractor this slice.
     for file in files.iter().filter(|f| f.language == Language::Ruby) {
         let abs = root.join(&file.path);
         let source = match std::fs::read_to_string(&abs) {
@@ -109,20 +113,158 @@ fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<Pa
                 continue;
             }
         };
-        for r in sf_ruby::extract_refs(&file.path, &source) {
-            graph.add_reference(file.path.clone(), r.name);
-        }
-        let report = sf_ruby::max_complexity(&source);
-        if report.parsed_cleanly {
-            complexity.insert(file.path.clone(), report.complexity);
-        } else {
-            eprintln!(
-                "stud-finder: {} had parse errors; excluding complexity signal for this file",
-                file.path.display()
-            );
+        match analyze_ruby_source(&source) {
+            Analysis::Included(refs, cx) => {
+                graph.register_file(file.path.clone());
+                for r in refs {
+                    graph.add_reference(file.path.clone(), r.name);
+                }
+                complexity.insert(file.path.clone(), cx);
+            }
+            Analysis::Excluded => {
+                eprintln!(
+                    "stud-finder: {} had parse errors; excluding the file from the scored population",
+                    file.path.display()
+                );
+            }
         }
     }
     (graph, complexity)
+}
+
+/// Outcome of a per-file Ruby pre-flight. `Included` carries the refs
+/// and the file-level complexity; `Excluded` is for files prism
+/// couldn't parse cleanly — those files leave the scored population
+/// entirely, matching Ohm's exclusion-not-imputation policy on PR #78.
+enum Analysis {
+    Included(Vec<sf_ruby::RubyRef>, usize),
+    Excluded,
+}
+
+fn analyze_ruby_source(source: &str) -> Analysis {
+    let report = sf_ruby::max_complexity(source);
+    if !report.parsed_cleanly {
+        return Analysis::Excluded;
+    }
+    let refs = sf_ruby::extract_refs(Path::new(""), source);
+    Analysis::Included(refs, report.complexity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_ruby_source_is_included_with_refs_and_complexity() {
+        let src = r#"
+            class Order
+              def process(x)
+                if x > 0
+                  Payment.capture
+                end
+              end
+            end
+        "#;
+        match analyze_ruby_source(src) {
+            Analysis::Included(refs, cx) => {
+                assert!(refs.iter().any(|r| r.name == "Payment"));
+                assert!(cx >= 2, "if adds +1, so complexity >= 2; got {cx}");
+            }
+            Analysis::Excluded => panic!("clean source should be Included"),
+        }
+    }
+
+    #[test]
+    fn parse_failing_ruby_source_is_excluded() {
+        // Ohm's P1-on-PR#78-review-2 regression: a parse-failed file
+        // must not enter the scored population at all — no refs, no
+        // complexity, no graph registration. Returning `Excluded`
+        // guarantees `build_signals` skips every per-file step for
+        // this source.
+        let src = "class Foo\n  this is: not; valid! ruby !!\nend\n";
+        assert!(
+            matches!(analyze_ruby_source(src), Analysis::Excluded),
+            "a file with prism parse errors must produce Excluded"
+        );
+    }
+
+    #[test]
+    fn exclusion_keeps_neighbour_scores_independent_of_broken_file() {
+        // End-to-end: a graph built from a mix of clean + broken sources
+        // (via `analyze_ruby_source` + manual `DependencyGraph` wiring,
+        // the same shape `build_signals` uses) produces IDENTICAL
+        // ScoredFile rows for the clean files as a graph built from the
+        // clean files alone. Imputation (register broken + default
+        // complexity to 0) would shift neighbour percentiles.
+        use sf_core::DependencyGraph;
+        use sf_score::{Scorer, Signals};
+
+        let clean_a = "class A\n  def go(x)\n    if x then B.do end\n  end\nend\n";
+        let clean_b = "class B\n  def hi\n    C.m\n  end\nend\n";
+        let clean_c = "class C\n  def m; 1; end\nend\n";
+        let broken = "class Broken\n  this is: not; valid! ruby !!\nend\n";
+
+        let include = |graph: &mut DependencyGraph,
+                       cx: &mut HashMap<PathBuf, usize>,
+                       path: &str,
+                       source: &str| {
+            if let Analysis::Included(refs, c) = analyze_ruby_source(source) {
+                let p = PathBuf::from(path);
+                graph.register_file(p.clone());
+                for r in refs {
+                    graph.add_reference(p.clone(), r.name);
+                }
+                cx.insert(p, c);
+            }
+        };
+
+        let (mut g_mixed, mut cx_mixed) = (DependencyGraph::new(), HashMap::new());
+        include(&mut g_mixed, &mut cx_mixed, "a.rb", clean_a);
+        include(&mut g_mixed, &mut cx_mixed, "b.rb", clean_b);
+        include(&mut g_mixed, &mut cx_mixed, "c.rb", clean_c);
+        // Broken file is offered but must be dropped by Analysis::Excluded.
+        include(&mut g_mixed, &mut cx_mixed, "broken.rb", broken);
+
+        let (mut g_clean, mut cx_clean) = (DependencyGraph::new(), HashMap::new());
+        include(&mut g_clean, &mut cx_clean, "a.rb", clean_a);
+        include(&mut g_clean, &mut cx_clean, "b.rb", clean_b);
+        include(&mut g_clean, &mut cx_clean, "c.rb", clean_c);
+
+        let scorer = Scorer::new();
+        let mixed_rows = scorer.score_with_signals(Signals {
+            graph: &g_mixed,
+            complexity: cx_mixed,
+        });
+        let clean_rows = scorer.score_with_signals(Signals {
+            graph: &g_clean,
+            complexity: cx_clean,
+        });
+
+        assert_eq!(
+            mixed_rows.len(),
+            clean_rows.len(),
+            "the parse-failed file must not appear in the scored rows"
+        );
+        for clean_row in &clean_rows {
+            let mixed_row = mixed_rows
+                .iter()
+                .find(|r| r.path == clean_row.path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing row for {} in the mixed graph",
+                        clean_row.path.display()
+                    )
+                });
+            assert!(
+                (mixed_row.composite - clean_row.composite).abs() < 1e-9,
+                "exclusion must not shift the composite of clean files; {} drifted {} vs {}",
+                clean_row.path.display(),
+                mixed_row.composite,
+                clean_row.composite
+            );
+            assert_eq!(mixed_row.class, clean_row.class);
+        }
+    }
 }
 
 fn print_table(rows: &[ScoredFile]) {
