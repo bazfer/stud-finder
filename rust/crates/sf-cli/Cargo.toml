@@ -17,3 +17,4 @@ clap.workspace = true
 walkdir.workspace = true
 sf-core.workspace = true
 sf-ruby = { path = "../sf-ruby" }
+sf-score = { path = "../sf-score" }

@@ -89,11 +89,21 @@ impl DependencyGraph {
             .count()
     }
 
+    /// How many distinct outgoing class references `path` makes. Returns 0
+    /// for an unregistered path, matching the symmetry contract with
+    /// `fan_in` — the graph answers about explicitly registered files only.
+    /// Duplicates are already deduped per-file in `add_reference`'s
+    /// internal `HashSet`, so this is a count of *distinct* targets.
+    pub fn fan_out(&self, path: &Path) -> usize {
+        if !self.registered.contains(path) {
+            return 0;
+        }
+        self.outgoing.get(path).map(|refs| refs.len()).unwrap_or(0)
+    }
+
     /// Iterator over all registered files.
     pub fn files(&self) -> impl Iterator<Item = &Path> {
-        self.defined_by
-            .values()
-            .flat_map(|paths| paths.iter().map(PathBuf::as_path))
+        self.registered.iter().map(PathBuf::as_path)
     }
 }
 
@@ -187,5 +197,39 @@ mod tests {
             0,
             "unregistered path with matching basename must not get fan_in"
         );
+    }
+
+    #[test]
+    fn fan_out_counts_distinct_outgoing_refs() {
+        let mut g = DependencyGraph::new();
+        g.register_file("app/services/checkout.rb");
+        g.add_reference("app/services/checkout.rb", "Order");
+        g.add_reference("app/services/checkout.rb", "User");
+        g.add_reference("app/services/checkout.rb", "Order"); // duplicate
+        assert_eq!(g.fan_out(Path::new("app/services/checkout.rb")), 2);
+    }
+
+    #[test]
+    fn fan_out_zero_for_file_with_no_references() {
+        let mut g = DependencyGraph::new();
+        g.register_file("app/models/order.rb");
+        assert_eq!(g.fan_out(Path::new("app/models/order.rb")), 0);
+    }
+
+    #[test]
+    fn fan_out_zero_for_unregistered_path() {
+        let g = DependencyGraph::new();
+        assert_eq!(g.fan_out(Path::new("some/random/path.rb")), 0);
+    }
+
+    #[test]
+    fn files_iterates_all_registered() {
+        let mut g = DependencyGraph::new();
+        g.register_file("a.rb");
+        g.register_file("b.rb");
+        g.register_file("nested/c.rb");
+        let mut files: Vec<_> = g.files().map(|p| p.to_string_lossy().to_string()).collect();
+        files.sort();
+        assert_eq!(files, vec!["a.rb", "b.rb", "nested/c.rb"]);
     }
 }

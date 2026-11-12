@@ -1,15 +1,17 @@
 //! stud-finder CLI (Rust port, work in progress).
 //!
 //! Current behaviour: walks a path, parses every Ruby file with `sf-ruby`,
-//! builds a `sf-core::DependencyGraph`, and prints one row per Ruby file
-//! with its `fan_in` count. JS/TS files are still unprocessed this slice —
-//! they land with `sf-js` in a later PR.
+//! builds a `sf-core::DependencyGraph`, scores it with `sf-score`, and
+//! prints the `class | score | fan_in | fan_out | file` table sorted by
+//! (class rank, score desc, path asc). JS/TS files are still
+//! unprocessed this slice — they land with `sf-js` in a later PR.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
 use sf_core::{DependencyGraph, FileRef, Language};
+use sf_score::{ScoredFile, Scorer};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -25,8 +27,27 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let files = collect(&cli.path);
+    // Score the Ruby graph on its own — JS/TS files are unprocessed in
+    // this slice and must NOT participate in the percentile calculation
+    // (they would otherwise pin a fan_in=0/fan_out=0 row into the
+    // distribution and depress Ruby percentiles). sf-js builds its own
+    // graph in a later slice; each language gets its own ranking
+    // section, matching the Ruby implementation.
     let graph = build_graph(&cli.path, &files);
-    print_table(&graph, &files);
+    let scored = Scorer::new().score(&graph);
+    let mut rows = scored;
+    rows.sort_by(|a, b| {
+        a.class
+            .rank()
+            .cmp(&b.class.rank())
+            .then_with(|| {
+                b.composite
+                    .partial_cmp(&a.composite)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    print_table(&rows);
     Ok(())
 }
 
@@ -66,7 +87,11 @@ fn collect(root: &Path) -> Vec<FileRef> {
 
 fn build_graph(root: &Path, files: &[FileRef]) -> DependencyGraph {
     let mut graph = DependencyGraph::new();
-    for file in files {
+    // Register only Ruby files — JS/TS files have no reference extractor
+    // this slice and would otherwise distort the percentile distribution
+    // (every JS file would sit at fan_in=0, fan_out=0 and push the Ruby
+    // percentiles up). sf-js will build its own graph in a later slice.
+    for file in files.iter().filter(|f| f.language == Language::Ruby) {
         graph.register_file(file.path.clone());
     }
     for file in files.iter().filter(|f| f.language == Language::Ruby) {
@@ -85,24 +110,51 @@ fn build_graph(root: &Path, files: &[FileRef]) -> DependencyGraph {
     graph
 }
 
-fn print_table(graph: &DependencyGraph, files: &[FileRef]) {
-    let mut rows: Vec<(usize, &Path)> = files
+fn print_table(rows: &[ScoredFile]) {
+    let class_width = rows
         .iter()
-        .filter(|f| f.language == Language::Ruby)
-        .map(|f| (graph.fan_in(&f.path), f.path.as_path()))
-        .collect();
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-
-    let widest = rows
+        .map(|r| r.class.as_str().len())
+        .max()
+        .unwrap_or(0)
+        .max("class".len());
+    let fan_in_width = rows
         .iter()
-        .map(|(fi, _)| width_of(*fi))
+        .map(|r| width_of(r.fan_in))
         .max()
         .unwrap_or(1)
         .max("fan_in".len());
+    let fan_out_width = rows
+        .iter()
+        .map(|r| width_of(r.fan_out))
+        .max()
+        .unwrap_or(1)
+        .max("fan_out".len());
+    let score_width = "0.0000".len();
 
-    println!("{:>width$}  file", "fan_in", width = widest);
-    for (fan_in, path) in rows {
-        println!("{:>width$}  {}", fan_in, path.display(), width = widest);
+    println!(
+        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  file",
+        "class",
+        "score",
+        "fan_in",
+        "fan_out",
+        cw = class_width,
+        sw = score_width,
+        fi = fan_in_width,
+        fo = fan_out_width,
+    );
+    for r in rows {
+        println!(
+            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {}",
+            r.class.as_str(),
+            r.composite,
+            r.fan_in,
+            r.fan_out,
+            r.path.display(),
+            cw = class_width,
+            sw = score_width,
+            fi = fan_in_width,
+            fo = fan_out_width,
+        );
     }
 }
 
