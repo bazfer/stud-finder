@@ -249,6 +249,7 @@ dependencies = [
  "clap",
  "sf-core",
  "sf-ruby",
+ "sf-score",
  "walkdir",
 ]
 
@@ -261,6 +262,13 @@ name = "sf-ruby"
 version = "0.0.0"
 dependencies = [
  "ruby-prism",
+ "sf-core",
+]
+
+[[package]]
+name = "sf-score"
+version = "0.0.0"
+dependencies = [
  "sf-core",
 ]
 
