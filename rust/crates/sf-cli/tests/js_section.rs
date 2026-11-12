@@ -96,6 +96,39 @@ fn same_basename_distinct_paths_do_not_collapse() {
 }
 
 #[test]
+fn non_js_extension_specifier_never_rewrites_to_js() {
+    // Ohm P1 on PR #81 re-review: `./foo.json` (or any non-JS
+    // extension) must NOT get rewritten to `./foo.ts`. The previous
+    // fix only protected JS extensions — unprotected extensions
+    // still fell into the suffix-inference branch.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("foo.ts"), "export const foo = 1;\n").unwrap();
+    // No foo.json exists on disk. The caller still imports it.
+    std::fs::write(
+        root.join("caller.ts"),
+        "import data from './foo.json';\nconsole.log(data);\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_stud-finder");
+    let out = Command::new(bin).arg(root).output().expect("stud-finder");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let js_section = stdout.split_once("# JavaScript").map(|(_, s)| s).unwrap();
+    let row = js_section
+        .lines()
+        .find(|l| l.contains("foo.ts"))
+        .expect("foo.ts row");
+    let fields: Vec<&str> = row.split_whitespace().collect();
+    let fan_in: usize = fields[2].parse().unwrap();
+    assert_eq!(
+        fan_in, 0,
+        "`./foo.json` specifier must NOT be rewritten to foo.ts"
+    );
+}
+
+#[test]
 fn explicit_extension_does_not_fall_through_to_other_extensions() {
     // Ohm P1 on PR #81: importing `./foo.js` while a `foo.ts` also
     // exists must NOT silently resolve to foo.ts. Non-existing

@@ -30,7 +30,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::Visit;
 use oxc_ast::ast::{
     CatchClause, ConditionalExpression, DoWhileStatement, ForInStatement, ForOfStatement,
-    ForStatement, FunctionBody, IfStatement, LogicalExpression, SwitchCase, WhileStatement,
+    ForStatement, IfStatement, LogicalExpression, SwitchCase, WhileStatement,
 };
 use oxc_ast::visit::walk;
 use oxc_parser::Parser;
@@ -101,19 +101,13 @@ pub fn max_complexity(source: &str, path: Option<&Path>) -> ComplexityReport {
             parsed_cleanly: false,
         };
     }
-    let mut collector = FunctionBodyCollector { bodies: Vec::new() };
-    collector.visit_program(&parsed.program);
-    let mut max = 0usize;
-    for body in collector.bodies {
-        let mut counter = DecisionCounter { decisions: 0 };
-        counter.visit_function_body(body);
-        let c = 1 + counter.decisions;
-        if c > max {
-            max = c;
-        }
-    }
+    let mut visitor = ComplexityVisitor {
+        stack: Vec::new(),
+        max: 0,
+    };
+    visitor.visit_program(&parsed.program);
     ComplexityReport {
-        complexity: max,
+        complexity: visitor.max,
         parsed_cleanly,
     }
 }
@@ -201,109 +195,106 @@ impl<'a> Visit<'a> for ImportCollector {
     }
 }
 
-// --- function body discovery ---
+// --- complexity: single-pass, stack-scoped visitor ---
 
-struct FunctionBodyCollector<'a> {
-    bodies: Vec<&'a FunctionBody<'a>>,
+/// Walks the AST once, pushing a fresh 0 on `stack` at every function
+/// boundary and popping it on exit to update `max`. Decision nodes
+/// `+1` the top of the stack — scoped automatically to the innermost
+/// enclosing function. No stored references outside the visitor, no
+/// unsafe transmutes. Addresses Ohm's non-blocking note on PR #81.
+struct ComplexityVisitor {
+    stack: Vec<usize>,
+    max: usize,
 }
 
-impl<'a> Visit<'a> for FunctionBodyCollector<'a> {
+impl ComplexityVisitor {
+    fn bump(&mut self) {
+        if let Some(top) = self.stack.last_mut() {
+            *top += 1;
+        }
+    }
+    fn enter_function(&mut self) {
+        self.stack.push(0);
+    }
+    fn leave_function(&mut self) {
+        if let Some(decisions) = self.stack.pop() {
+            let c = 1 + decisions;
+            if c > self.max {
+                self.max = c;
+            }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ComplexityVisitor {
     fn visit_function(
         &mut self,
         it: &oxc_ast::ast::Function<'a>,
         flags: oxc_syntax::scope::ScopeFlags,
     ) {
-        if let Some(body) = &it.body {
-            // SAFETY: the allocator outlives the visitor; we only
-            // store references that share the AST's lifetime.
-            let ptr: &FunctionBody<'a> = unsafe { std::mem::transmute(body.as_ref()) };
-            self.bodies.push(ptr);
-        }
+        self.enter_function();
         walk::walk_function(self, it, flags);
+        self.leave_function();
     }
 
     fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        let ptr: &FunctionBody<'a> = unsafe { std::mem::transmute(it.body.as_ref()) };
-        self.bodies.push(ptr);
+        self.enter_function();
         walk::walk_arrow_function_expression(self, it);
+        self.leave_function();
     }
-}
 
-// --- decision counter (scoped to one function body) ---
-
-struct DecisionCounter {
-    decisions: usize,
-}
-
-impl<'a> Visit<'a> for DecisionCounter {
     fn visit_if_statement(&mut self, it: &IfStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_if_statement(self, it);
     }
 
     fn visit_conditional_expression(&mut self, it: &ConditionalExpression<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_conditional_expression(self, it);
     }
 
     fn visit_logical_expression(&mut self, it: &LogicalExpression<'a>) {
-        // `&&`, `||`, `??` each +1.
         match it.operator {
-            LogicalOperator::And | LogicalOperator::Or | LogicalOperator::Coalesce => {
-                self.decisions += 1;
-            }
+            LogicalOperator::And | LogicalOperator::Or | LogicalOperator::Coalesce => self.bump(),
         }
         walk::walk_logical_expression(self, it);
     }
 
     fn visit_switch_case(&mut self, it: &SwitchCase<'a>) {
         if it.test.is_some() {
-            self.decisions += 1;
+            self.bump();
         }
         walk::walk_switch_case(self, it);
     }
 
     fn visit_for_statement(&mut self, it: &ForStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_for_statement(self, it);
     }
 
     fn visit_for_in_statement(&mut self, it: &ForInStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_for_in_statement(self, it);
     }
 
     fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_for_of_statement(self, it);
     }
 
     fn visit_while_statement(&mut self, it: &WhileStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_while_statement(self, it);
     }
 
     fn visit_do_while_statement(&mut self, it: &DoWhileStatement<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_do_while_statement(self, it);
     }
 
     fn visit_catch_clause(&mut self, it: &CatchClause<'a>) {
-        self.decisions += 1;
+        self.bump();
         walk::walk_catch_clause(self, it);
-    }
-
-    // Stop at function boundaries — nested functions have their own
-    // complexity entry in the FunctionBodyCollector pass; walking
-    // into them here would inflate the enclosing counter.
-    fn visit_function(
-        &mut self,
-        _it: &oxc_ast::ast::Function<'a>,
-        _flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-    }
-
-    fn visit_arrow_function_expression(&mut self, _it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
     }
 }
 

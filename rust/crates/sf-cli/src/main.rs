@@ -210,24 +210,21 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
 const JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
 
 /// Resolves a target produced by `sf_js::extract_refs` against the
-/// files registered in `graph`. Order (Ohm's P1 on PR #81):
-///   1. If the target already has one of the recognised JS extensions
-///      AND is registered exactly, use it as-is.
-///   2. Otherwise, if the target has NO recognised extension, try
-///      each `.ts/.tsx/.js/.jsx/.mjs/.cjs` suffix.
-///   3. Otherwise, try `<target>/index.<ext>` for each extension.
-///
-/// An explicit extension that doesn't match a registered file is NOT
-/// silently rewritten (that would create false edges).
+/// files registered in `graph`. Order (Ohm's P1 on PRs #81):
+///   1. If the target already carries ANY extension (JS or not),
+///      accept ONLY a registered file at that exact path. Never
+///      rewrite the suffix — `./foo.js` with only `foo.ts` registered
+///      produces no edge, and `./foo.json` cannot be pulled into
+///      `foo.ts`.
+///   2. Extensionless target: try each JS extension suffix.
+///   3. Still no match on an extensionless target: try
+///      `<target>/index.<ext>` for each extension.
 fn resolve_js_module(graph: &DependencyGraph, target: &Path) -> Option<PathBuf> {
-    let has_js_ext = target
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|ext| JS_EXTS.contains(&ext));
+    let has_any_ext = target.extension().is_some();
 
-    if has_js_ext {
-        // Exact-extension spec: ONLY accept a registered file at that
-        // exact path. Don't fall through to extension inference.
+    if has_any_ext {
+        // Explicit extension — any extension — is respected exactly.
+        // No suffix substitution, no index fallback.
         if graph.files().any(|f| f == target) {
             return Some(target.to_path_buf());
         }

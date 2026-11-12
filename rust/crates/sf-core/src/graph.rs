@@ -93,31 +93,33 @@ impl DependencyGraph {
         if !self.registered.contains(path) {
             return 0;
         }
-        let mut count = 0usize;
-        // Class-name edges (Ruby-style Zeitwerk resolution). The two
-        // `if let`s are nested rather than a let-chain because this
-        // workspace targets MSRV 1.85; let-chains stabilized in 1.88.
+        // Collect UNIQUE source paths across both edge types so a
+        // file with BOTH a class-name edge AND a path-exact edge to
+        // the same target counts exactly once. Fixes Ohm's
+        // non-blocking double-count note on PR #81.
+        let mut sources: HashSet<&Path> = HashSet::new();
+
+        // Class-name edges (Ruby-style Zeitwerk resolution). The
+        // two `if let`s are nested rather than a let-chain because
+        // this workspace targets MSRV 1.85.
         #[allow(clippy::collapsible_if)]
         if let Some(class) = primary_class_of(path) {
             if let Some(defining) = self.defined_by.get(&class) {
                 let defining_set: HashSet<&Path> = defining.iter().map(PathBuf::as_path).collect();
-                count += self
-                    .outgoing
-                    .iter()
-                    .filter(|(from, refs)| {
-                        !defining_set.contains(from.as_path()) && refs.contains(&class)
-                    })
-                    .count();
+                for (from, refs) in &self.outgoing {
+                    if !defining_set.contains(from.as_path()) && refs.contains(&class) {
+                        sources.insert(from.as_path());
+                    }
+                }
             }
         }
-        // Path-exact edges (used by JS wiring). Count files other than
-        // `path` whose path_outgoing contains `path` exactly.
-        count += self
-            .path_outgoing
-            .iter()
-            .filter(|(from, targets)| from.as_path() != path && targets.contains(path))
-            .count();
-        count
+        // Path-exact edges.
+        for (from, targets) in &self.path_outgoing {
+            if from.as_path() != path && targets.contains(path) {
+                sources.insert(from.as_path());
+            }
+        }
+        sources.len()
     }
 
     /// How many distinct outgoing class references `path` makes. Returns 0
