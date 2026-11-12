@@ -189,12 +189,15 @@ impl Scorer {
     }
 }
 
-/// Fractional-rank percentile over a slice of `usize` values, in
-/// [0.0, 1.0]. Ties get the mean of their rank positions, matching the
-/// Ruby implementation's dispersion behaviour. A slice with a single
-/// value, or all-equal values, returns `0.0` for every entry — matching
-/// the Ruby "insufficient dispersion" fallback (the raw signal becomes
-/// uninformative).
+/// Lower-bound fractional-rank percentile over a slice of `usize`
+/// values, in [0.0, 1.0]. For each value, the rank is the number of
+/// *strictly smaller* values divided by `(n - 1)` — so ties all share
+/// the lower end of their rank band, matching the Ruby implementation's
+/// `Normalizer.percentile_rank` + `lower_bound` on `lib/stud_finder/normalizer.rb`
+/// on main (cross-checked when sf-score was ported). A slice with a
+/// single value, or all-equal values, returns `0.0` for every entry —
+/// matching the Ruby "insufficient dispersion" fallback (the raw
+/// signal becomes uninformative).
 fn percentile_rank_usize(values: &[usize]) -> Vec<f64> {
     let as_f64: Vec<f64> = values.iter().map(|&v| v as f64).collect();
     percentile_rank_f64(&as_f64)
@@ -205,29 +208,35 @@ fn percentile_rank_f64(values: &[f64]) -> Vec<f64> {
     if n <= 1 {
         return vec![0.0; n];
     }
-    let mut sorted: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     // Dispersion check: if all equal, every pct is 0.0.
-    if (sorted[0].1 - sorted[n - 1].1).abs() < f64::EPSILON {
+    if (sorted[0] - sorted[n - 1]).abs() < f64::EPSILON {
         return vec![0.0; n];
     }
-    // Assign the mean rank to each tie group, then divide by (n - 1)
-    // so the lowest value gets 0.0 and the highest 1.0.
-    let mut pcts = vec![0.0; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i + 1;
-        while j < n && (sorted[j].1 - sorted[i].1).abs() < f64::EPSILON {
-            j += 1;
+    let denom = (n - 1) as f64;
+    values
+        .iter()
+        .map(|&v| lower_bound(&sorted, v) as f64 / denom)
+        .collect()
+}
+
+/// First index in `sorted` whose value is NOT strictly less than
+/// `target`. Equivalent to Ruby's `Normalizer.lower_bound` — counts
+/// strictly-smaller entries, giving every tie group the same rank at
+/// the low end of their band.
+fn lower_bound(sorted: &[f64], target: f64) -> usize {
+    let mut low = 0;
+    let mut high = sorted.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        if sorted[mid] < target {
+            low = mid + 1;
+        } else {
+            high = mid;
         }
-        let mean_rank = (i + j - 1) as f64 / 2.0;
-        let pct = mean_rank / (n - 1) as f64;
-        for k in i..j {
-            pcts[sorted[k].0] = pct;
-        }
-        i = j;
     }
-    pcts
+    low
 }
 
 fn round4(x: f64) -> f64 {
@@ -275,16 +284,32 @@ mod tests {
     }
 
     #[test]
-    fn percentile_rank_ties_share_mean_rank() {
+    fn percentile_rank_ties_use_lower_bound_matching_ruby() {
         // All the same → every entry gets 0.0 (insufficient dispersion).
         let r = percentile_rank_usize(&[7, 7, 7, 7]);
         assert_eq!(r, vec![0.0, 0.0, 0.0, 0.0]);
-        // Two tied at the top:
+        // Ohm's P1 example: [0, 0, 1] → [0.0, 0.0, 1.0] (lower bound),
+        // NOT [0.25, 0.25, 1.0] (mean rank).
+        let r = percentile_rank_usize(&[0, 0, 1]);
+        assert_eq!(r, vec![0.0, 0.0, 1.0]);
+        // Two tied at the top: `[1, 2, 3, 3]` with lower_bound:
+        //   1 → 0 strictly smaller → 0/3
+        //   2 → 1 strictly smaller → 1/3
+        //   3 → 2 strictly smaller → 2/3 (both ties)
         let r = percentile_rank_usize(&[1, 2, 3, 3]);
         assert!((r[0] - 0.0).abs() < 1e-9);
         assert!((r[1] - 1.0 / 3.0).abs() < 1e-9);
-        assert!((r[2] - 5.0 / 6.0).abs() < 1e-9);
-        assert!((r[3] - 5.0 / 6.0).abs() < 1e-9);
+        assert!((r[2] - 2.0 / 3.0).abs() < 1e-9);
+        assert!((r[3] - 2.0 / 3.0).abs() < 1e-9);
+        // Ties at the bottom: `[1, 1, 2, 3]`:
+        //   1 → 0 strictly smaller → 0/3 (both ties)
+        //   2 → 2 strictly smaller → 2/3
+        //   3 → 3 strictly smaller → 1.0
+        let r = percentile_rank_usize(&[1, 1, 2, 3]);
+        assert!((r[0] - 0.0).abs() < 1e-9);
+        assert!((r[1] - 0.0).abs() < 1e-9);
+        assert!((r[2] - 2.0 / 3.0).abs() < 1e-9);
+        assert!((r[3] - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -321,41 +346,118 @@ mod tests {
         assert_eq!(trunks + branches + leaves, 5);
     }
 
-    #[test]
-    fn fan_in_floor_escalates_leaf_to_branch() {
-        // Build a graph where one file has raw fan_in >= FAN_IN_FLOOR but
-        // low composite score (because everyone else also has fan_in, so
-        // its percentile rank is middling). Verify it escalates to Branch.
+    /// Build a graph where `hot.rb` has raw fan_in >= `FAN_IN_FLOOR`
+    /// AND a composite percentile low enough to classify as `Leaf`
+    /// without the floor. That's the only configuration the floor rule
+    /// is for — a visibly dangerous file flattened by percentile-rank
+    /// compression needs the absolute threshold to escape `Leaf`.
+    ///
+    /// Construction: 100 peer files each with fan_in = fan_out = 50
+    /// (via a mutual-reference ring). `hot.rb` has fan_in = 30 (over
+    /// the floor) but fan_out = 0. That drops hot's fan_in and fan_out
+    /// percentiles below the peer majority, so its composite lands in
+    /// the bottom 50% → `Leaf` without the floor, `Branch` with.
+    fn floor_test_graph() -> DependencyGraph {
         let mut g = DependencyGraph::new();
-        g.register_file("hot.rb");
-        g.register_file("other.rb");
-        for i in 0..26 {
-            let file = format!("caller_{i}.rb");
-            g.register_file(&file);
-            g.add_reference(&file, "Hot");
+        let peer_count = 100usize;
+        for i in 0..peer_count {
+            g.register_file(format!("peer_{i}.rb"));
         }
-        let rows = Scorer::new().score(&g);
-        let hot = row(&rows, "hot.rb");
+        for i in 0..peer_count {
+            for offset in 1..=50 {
+                let target_class = format!("Peer{}", (i + offset) % peer_count);
+                g.add_reference(format!("peer_{i}.rb"), target_class);
+            }
+        }
+        g.register_file("hot.rb");
+        for i in 0..30 {
+            g.add_reference(format!("peer_{i}.rb"), "Hot");
+        }
+        g
+    }
+
+    #[test]
+    fn fan_in_floor_escalates_leaf_to_branch_when_composite_is_low() {
+        let g = floor_test_graph();
+
+        // Baseline: same graph scored with the floor effectively
+        // disabled (`fan_in_floor = usize::MAX`). Hot should classify
+        // as Leaf by composite percentile — without that baseline, the
+        // "escalates" assertion could pass vacuously on a file that was
+        // already above Leaf.
+        let no_floor =
+            Scorer::with_thresholds(TRUNK_THRESHOLD_PCT, BRANCH_THRESHOLD_PCT, usize::MAX);
+        let rows_no_floor = no_floor.score(&g);
+        let hot_no_floor = row(&rows_no_floor, "hot.rb");
         assert!(
-            hot.fan_in >= FAN_IN_FLOOR,
-            "setup: hot should trip the floor"
+            hot_no_floor.fan_in >= FAN_IN_FLOOR,
+            "setup: hot should meet the floor count ({} >= {})",
+            hot_no_floor.fan_in,
+            FAN_IN_FLOOR
         );
-        assert_ne!(
-            hot.class,
+        assert_eq!(
+            hot_no_floor.class,
             Class::Leaf,
-            "fan_in >= {FAN_IN_FLOOR} must escalate Leaf to at least Branch"
+            "setup: without floor, hot should classify as Leaf by composite percentile"
+        );
+
+        // With the default floor, the same graph escalates hot to Branch.
+        let default = Scorer::new();
+        let rows_default = default.score(&g);
+        let hot_default = row(&rows_default, "hot.rb");
+        assert_eq!(
+            hot_default.class,
+            Class::Branch,
+            "fan_in >= {FAN_IN_FLOOR} must escalate Leaf to Branch"
         );
     }
 
     #[test]
-    fn fan_in_floor_does_not_downgrade_trunk() {
-        let g = tiny_graph();
-        let rows = Scorer::new().score(&g);
-        for r in rows {
-            if r.class == Class::Trunk {
-                assert_eq!(r.class, Class::Trunk, "floor must not downgrade Trunk");
-            }
+    fn fan_in_floor_never_downgrades_a_trunk_that_meets_the_count() {
+        // A file that is Trunk by composite AND meets the floor count
+        // must stay Trunk — the floor only ever escalates Leaf, never
+        // touches Branch or Trunk.
+        //
+        // Construction: `top.rb` has the maximum fan_in (30, over the
+        // floor) AND the maximum fan_out (30 outgoing refs to Dep1..Dep30).
+        // 30 "caller" files each reference Top and nothing else so they
+        // bring fan_in up without matching top's fan_out. This puts top
+        // at (fan_in=30, fan_out=30) — both percentile maxes — so
+        // composite is at the top → Trunk unambiguously.
+        let mut g = DependencyGraph::new();
+        g.register_file("top.rb");
+        for i in 0..30 {
+            g.add_reference("top.rb", format!("Dep{i}"));
         }
+        for i in 0..30 {
+            let f = format!("caller_{i}.rb");
+            g.register_file(&f);
+            g.add_reference(&f, "Top");
+        }
+
+        // Baseline with floor disabled: top is Trunk by composite alone.
+        let no_floor =
+            Scorer::with_thresholds(TRUNK_THRESHOLD_PCT, BRANCH_THRESHOLD_PCT, usize::MAX);
+        let top_no_floor = row(&no_floor.score(&g), "top.rb").clone();
+        assert!(
+            top_no_floor.fan_in >= FAN_IN_FLOOR,
+            "setup: top should meet the floor count ({} >= {})",
+            top_no_floor.fan_in,
+            FAN_IN_FLOOR
+        );
+        assert_eq!(
+            top_no_floor.class,
+            Class::Trunk,
+            "setup: top should be Trunk by composite, independent of the floor"
+        );
+
+        // Default scorer runs the floor rule; top still Trunk.
+        let top_default = row(&Scorer::new().score(&g), "top.rb").clone();
+        assert_eq!(
+            top_default.class,
+            Class::Trunk,
+            "floor must not downgrade a Trunk even when it meets the floor count"
+        );
     }
 
     #[test]

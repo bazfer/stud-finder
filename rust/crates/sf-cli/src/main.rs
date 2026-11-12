@@ -27,17 +27,15 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let files = collect(&cli.path);
+    // Score the Ruby graph on its own — JS/TS files are unprocessed in
+    // this slice and must NOT participate in the percentile calculation
+    // (they would otherwise pin a fan_in=0/fan_out=0 row into the
+    // distribution and depress Ruby percentiles). sf-js builds its own
+    // graph in a later slice; each language gets its own ranking
+    // section, matching the Ruby implementation.
     let graph = build_graph(&cli.path, &files);
     let scored = Scorer::new().score(&graph);
-    let ruby_paths: std::collections::HashSet<PathBuf> = files
-        .iter()
-        .filter(|f| f.language == Language::Ruby)
-        .map(|f| f.path.clone())
-        .collect();
-    let mut rows: Vec<ScoredFile> = scored
-        .into_iter()
-        .filter(|r| ruby_paths.contains(&r.path))
-        .collect();
+    let mut rows = scored;
     rows.sort_by(|a, b| {
         a.class
             .rank()
@@ -89,7 +87,11 @@ fn collect(root: &Path) -> Vec<FileRef> {
 
 fn build_graph(root: &Path, files: &[FileRef]) -> DependencyGraph {
     let mut graph = DependencyGraph::new();
-    for file in files {
+    // Register only Ruby files — JS/TS files have no reference extractor
+    // this slice and would otherwise distort the percentile distribution
+    // (every JS file would sit at fan_in=0, fan_out=0 and push the Ruby
+    // percentiles up). sf-js will build its own graph in a later slice.
+    for file in files.iter().filter(|f| f.language == Language::Ruby) {
         graph.register_file(file.path.clone());
     }
     for file in files.iter().filter(|f| f.language == Language::Ruby) {
