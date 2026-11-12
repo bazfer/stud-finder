@@ -1,8 +1,10 @@
 //! stud-finder CLI (Rust port, work in progress).
 //!
 //! Current behaviour: walks a path, parses every Ruby file with `sf-ruby`,
-//! builds a `sf-core::DependencyGraph`, scores it with `sf-score`, and
-//! prints the `class | score | fan_in | fan_out | complexity | file`
+//! builds a `sf-core::DependencyGraph`, pulls churn + coupling signals
+//! from `sf-history` over the same repo, scores it with `sf-score`, and
+//! prints the
+//! `class | score | fan_in | fan_out | complexity | churn | coupling | file`
 //! table sorted by (class rank, score desc, path asc). JS/TS files are
 //! still unprocessed this slice — they land with `sf-js` in a later PR.
 
@@ -16,7 +18,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 use sf_core::{DependencyGraph, FileRef, Language};
-use sf_score::{ScoredFile, Scorer, Signals};
+use sf_history::{DEFAULT_WINDOW_DAYS, HistoryWarning};
+use sf_score::{CouplingSignal, ScoredFile, Scorer, Signals};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -39,9 +42,54 @@ fn main() -> Result<()> {
     // graph in a later slice; each language gets its own ranking
     // section, matching the Ruby implementation.
     let (graph, complexity) = build_signals(&cli.path, &files);
+
+    // Pull churn + coupling from git history over the same registered
+    // Ruby files. A non-git-repo or missing `git` degrades to zero
+    // signals with a stderr warning — the run still completes.
+    let ruby_paths: Vec<PathBuf> = graph.files().map(Path::to_path_buf).collect();
+    let ruby_refs: Vec<&Path> = ruby_paths.iter().map(PathBuf::as_path).collect();
+    let history = sf_history::analyze(&cli.path, &ruby_refs, DEFAULT_WINDOW_DAYS);
+    for warning in &history.warnings {
+        match warning {
+            HistoryWarning::BulkCommitsSkipped {
+                count,
+                max_commit_files,
+            } => eprintln!(
+                "stud-finder: {count} bulk commits (> {max_commit_files} files) skipped from coupling"
+            ),
+            HistoryWarning::NotAGitRepo => eprintln!(
+                "stud-finder: {} is not a git repository; churn + coupling signals are skipped",
+                cli.path.display()
+            ),
+            HistoryWarning::GitNotFound => {
+                eprintln!(
+                    "stud-finder: `git` not found in PATH; churn + coupling signals are skipped"
+                )
+            }
+            HistoryWarning::GitFailed(msg) => eprintln!("stud-finder: git log failed: {msg}"),
+        }
+    }
+    let coupling: HashMap<PathBuf, CouplingSignal> = history
+        .coupling
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k,
+                CouplingSignal {
+                    partner: v.partner,
+                    ratio: v.ratio,
+                    co_changes: v.co_changes,
+                },
+            )
+        })
+        .collect();
+
     let signals = Signals {
         graph: &graph,
         complexity,
+        churn_commits: history.churn_commits,
+        churn_lines: history.churn_lines,
+        coupling,
     };
     let scored = Scorer::new().score_with_signals(signals);
     let mut rows = scored;
@@ -234,10 +282,16 @@ mod tests {
         let mixed_rows = scorer.score_with_signals(Signals {
             graph: &g_mixed,
             complexity: cx_mixed,
+            churn_commits: HashMap::new(),
+            churn_lines: HashMap::new(),
+            coupling: HashMap::new(),
         });
         let clean_rows = scorer.score_with_signals(Signals {
             graph: &g_clean,
             complexity: cx_clean,
+            churn_commits: HashMap::new(),
+            churn_lines: HashMap::new(),
+            coupling: HashMap::new(),
         });
 
         assert_eq!(
@@ -292,35 +346,51 @@ fn print_table(rows: &[ScoredFile]) {
         .max()
         .unwrap_or(1)
         .max("complexity".len());
+    let churn_width = rows
+        .iter()
+        .map(|r| width_of(r.churn_commits))
+        .max()
+        .unwrap_or(1)
+        .max("churn".len());
+    // coupling column is `0.00` style (ratio) — fixed width.
+    let coupling_width = "0.00".len().max("coupling".len());
     let score_width = "0.0000".len();
 
     println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  file",
+        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$}  file",
         "class",
         "score",
         "fan_in",
         "fan_out",
         "complexity",
+        "churn",
+        "coupling",
         cw = class_width,
         sw = score_width,
         fi = fan_in_width,
         fo = fan_out_width,
         cx = complexity_width,
+        ch = churn_width,
+        cp = coupling_width,
     );
     for r in rows {
         println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {}",
+            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$.2}  {}",
             r.class.as_str(),
             r.composite,
             r.fan_in,
             r.fan_out,
             r.complexity,
+            r.churn_commits,
+            r.max_coupling,
             r.path.display(),
             cw = class_width,
             sw = score_width,
             fi = fan_in_width,
             fo = fan_out_width,
             cx = complexity_width,
+            ch = churn_width,
+            cp = coupling_width,
         );
     }
 }
