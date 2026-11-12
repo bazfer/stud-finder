@@ -68,68 +68,137 @@ impl Visitor {
         self.refs.push(RubyRef { name, kind, line });
     }
 
-    fn handle_association(&mut self, call: &CallNode<'_>) {
+    /// Handle a `CallNode` that may be a Rails association DSL or carry a
+    /// literal `class_name:` option. Both are dispatched here so that a
+    /// `class_name:` override on an association call SUPPRESSES the
+    /// inferred association target: `belongs_to :author, class_name: "User"`
+    /// must emit only `User`, not `Author` and `User`.
+    fn handle_call(&mut self, call: &CallNode<'_>) {
         let method = call.name().as_slice();
-        let plural = match method {
-            b"has_many" | b"has_and_belongs_to_many" => true,
-            b"belongs_to" | b"has_one" => false,
-            _ => return,
-        };
         let line = line_of(call.location().start_line());
+
+        // Receiverless guard: association + class_name DSLs are only valid
+        // at the top of a class body, with no receiver. `some_obj.has_many(:xs)`
+        // is a user call on an unrelated object — not a Rails edge.
+        let receiver = call.receiver();
+        let receiverless = receiver
+            .as_ref()
+            .is_none_or(|r| r.as_self_node().is_some());
+
+        let association_plural = match method {
+            b"has_many" | b"has_and_belongs_to_many" => Some(true),
+            b"belongs_to" | b"has_one" => Some(false),
+            _ => None,
+        };
+
+        if association_plural.is_none() && !source_has_class_name_arg(call) {
+            return;
+        }
+
+        if !receiverless {
+            return;
+        }
+
+        let class_name_literal = extract_class_name_option(call);
+
+        if let Some(plural) = association_plural {
+            if let Some(literal) = class_name_literal {
+                self.push(literal, RefKind::ClassNameOption, line);
+            } else {
+                self.emit_association_target(call, plural, line);
+            }
+            return;
+        }
+
+        if let Some(literal) = class_name_literal {
+            self.push(literal, RefKind::ClassNameOption, line);
+        }
+    }
+
+    fn emit_association_target(&mut self, call: &CallNode<'_>, plural: bool, line: u32) {
         let Some(args_node) = call.arguments() else {
             return;
         };
-        let first = args_node.arguments().iter().next();
-        let Some(arg) = first else { return };
-        if let Some(sym) = arg.as_symbol_node() {
+        let Some(first) = args_node.arguments().iter().next() else {
+            return;
+        };
+        if let Some(sym) = first.as_symbol_node() {
             if let Ok(value) = std::str::from_utf8(sym.unescaped()) {
                 let class = associate_to_class(value, plural);
                 self.push(class, RefKind::RailsAssociation, line);
             }
-        } else if let Some(s) = arg.as_string_node() {
+        } else if let Some(s) = first.as_string_node() {
             if let Ok(value) = std::str::from_utf8(s.unescaped()) {
                 let class = associate_to_class(value, plural);
                 self.push(class, RefKind::RailsAssociation, line);
             }
         }
     }
+}
 
-    fn handle_class_name_option(&mut self, call: &CallNode<'_>) {
-        let Some(args_node) = call.arguments() else {
-            return;
+/// Find a literal `class_name: "..."` option on a call, if any.
+fn extract_class_name_option(call: &CallNode<'_>) -> Option<String> {
+    let args_node = call.arguments()?;
+    for arg in args_node.arguments().iter() {
+        let Some(hash) = arg.as_keyword_hash_node() else {
+            continue;
         };
-        let line = line_of(call.location().start_line());
-        for arg in args_node.arguments().iter() {
-            let Some(hash) = arg.as_keyword_hash_node() else {
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else {
                 continue;
             };
-            for element in hash.elements().iter() {
-                let Some(assoc) = element.as_assoc_node() else {
-                    continue;
-                };
-                let key = assoc.key();
-                let Some(sym) = key.as_symbol_node() else {
-                    continue;
-                };
-                let Ok(key_text) = std::str::from_utf8(sym.unescaped()) else {
-                    continue;
-                };
-                if key_text != "class_name" {
-                    continue;
-                }
-                let value = assoc.value();
-                if let Some(str_node) = value.as_string_node() {
-                    if let Ok(literal) = std::str::from_utf8(str_node.unescaped()) {
-                        let normalized = literal
-                            .strip_prefix("::")
-                            .unwrap_or(literal)
-                            .to_string();
-                        self.push(normalized, RefKind::ClassNameOption, line);
+            let key = assoc.key();
+            let Some(sym) = key.as_symbol_node() else {
+                continue;
+            };
+            let Ok(key_text) = std::str::from_utf8(sym.unescaped()) else {
+                continue;
+            };
+            if key_text != "class_name" {
+                continue;
+            }
+            let value = assoc.value();
+            if let Some(str_node) = value.as_string_node() {
+                if let Ok(literal) = std::str::from_utf8(str_node.unescaped()) {
+                    let normalized = literal
+                        .strip_prefix("::")
+                        .unwrap_or(literal)
+                        .to_string();
+                    if !normalized.is_empty() {
+                        return Some(normalized);
                     }
                 }
             }
         }
     }
+    None
+}
+
+/// Cheap pre-check: does any argument of this call hold a `class_name`
+/// key? Used to skip calls that aren't associations but also don't carry
+/// a class_name option worth inspecting.
+fn source_has_class_name_arg(call: &CallNode<'_>) -> bool {
+    let Some(args_node) = call.arguments() else {
+        return false;
+    };
+    for arg in args_node.arguments().iter() {
+        let Some(hash) = arg.as_keyword_hash_node() else {
+            continue;
+        };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else {
+                continue;
+            };
+            let key = assoc.key();
+            let Some(sym) = key.as_symbol_node() else {
+                continue;
+            };
+            if std::str::from_utf8(sym.unescaped()) == Ok("class_name") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl<'pr> Visit<'pr> for Visitor {
@@ -155,8 +224,7 @@ impl<'pr> Visit<'pr> for Visitor {
     }
 
     fn visit_call_node(&mut self, node: &CallNode<'pr>) {
-        self.handle_association(node);
-        self.handle_class_name_option(node);
+        self.handle_call(node);
         ruby_prism::visit_call_node(self, node);
     }
 }

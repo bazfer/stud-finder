@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 pub struct DependencyGraph {
     /// Map each primary class name → the files that may define it.
     defined_by: HashMap<String, Vec<PathBuf>>,
+    /// Every file explicitly registered via `register_file`. Used by
+    /// `fan_in` to refuse answering about unregistered paths even when
+    /// their basename happens to match a registered file's primary class.
+    registered: HashSet<PathBuf>,
     /// Map each file → the set of class names it references.
     outgoing: HashMap<PathBuf, HashSet<String>>,
 }
@@ -42,6 +46,7 @@ impl DependencyGraph {
     /// resolution has the full `defined_by` table in place.
     pub fn register_file(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
+        self.registered.insert(path.clone());
         if let Some(class) = primary_class_of(&path) {
             self.defined_by.entry(class).or_default().push(path);
         }
@@ -60,8 +65,14 @@ impl DependencyGraph {
     }
 
     /// How many *other* files reference something the `path` defines.
-    /// Returns 0 when `path` is unknown or defines no class.
+    /// Returns 0 when `path` is unknown (not registered via
+    /// `register_file`) or defines no class. An unregistered path that
+    /// happens to share a basename with a registered file still returns
+    /// 0, because it did not advertise itself as a definition site.
     pub fn fan_in(&self, path: &Path) -> usize {
+        if !self.registered.contains(path) {
+            return 0;
+        }
         let Some(class) = primary_class_of(path) else {
             return 0;
         };
@@ -161,5 +172,22 @@ mod tests {
         g.add_reference("app/services/checkout.rb", "Order");
         g.add_reference("app/services/checkout.rb", "Order");
         assert_eq!(g.fan_in(Path::new("app/models/order.rb")), 1);
+    }
+
+    #[test]
+    fn fan_in_zero_for_unregistered_path_with_matching_basename() {
+        // Ohm P3: an unregistered path that happens to share a basename
+        // with a registered file must NOT inherit its fan_in. The graph
+        // only answers about explicitly registered definition sites.
+        let mut g = DependencyGraph::new();
+        g.register_file("app/models/order.rb");
+        g.register_file("app/services/checkout.rb");
+        g.add_reference("app/services/checkout.rb", "Order");
+        assert_eq!(g.fan_in(Path::new("app/models/order.rb")), 1);
+        assert_eq!(
+            g.fan_in(Path::new("random/elsewhere/order.rb")),
+            0,
+            "unregistered path with matching basename must not get fan_in"
+        );
     }
 }
