@@ -40,12 +40,19 @@ fn files_set(paths: &[&str]) -> HashSet<PathBuf> {
 }
 
 #[test]
-fn empty_log_produces_empty_report() {
+fn empty_log_produces_zero_report_with_success_flag() {
+    // After the P2 fix: a successful git call with no commits still
+    // yields zero entries for every requested file (pre-populated),
+    // and `history_succeeded` is true so downstream can tell this
+    // apart from a git failure.
     let report = parse_log(&[], &files_set(&["a.rb", "b.rb"]));
-    assert!(report.churn_commits.is_empty());
-    assert!(report.churn_lines.is_empty());
+    assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&0));
+    assert_eq!(report.churn_commits.get(&p("b.rb")), Some(&0));
+    assert_eq!(report.churn_lines.get(&p("a.rb")), Some(&0));
+    assert_eq!(report.churn_lines.get(&p("b.rb")), Some(&0));
     assert!(report.coupling.is_empty());
     assert!(report.warnings.is_empty());
+    assert!(report.history_succeeded);
 }
 
 #[test]
@@ -328,8 +335,9 @@ fn analyze_over_real_repo_matches_hand_computed_signals() {
     let a_partner = report.coupling.get(&a).expect("a coupled");
     assert_eq!(a_partner.partner, b);
     assert_eq!(a_partner.co_changes, 5);
+    // Ratio is Ruby `round(4)` of 5/7 = 0.71428... → 0.7143.
     assert!(
-        (a_partner.ratio - (5.0_f64 / 7.0_f64)).abs() < 1e-9,
+        (a_partner.ratio - 0.7143).abs() < 1e-9,
         "ratio drift: {}",
         a_partner.ratio
     );
@@ -340,6 +348,7 @@ fn analyze_on_non_repo_returns_warning_not_panic() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let report = analyze(tmp.path(), &[], 180);
     assert!(report.churn_commits.is_empty());
+    assert!(!report.history_succeeded, "failure must flip the flag");
     assert!(
         matches!(
             report.warnings.first(),
@@ -347,5 +356,158 @@ fn analyze_on_non_repo_returns_warning_not_panic() {
         ),
         "expected NotAGitRepo or GitFailed, got: {:?}",
         report.warnings
+    );
+}
+
+#[test]
+fn successful_zero_history_populates_zero_entries_and_flag() {
+    // Ohm P2 on PR #79: a successful git log where none of the selected
+    // files changed must still yield "every file has 0 churn" (so the
+    // churn weight stays active downstream), not empty maps.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(status.status.success());
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "commit.gpgsign", "false"]);
+    // One commit touching ONLY `other.rb`. We request `target.rb`.
+    std::fs::write(repo.join("other.rb"), "other\n").unwrap();
+    run(&["add", "other.rb"]);
+    run(&["commit", "-q", "-m", "x"]);
+
+    let target = PathBuf::from("target.rb");
+    let report = analyze(repo, &[target.as_path()], 365);
+    assert!(report.history_succeeded, "git succeeded; flag must be true");
+    assert_eq!(
+        report.churn_commits.get(&target),
+        Some(&0),
+        "zero entry must be present for success-with-no-selected-changes"
+    );
+    assert_eq!(report.churn_lines.get(&target), Some(&0));
+}
+
+#[test]
+fn nested_subdir_scan_preserves_caller_relative_paths() {
+    // Ohm P2 on PR #79: scanning a subdirectory of a repo used to drop
+    // every entry because git emitted repo-root-relative paths while
+    // the caller's file_set was keyed by subdir-relative paths. The
+    // `--relative` flag now normalizes git output into the caller's
+    // coordinate system.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    let run = |cwd: &Path, args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(status.status.success());
+    };
+    run(repo, &["init", "-q", "-b", "main"]);
+    run(repo, &["config", "commit.gpgsign", "false"]);
+
+    let nested = repo.join("lib/models");
+    std::fs::create_dir_all(&nested).unwrap();
+    for i in 0..3 {
+        std::fs::write(nested.join("user.rb"), format!("u{i}\n")).unwrap();
+        run(repo, &["add", "lib/models/user.rb"]);
+        run(repo, &["commit", "-q", "-m", &format!("c{i}")]);
+    }
+
+    // Caller scans `lib/models` as the root: they pass "user.rb" (not
+    // "lib/models/user.rb") as the file key. With --relative, git emits
+    // "user.rb" from that subdir, so the file_set matches.
+    let user = PathBuf::from("user.rb");
+    let report = analyze(&nested, &[user.as_path()], 365);
+    assert!(report.history_succeeded);
+    assert_eq!(
+        report.churn_commits.get(&user),
+        Some(&3),
+        "subdir scan should see 3 commits touching user.rb: {:?}",
+        report.churn_commits
+    );
+}
+
+#[test]
+fn coupling_ratio_rounds_to_four_decimals_matching_ruby() {
+    // Ruby `temporal_coupling.rb` rounds `count / min_own` to 4 decimals
+    // BEFORE the threshold check and before partner ranking. Two raw
+    // ratios that round to the same value must sort and classify the
+    // same way as in Ruby. Example: 5 co-changes / 7 own = 0.71428... →
+    // rounded to 0.7143.
+    let mut commits: Vec<(&'static str, Vec<(&str, &str, &str)>)> = Vec::new();
+    for i in 0..5 {
+        let hash = Box::leak(format!("co{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "b.rb")],
+        ));
+    }
+    for i in 0..2 {
+        let hash = Box::leak(format!("sa{i:02}").into_boxed_str());
+        commits.push((hash as &'static str, vec![("1", "1", "a.rb")]));
+    }
+    // a: 5+2 = 7; b: 5. min = 5. ratio = 5/5 = 1.0 exactly for b,
+    // 5/7 = 0.71428... → 0.7143 for a.
+    let commits_ref: Vec<FakeCommit<'_>> =
+        commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
+    let log = fake_log(&commits_ref);
+    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let a = report.coupling.get(&p("a.rb")).expect("a coupled");
+    // 5 / 5 = 1.0 (a's own is 7, b's own is 5, min = 5)
+    assert!(
+        (a.ratio - 1.0).abs() < 1e-9,
+        "a→b ratio expected 1.0 (5/min(7,5)=5/5), got {}",
+        a.ratio
+    );
+    let b = report.coupling.get(&p("b.rb")).expect("b coupled");
+    assert!((b.ratio - 1.0).abs() < 1e-9, "b→a ratio got {}", b.ratio);
+}
+
+#[test]
+fn coupling_ratio_near_threshold_rounds_before_check() {
+    // 5 co-changes, min_own = 17 → raw ratio = 0.29411... which is
+    // BELOW 0.30 threshold. After Ruby's round(4) it's 0.2941 — still
+    // below. Should drop.
+    //
+    // Verify our code matches: no coupling partner emitted.
+    let mut commits: Vec<(&'static str, Vec<(&str, &str, &str)>)> = Vec::new();
+    for i in 0..5 {
+        let hash = Box::leak(format!("co{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "b.rb")],
+        ));
+    }
+    for i in 0..12 {
+        let hash = Box::leak(format!("sa{i:02}").into_boxed_str());
+        commits.push((hash as &'static str, vec![("1", "1", "a.rb")]));
+    }
+    for i in 0..12 {
+        let hash = Box::leak(format!("sb{i:02}").into_boxed_str());
+        commits.push((hash as &'static str, vec![("1", "1", "b.rb")]));
+    }
+    // a: 17, b: 17, min = 17 → 5/17 = 0.2941176... → round(4) = 0.2941 < 0.30.
+    let commits_ref: Vec<FakeCommit<'_>> =
+        commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
+    let log = fake_log(&commits_ref);
+    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    assert!(
+        report.coupling.is_empty(),
+        "5/17 = 0.2941 rounds to 0.2941 which is < 0.30 threshold, must drop"
     );
 }

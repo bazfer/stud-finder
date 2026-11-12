@@ -596,6 +596,74 @@ fn empty_coupling_map_degenerates_to_four_signal_mode() {
 }
 
 #[test]
+fn churn_composite_rounds_near_ties_before_ranking() {
+    // Ohm's P1 on PR #79. With 6 files whose churn_commits and
+    // churn_lines ranks cross so that files A and B have averages
+    // 0.3 and 0.30000000000000004 respectively (IEEE-754 noise from
+    // (0+3)/5/2 vs (1+2)/5/2), Ruby `composite_churn_pct` treats them
+    // as tied via `round(10)`. Rust must now do the same.
+    //
+    // Fixture: 6 files with (count, lines):
+    //   f0: (0,  3) → rank(count) = 0, rank(lines) = 3
+    //   f1: (1,  2) → rank(count) = 1, rank(lines) = 2
+    //   f2: (2,  1) → rank(count) = 2, rank(lines) = 1
+    //   f3: (3,  0) → rank(count) = 3, rank(lines) = 0
+    //   f4: (4,  4) → rank(count) = 4, rank(lines) = 4
+    //   f5: (5,  5) → rank(count) = 5, rank(lines) = 5
+    // ranks are lower-bound over 6 values so /5 for the lower 4.
+    // (rank_f0_count + rank_f0_lines)/2 = (0 + 3)/5/2 = 0.3
+    // (rank_f1_count + rank_f1_lines)/2 = (1 + 2)/5/2 = 0.30000000000000004 in f64
+    // (rank_f2_count + rank_f2_lines)/2 = (2 + 1)/5/2 = 0.3 exactly
+    // (rank_f3_count + rank_f3_lines)/2 = (3 + 0)/5/2 = 0.3 exactly
+    // All four should round to 0.3 and produce the same churn_pct.
+    let mut g = DependencyGraph::new();
+    for i in 0..6 {
+        g.register_file(format!("f{i}.rb"));
+    }
+
+    let mut churn_c = HashMap::new();
+    let mut churn_l = HashMap::new();
+    let churn: [(usize, usize); 6] = [(10, 13), (11, 12), (12, 11), (13, 10), (14, 14), (15, 15)];
+    for (i, (c, l)) in churn.iter().enumerate() {
+        churn_c.insert(PathBuf::from(format!("f{i}.rb")), *c);
+        churn_l.insert(PathBuf::from(format!("f{i}.rb")), *l);
+    }
+
+    let signals = Signals {
+        graph: &g,
+        complexity: HashMap::new(),
+        churn_commits: churn_c,
+        churn_lines: churn_l,
+        coupling: HashMap::new(),
+    };
+    let rows = Scorer::new().score_with_signals(signals);
+    let pct_for = |name: &str| {
+        let target = PathBuf::from(name);
+        rows.iter().find(|r| r.path == target).unwrap().churn_pct
+    };
+    // Without round(10), f1 would land in a different rank bucket due
+    // to the 1e-17 noise. With it, all four "middle" rows tie.
+    assert!(
+        (pct_for("f0.rb") - pct_for("f1.rb")).abs() < 1e-9,
+        "near-tied averages must collapse: f0_pct={}, f1_pct={}",
+        pct_for("f0.rb"),
+        pct_for("f1.rb")
+    );
+    assert!(
+        (pct_for("f0.rb") - pct_for("f2.rb")).abs() < 1e-9,
+        "near-tied averages must collapse: f0_pct={}, f2_pct={}",
+        pct_for("f0.rb"),
+        pct_for("f2.rb")
+    );
+    assert!(
+        (pct_for("f0.rb") - pct_for("f3.rb")).abs() < 1e-9,
+        "near-tied averages must collapse: f0_pct={}, f3_pct={}",
+        pct_for("f0.rb"),
+        pct_for("f3.rb")
+    );
+}
+
+#[test]
 fn churn_composite_is_percentile_of_avg_count_and_line_pcts() {
     // File A: churn 10c/100l, File B: 5c/60l, File C: 3c/20l.
     // count_pcts (rank/n-1): A=1.0, B=0.5, C=0.0

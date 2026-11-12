@@ -75,16 +75,29 @@ pub enum HistoryWarning {
     GitNotFound,
 }
 
-/// Output of [`analyze`]. Maps are keyed by paths from the caller's
-/// `files` slice; files absent from git history simply don't appear in
-/// `churn_commits` / `churn_lines` (callers that need zero-defaults
-/// should initialize their own map).
+/// Output of [`analyze`]. On a successful git run, `churn_commits` and
+/// `churn_lines` are pre-populated with a zero entry for every file in
+/// the caller's `files` slice, so a "git succeeded but nothing in the
+/// window touched the selected files" result is distinguishable from
+/// a git-failure result (empty maps + warning) at the caller. `coupling`
+/// stays sparse — only files whose pair cleared the Ruby filters land
+/// there. `history_succeeded` is the authoritative success/failure
+/// flag that downstream consumers use to decide whether to treat the
+/// churn signal as active.
+///
+/// Fixes Ohm's P2 on PR #79 about zero-change windows silently
+/// disabling the churn weight.
 #[derive(Debug, Default, Clone)]
 pub struct HistoryReport {
     pub churn_commits: HashMap<PathBuf, usize>,
     pub churn_lines: HashMap<PathBuf, usize>,
     pub coupling: HashMap<PathBuf, CouplingPartner>,
     pub warnings: Vec<HistoryWarning>,
+    /// `true` when the `git log` subprocess ran cleanly, even if no
+    /// commits in the window touched any of the selected files.
+    /// `false` when git was missing, failed, or the directory wasn't
+    /// a git repository.
+    pub history_succeeded: bool,
 }
 
 /// Walks `repo_root`'s git log back `window_days` days and returns
@@ -95,6 +108,11 @@ pub fn analyze(repo_root: &Path, files: &[&Path], window_days: u64) -> HistoryRe
     let file_set: HashSet<PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
 
     let since_arg = format!("--since={window_days} days ago");
+    // `--relative` makes git emit paths relative to the `-C` directory
+    // instead of the repository root. The CLI's file_set is keyed by
+    // paths relative to the scan root (which may be a subdirectory of
+    // the repo), so without this a sub-directory scan would silently
+    // drop every entry. Fixes Ohm's P2 on PR #79.
     let args = [
         "-C",
         repo_root.to_str().unwrap_or("."),
@@ -107,6 +125,7 @@ pub fn analyze(repo_root: &Path, files: &[&Path], window_days: u64) -> HistoryRe
         "--no-merges",
         "--find-renames",
         "--diff-filter=ACDMR",
+        "--relative",
     ];
 
     let output = match Command::new("git").args(args).stdin(Stdio::null()).output() {
@@ -146,8 +165,14 @@ pub fn analyze(repo_root: &Path, files: &[&Path], window_days: u64) -> HistoryRe
 }
 
 fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
-    let mut churn_commits: HashMap<PathBuf, usize> = HashMap::new();
-    let mut churn_lines: HashMap<PathBuf, usize> = HashMap::new();
+    // Pre-populate zero churn for every requested file. A successful
+    // `git log` that returned no commits touching our file set still
+    // yields "every file has 0 churn" rather than "churn signal
+    // unavailable" — Ruby `Churn#initial_counts` does the same.
+    let mut churn_commits: HashMap<PathBuf, usize> =
+        file_set.iter().map(|p| (p.clone(), 0usize)).collect();
+    let mut churn_lines: HashMap<PathBuf, usize> =
+        file_set.iter().map(|p| (p.clone(), 0usize)).collect();
     let mut own_changes: HashMap<PathBuf, usize> = HashMap::new();
     // Pairs stored canonically (lo, hi) to dedup both orderings.
     let mut co_matrix: HashMap<(PathBuf, PathBuf), usize> = HashMap::new();
@@ -202,6 +227,9 @@ fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
             };
 
             if commit_seen.insert(path.clone()) {
+                // `entry(...).or_insert(0)` is safe either way — the
+                // key is already present (set to 0 by the
+                // pre-population above) for files in file_set.
                 *churn_commits.entry(path.clone()).or_insert(0) += 1;
                 *churn_lines.entry(path.clone()).or_insert(0) += line_delta;
                 commit_files.push(path);
@@ -263,7 +291,17 @@ fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
         churn_lines,
         coupling,
         warnings,
+        history_succeeded: true,
     }
+}
+
+/// Rounds `x` to 4 decimal places, matching the Ruby
+/// `TemporalCoupling#build_pairs` boundary which stores
+/// `(count.to_f / min_own).round(4)`. Applied BEFORE the threshold
+/// check and BEFORE partner ranking so two raw ratios that round to
+/// the same value sort and classify identically to Ruby.
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
 }
 
 fn select_strongest_partners(
@@ -290,7 +328,7 @@ fn select_strongest_partners(
         if min_own == 0 {
             return;
         }
-        let ratio = (count as f64) / (min_own as f64);
+        let ratio = round4((count as f64) / (min_own as f64));
         if ratio < COUPLING_THRESHOLD {
             return;
         }
@@ -338,26 +376,31 @@ fn is_numeric(s: &str) -> bool {
 /// - `old/path.rb => new/path.rb` → `new/path.rb`
 /// - everything else → unchanged
 fn normalize_rename(path: &str) -> std::borrow::Cow<'_, str> {
-    // Brace form: look for `{...=>...}` and replace with just the new half.
-    if let Some(open) = path.find('{')
-        && let Some(close_rel) = path[open..].find('}')
-    {
-        let close = open + close_rel;
-        let inner = &path[open + 1..close];
-        if let Some(arrow) = inner.find(" => ") {
-            let new_half = &inner[arrow + 4..];
-            let mut out = String::with_capacity(path.len());
-            out.push_str(&path[..open]);
-            out.push_str(new_half);
-            out.push_str(&path[close + 1..]);
-            return std::borrow::Cow::Owned(out);
-        }
+    if let Some(stripped) = strip_brace_rename(path) {
+        return std::borrow::Cow::Owned(stripped);
     }
-    // Plain form: `old => new`.
     if let Some(arrow) = path.find(" => ") {
         return std::borrow::Cow::Owned(path[arrow + 4..].to_string());
     }
     std::borrow::Cow::Borrowed(path)
+}
+
+/// Returns the normalized path when `path` is of brace-rename form
+/// `prefix/{old => new}/suffix`, otherwise `None`. Split out of
+/// `normalize_rename` as MSRV 1.85 does not support let-chains (those
+/// stabilized in 1.88).
+fn strip_brace_rename(path: &str) -> Option<String> {
+    let open = path.find('{')?;
+    let close_rel = path[open..].find('}')?;
+    let close = open + close_rel;
+    let inner = &path[open + 1..close];
+    let arrow = inner.find(" => ")?;
+    let new_half = &inner[arrow + 4..];
+    let mut out = String::with_capacity(path.len());
+    out.push_str(&path[..open]);
+    out.push_str(new_half);
+    out.push_str(&path[close + 1..]);
+    Some(out)
 }
 
 #[cfg(test)]

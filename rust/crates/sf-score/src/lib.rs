@@ -289,11 +289,18 @@ impl Scorer {
         };
 
         // Composite churn: percentile of avg(count_pct, line_pct) per
-        // file — matches Ruby `composite_churn_pct`. When only one side
-        // of the churn signal is present (one map empty), the empty-side
-        // percentile is 0.0 for every file and the composite degrades
-        // gracefully to half of the active side's percentile. Not ideal
-        // but deterministic and documented.
+        // file — matches Ruby `composite_churn_pct`. The averaged raw
+        // value is rounded to 10 decimal places BEFORE being re-ranked
+        // so near-tied averages (e.g. `(0/5 + 3/5)/2 = 0.3` vs
+        // `(1/5 + 2/5)/2 = 0.30000000000000004`) collapse to the same
+        // rank, matching Ruby's lower-precision `Rational`/`round(10)`
+        // semantics at the `composite_churn_pct` boundary. Fixes Ohm's
+        // P1 on PR #79.
+        //
+        // When only one side of the churn signal is present (one map
+        // empty), the empty-side percentile is 0.0 for every file and
+        // the composite degrades gracefully to half of the active
+        // side's percentile. Not ideal but deterministic and documented.
         let churn_pcts = if has_churn {
             let count_pcts = if !signals.churn_commits.is_empty() {
                 percentile_rank_usize(&churn_commits)
@@ -306,7 +313,7 @@ impl Scorer {
                 vec![0.0; files.len()]
             };
             let composite_churn_raw: Vec<f64> = (0..files.len())
-                .map(|i| (count_pcts[i] + line_pcts[i]) / 2.0)
+                .map(|i| round10((count_pcts[i] + line_pcts[i]) / 2.0))
                 .collect();
             percentile_rank_f64(&composite_churn_raw)
         } else {
@@ -471,6 +478,13 @@ fn lower_bound(sorted: &[f64], target: f64) -> usize {
 
 fn round4(x: f64) -> f64 {
     (x * 10_000.0).round() / 10_000.0
+}
+
+/// Round `x` to 10 decimal places, matching the precision Ruby applies
+/// at the `composite_churn_pct` boundary so IEEE-754 noise at the
+/// 1e-17 scale doesn't split what Ruby treats as tied averages.
+fn round10(x: f64) -> f64 {
+    (x * 1e10).round() / 1e10
 }
 
 #[cfg(test)]
