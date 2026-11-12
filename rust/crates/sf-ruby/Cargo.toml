@@ -1,0 +1,12 @@
+[package]
+name = "sf-ruby"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+ruby-prism = "2.1"
