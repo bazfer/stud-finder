@@ -186,27 +186,39 @@ fn markdown_escapes_pipes_and_newlines_in_paths() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Header pipe count defines "columns + 1" since the format is
-    // `| h1 | h2 | ... | hN |`. Every data row must have the same
+    // `| h1 | h2 | ... | hN |`. Every DATA row must have the same
     // pipe count; an unescaped `|` inside a cell would inflate it.
+    //
+    // The row filter below matches lines with a `.rb` substring and
+    // a trailing ` |` — that's the actual data-row shape. Earlier
+    // revisions of this test filtered on `"Order" || "Other"`, which
+    // never matched (paths are lowercased). Ohm flagged that
+    // vacuous loop on PR #82; this version asserts over real rows.
     let header_line = stdout
         .lines()
         .find(|l| l.starts_with("| class |"))
         .expect("header");
     let header_pipe_count = header_line.matches('|').count();
-    for row in stdout
+    let data_rows: Vec<&str> = stdout
         .lines()
-        .filter(|l| l.ends_with(" |") && l.contains("Order") || l.contains("Other"))
-    {
+        .filter(|l| l.ends_with(" |") && l.contains(".rb"))
+        .collect();
+    assert!(
+        data_rows.len() >= 2,
+        "test fixture must produce at least 2 data rows: {stdout}"
+    );
+    for row in &data_rows {
         assert_eq!(
             row.matches('|').count(),
             header_pipe_count,
             "row pipe count differs from header; unescaped `|` in path? row={row:?}"
         );
     }
-    // And the path should carry a literal `\|` escape.
+    // And the weird-path row should carry the HTML-entity escape
+    // so no raw `|` char sits inside a cell.
     assert!(
-        stdout.contains(r"weird\|dir"),
-        "expected backslash-escaped pipe in path: {stdout}"
+        stdout.contains("weird&#124;dir"),
+        "expected HTML-entity-escaped pipe in path: {stdout}"
     );
 }
 

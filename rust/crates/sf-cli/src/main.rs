@@ -274,11 +274,11 @@ fn diff_names(repo_root: &Path, base: &str) -> Result<HashSet<PathBuf>, String> 
         if chunk.is_empty() {
             continue;
         }
-        // On Unix, path bytes can be any non-NUL. Use from_utf8 since
-        // our file-set is already keyed by String-compatible paths
-        // (walkdir -> strip_prefix -> PathBuf). Non-UTF8 paths would
-        // also fail that pipeline, so refuse here consistently rather
-        // than let a mismatched pair silently drop a row.
+        // Our file-set is keyed by `PathBuf`s built from `&str` via
+        // walkdir -> strip_prefix. A non-UTF8 path on disk would
+        // already fail that pipeline on any platform, so refuse
+        // non-UTF8 here too rather than let a mismatched pair
+        // silently drop a row.
         match std::str::from_utf8(chunk) {
             Ok(s) => {
                 changed.insert(PathBuf::from(s));

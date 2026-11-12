@@ -171,16 +171,20 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-/// Escape a cell value for a Markdown pipe-table row. Pipes must be
-/// backslash-escaped so they don't terminate the cell; newlines and
-/// carriage returns are HTML-encoded (`&#10;` / `&#13;`) so the row
-/// stays on one line. Ohm's non-blocking note on PR #82 flagged
-/// pipe/newline paths corrupting the table.
+/// Escape a cell value for a Markdown pipe-table row. Pipes are
+/// HTML-encoded as `&#124;` so the raw character never appears
+/// inside a cell — pipe-table renderers decode the entity to a
+/// literal `|`, but the raw source stays structurally parseable
+/// (a `\|` backslash escape renders correctly too but still writes
+/// a `|` byte, which confuses line-based pipe-counting). Newlines
+/// and carriage returns are HTML-encoded for the same reason.
+/// Ohm's non-blocking note on PR #82 flagged pipe/newline paths
+/// corrupting the table.
 fn md_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            '|' => out.push_str("\\|"),
+            '|' => out.push_str("&#124;"),
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
             _ => out.push(c),
