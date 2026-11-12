@@ -16,5 +16,9 @@ anyhow.workspace = true
 clap.workspace = true
 walkdir.workspace = true
 sf-core.workspace = true
+sf-history.workspace = true
 sf-ruby = { path = "../sf-ruby" }
 sf-score = { path = "../sf-score" }
+
+[dev-dependencies]
+tempfile = "3"
