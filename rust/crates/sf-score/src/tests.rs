@@ -42,6 +42,7 @@ fn signals_with_complexity<'a>(
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     }
 }
 
@@ -318,6 +319,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     };
     let rows_no_floor = no_cx_floor.score_with_signals(signals);
     let spiky_no_floor = row(&rows_no_floor, "spiky.rb");
@@ -330,6 +332,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     };
     let rows_default = Scorer::new().score_with_signals(default_signals);
     let spiky_default = row(&rows_default, "spiky.rb");
@@ -360,6 +363,7 @@ fn complexity_floor_never_downgrades_trunk_or_branch() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let top = row(&rows, "top.rb");
@@ -390,6 +394,7 @@ fn signals_with_churn<'a>(
         churn_commits: churn_c,
         churn_lines: churn_l,
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     }
 }
 
@@ -528,6 +533,7 @@ fn coupling_appears_in_row_and_lifts_composite() {
         churn_commits: HashMap::new(),
         churn_lines: HashMap::new(),
         coupling,
+        coverage: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let a = row(&rows, "a.rb");
@@ -579,6 +585,7 @@ fn empty_coupling_map_degenerates_to_four_signal_mode() {
             .map(|(p, _, l)| (PathBuf::from(*p), *l))
             .collect(),
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     };
     let rows_four_cp_empty = Scorer::new().score_with_signals(signals_four_empty_cp);
 
@@ -635,6 +642,7 @@ fn churn_composite_rounds_near_ties_before_ranking() {
         churn_commits: churn_c,
         churn_lines: churn_l,
         coupling: HashMap::new(),
+        coverage: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let pct_for = |name: &str| {
@@ -661,6 +669,183 @@ fn churn_composite_rounds_near_ties_before_ranking() {
         pct_for("f0.rb"),
         pct_for("f3.rb")
     );
+}
+
+// --- 6- and 7-signal mode with coverage + interaction ---
+
+fn signals_with_coverage<'a>(
+    graph: &'a DependencyGraph,
+    complexities: &[(&str, usize)],
+    churn: &[(&str, usize, usize)],
+    coverage: &[(&str, f64)],
+) -> Signals<'a> {
+    let mut cx = HashMap::new();
+    for (p, c) in complexities {
+        cx.insert(PathBuf::from(*p), *c);
+    }
+    let mut churn_c = HashMap::new();
+    let mut churn_l = HashMap::new();
+    for (p, c, l) in churn {
+        churn_c.insert(PathBuf::from(*p), *c);
+        churn_l.insert(PathBuf::from(*p), *l);
+    }
+    let mut cov = HashMap::new();
+    for (p, v) in coverage {
+        cov.insert(PathBuf::from(*p), *v);
+    }
+    Signals {
+        graph,
+        complexity: cx,
+        churn_commits: churn_c,
+        churn_lines: churn_l,
+        coupling: HashMap::new(),
+        coverage: cov,
+    }
+}
+
+#[test]
+fn six_signal_weights_renormalize_to_one() {
+    // With coverage active, Ruby's `active_total` becomes
+    // 0.19 + 0.095 + 0.2375 + 0.2375 + 0.095 (coverage) + 0.095 (interaction)
+    // = 0.95, and each weight divides through. Base ratio 4:2:5:5 stays.
+    let sum_six = BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION;
+    let w_fi = BASE_WEIGHT_FAN_IN / sum_six;
+    let w_fo = BASE_WEIGHT_FAN_OUT / sum_six;
+    let w_cx = BASE_WEIGHT_COMPLEXITY / sum_six;
+    let w_ch = BASE_WEIGHT_CHURN / sum_six;
+    let w_cov = BASE_WEIGHT_COVERAGE / sum_six;
+    let w_int = EXTRA_WEIGHT_INTERACTION / sum_six;
+    assert!((w_fi + w_fo + w_cx + w_ch + w_cov + w_int - 1.0).abs() < 1e-12);
+    // Base ratio preserved.
+    assert!((w_fi / w_fo - 2.0).abs() < 1e-9);
+    assert!((w_cx / w_fo - 2.5).abs() < 1e-9);
+    assert!((w_ch / w_fo - 2.5).abs() < 1e-9);
+    // Coverage shares w_fo's absolute value.
+    assert!((w_cov - w_fo).abs() < 1e-12);
+    // Interaction extra matches coverage magnitude.
+    assert!((w_int - w_cov).abs() < 1e-12);
+}
+
+#[test]
+fn seven_signal_renormalization_with_coupling_sums_to_one() {
+    let sum_seven = BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + EXTRA_WEIGHT_COUPLING
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION;
+    let total = (BASE_WEIGHT_FAN_IN
+        + BASE_WEIGHT_FAN_OUT
+        + BASE_WEIGHT_COMPLEXITY
+        + BASE_WEIGHT_CHURN
+        + EXTRA_WEIGHT_COUPLING
+        + BASE_WEIGHT_COVERAGE
+        + EXTRA_WEIGHT_INTERACTION)
+        / sum_seven;
+    assert!((total - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn coverage_appears_in_row_and_lifts_composite() {
+    let mut g = DependencyGraph::new();
+    g.register_file("a.rb");
+    g.register_file("b.rb");
+    g.add_reference("a.rb", "External");
+    g.add_reference("b.rb", "External");
+
+    // a.rb has 100% coverage; b.rb has 0% coverage. Everything else
+    // equal (same fan_in / fan_out / complexity / churn). a should
+    // score higher thanks to w_cov * coverage_pct.
+    let signals = signals_with_coverage(&g, &[], &[], &[("a.rb", 1.0), ("b.rb", 0.0)]);
+    let rows = Scorer::new().score_with_signals(signals);
+    let a = row(&rows, "a.rb");
+    let b = row(&rows, "b.rb");
+    assert_eq!(a.coverage, 1.0);
+    assert_eq!(b.coverage, 0.0);
+    assert!((a.coverage_pct - 1.0).abs() < 1e-9);
+    assert!((b.coverage_pct - 0.0).abs() < 1e-9);
+    assert!(a.composite > b.composite);
+}
+
+#[test]
+fn interaction_cross_term_is_fan_in_pct_times_coverage_pct() {
+    // Three files: top.rb has fan_in = 2 + coverage = 1.0;
+    // mid.rb has fan_in = 1 + coverage = 1.0 (same coverage, half fan_in);
+    // low.rb has fan_in = 0 + coverage = 0.0.
+    // Interaction contribution = w_int * fan_in_pct * coverage_pct.
+    // top: 1.0 * 1.0 = 1.0 of the cross-term
+    // mid: 0.5 * 1.0 = 0.5
+    // low: 0.0 * 0.0 = 0.0
+    // top.composite - mid.composite should include a w_int * 0.5 term.
+    let mut g = DependencyGraph::new();
+    g.register_file("top.rb");
+    g.register_file("mid.rb");
+    g.register_file("low.rb");
+    g.add_reference("mid.rb", "Top");
+    g.add_reference("low.rb", "Top");
+    g.add_reference("low.rb", "Mid");
+
+    let signals = signals_with_coverage(
+        &g,
+        &[],
+        &[],
+        &[("top.rb", 1.0), ("mid.rb", 1.0), ("low.rb", 0.0)],
+    );
+    let rows = Scorer::new().score_with_signals(signals);
+    let top = row(&rows, "top.rb");
+    let mid = row(&rows, "mid.rb");
+    let low = row(&rows, "low.rb");
+    // Fan-in pcts: top at the top, mid middle, low at the bottom.
+    assert!(top.fan_in_pct > mid.fan_in_pct);
+    assert!(mid.fan_in_pct > low.fan_in_pct);
+    // Coverage pcts: top and mid tie at 1.0 (lower_bound → high end),
+    // low at 0.0.
+    assert!((top.coverage_pct - mid.coverage_pct).abs() < 1e-9);
+    // top must out-score mid (higher fan_in_pct, same coverage) AND
+    // out-score low by a larger margin because of the cross-term.
+    assert!(top.composite > mid.composite);
+    assert!(top.composite > low.composite);
+}
+
+#[test]
+fn empty_coverage_map_degenerates_to_five_signal_mode() {
+    let g = tiny_graph();
+    let cx_entries: Vec<(&str, usize)> = vec![
+        ("app/models/order.rb", 5),
+        ("app/models/user.rb", 3),
+        ("app/models/profile.rb", 2),
+        ("app/services/checkout.rb", 4),
+        ("app/services/noop.rb", 1),
+    ];
+    let churn_entries: Vec<(&str, usize, usize)> = vec![
+        ("app/models/order.rb", 10, 100),
+        ("app/models/user.rb", 5, 60),
+        ("app/models/profile.rb", 3, 20),
+        ("app/services/checkout.rb", 7, 80),
+        ("app/services/noop.rb", 1, 5),
+    ];
+    let rows_four =
+        Scorer::new().score_with_signals(signals_with_churn(&g, &cx_entries, &churn_entries));
+    let rows_cov_empty = Scorer::new().score_with_signals(signals_with_coverage(
+        &g,
+        &cx_entries,
+        &churn_entries,
+        &[],
+    ));
+    assert_eq!(rows_four.len(), rows_cov_empty.len());
+    for a in &rows_four {
+        let b = rows_cov_empty.iter().find(|r| r.path == a.path).unwrap();
+        assert!((a.composite - b.composite).abs() < 1e-9);
+        assert_eq!(a.class, b.class);
+        assert_eq!(b.coverage, 0.0);
+        assert_eq!(b.coverage_pct, 0.0);
+    }
 }
 
 #[test]

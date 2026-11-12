@@ -62,6 +62,16 @@ const BASE_WEIGHT_CHURN: f64 = 0.2375;
 /// Extra-signal weight for temporal coupling, from the Ruby
 /// `DEFAULT_WEIGHTS[:coupling]`. Outside the base `4 : 2 : 5 : 5` ratio.
 const EXTRA_WEIGHT_COUPLING: f64 = 0.05;
+/// Coverage base-signal weight from Ruby `DEFAULT_WEIGHTS[:coverage]`.
+/// Ruby lumps coverage into the active-keys sum next to the base
+/// four, so a single Rust renormalization over "all active" handles
+/// it identically. Coverage only lands together with interaction.
+const BASE_WEIGHT_COVERAGE: f64 = 0.095;
+/// Interaction cross-term weight from Ruby
+/// `DEFAULT_WEIGHTS[:interaction]`. Ruby's interaction score is
+/// `interaction_weight * fan_in_pct * coverage_pct` — not a
+/// percentile-ranked signal. See `interaction_score` in scorer.rb.
+const EXTRA_WEIGHT_INTERACTION: f64 = 0.095;
 
 /// Classification tier for a scored file. `Trunk` is load-bearing;
 /// `Branch` has meaningful coupling; `Leaf` is isolated.
@@ -107,11 +117,16 @@ pub struct ScoredFile {
     /// min_co_changes + coupling_threshold filters).
     pub max_coupling_partner: PathBuf,
     pub max_coupling: f64,
+    /// Line coverage in `[0.0, 1.0]`. `0.0` when the coverage signal
+    /// is unavailable OR when the file is missing from a provided
+    /// coverage report.
+    pub coverage: f64,
     pub fan_in_pct: f64,
     pub fan_out_pct: f64,
     pub complexity_pct: f64,
     pub churn_pct: f64,
     pub coupling_pct: f64,
+    pub coverage_pct: f64,
     pub composite: f64,
     pub class: Class,
     pub evidence: f64,
@@ -154,11 +169,18 @@ pub struct Signals<'a> {
     /// unavailable. Only files whose pair cleared Ruby's
     /// min_co_changes / coupling_threshold filters appear here.
     pub coupling: HashMap<PathBuf, CouplingSignal>,
+    /// Per-file line coverage in `[0.0, 1.0]`. Non-empty = coverage
+    /// signal active, which pulls both the base coverage weight AND
+    /// the interaction cross-term into the composite (Ruby's
+    /// `coverage_available?` gate). Missing keys inside a non-empty
+    /// map default to 0.0 — matching the Ruby "requested but not
+    /// reported" shape via `Resultset#missing_files`.
+    pub coverage: HashMap<PathBuf, f64>,
 }
 
 impl<'a> Signals<'a> {
     /// Signals bundle with just the graph — no complexity, no churn,
-    /// no coupling. Matches the sf-score first-slice shape.
+    /// no coupling, no coverage. Matches the sf-score first-slice shape.
     pub fn from_graph(graph: &'a DependencyGraph) -> Self {
         Self {
             graph,
@@ -166,6 +188,7 @@ impl<'a> Signals<'a> {
             churn_commits: HashMap::new(),
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
+            coverage: HashMap::new(),
         }
     }
 }
@@ -280,6 +303,17 @@ impl Scorer {
             })
             .collect();
 
+        // Coverage + interaction only activate together (Ruby's
+        // `coverage_available?` gate). Missing files in a non-empty
+        // coverage map default to 0.0 — matches Ruby
+        // `Resultset#missing_files` semantics where unreported files
+        // get no row and the scorer treats them as 0% covered.
+        let has_coverage = !signals.coverage.is_empty();
+        let coverage_values: Vec<f64> = files
+            .iter()
+            .map(|p| signals.coverage.get(*p).copied().unwrap_or(0.0))
+            .collect();
+
         let fan_in_pcts = percentile_rank_usize(&fan_ins);
         let fan_out_pcts = percentile_rank_usize(&fan_outs);
         let complexity_pcts = if has_complexity {
@@ -325,9 +359,16 @@ impl Scorer {
         } else {
             vec![0.0; files.len()]
         };
+        let coverage_pcts = if has_coverage {
+            percentile_rank_f64(&coverage_values)
+        } else {
+            vec![0.0; files.len()]
+        };
 
-        // Base active weight sum + optional coupling. Renormalize over
+        // Base active weight sum + optional extras. Renormalize over
         // whatever the caller supplied; matches Ruby normalize_weights.
+        // Ruby lumps coverage + interaction into the active-key sum
+        // together via `coverage_available?`; we keep the same gate.
         let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
         if has_complexity {
             active_total += BASE_WEIGHT_COMPLEXITY;
@@ -337,6 +378,9 @@ impl Scorer {
         }
         if has_coupling {
             active_total += EXTRA_WEIGHT_COUPLING;
+        }
+        if has_coverage {
+            active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
         }
         let w_fi = BASE_WEIGHT_FAN_IN / active_total;
         let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
@@ -355,7 +399,22 @@ impl Scorer {
         } else {
             0.0
         };
+        let w_cov = if has_coverage {
+            BASE_WEIGHT_COVERAGE / active_total
+        } else {
+            0.0
+        };
+        let w_int = if has_coverage {
+            EXTRA_WEIGHT_INTERACTION / active_total
+        } else {
+            0.0
+        };
 
+        // Composite includes the interaction cross-term `w_int *
+        // fan_in_pct * coverage_pct` — Ruby `interaction_score` uses
+        // coverage_pct (percentile) not raw coverage. The cross-term
+        // lives alongside the base weighted sum (which also gets its
+        // own coverage term via w_cov * coverage_pct).
         let composites: Vec<f64> = (0..files.len())
             .map(|i| {
                 w_fi * fan_in_pcts[i]
@@ -363,6 +422,8 @@ impl Scorer {
                     + w_cx * complexity_pcts[i]
                     + w_ch * churn_pcts[i]
                     + w_cp * coupling_pcts[i]
+                    + w_cov * coverage_pcts[i]
+                    + w_int * fan_in_pcts[i] * coverage_pcts[i]
             })
             .collect();
 
@@ -412,11 +473,13 @@ impl Scorer {
                     churn_lines: churn_lines[i],
                     max_coupling_partner: partner_path,
                     max_coupling: coupling_values[i],
+                    coverage: coverage_values[i],
                     fan_in_pct: fan_in_pcts[i],
                     fan_out_pct: fan_out_pcts[i],
                     complexity_pct: complexity_pcts[i],
                     churn_pct: churn_pcts[i],
                     coupling_pct: coupling_pcts[i],
+                    coverage_pct: coverage_pcts[i],
                     composite: round4(composites[i]),
                     class: classes[i],
                     evidence: 1.0,

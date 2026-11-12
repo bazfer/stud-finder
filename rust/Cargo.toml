@@ -15,6 +15,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 sf-core = { path = "crates/sf-core" }
+sf-coverage = { path = "crates/sf-coverage" }
 sf-history = { path = "crates/sf-history" }
 
 [profile.release]
