@@ -172,6 +172,13 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Subcommand dispatch, Ruby `shift_subcommand?` style. Must run
+    // BEFORE clap parses the top-level args so `stud-finder gate
+    // [args]` doesn't trip the main CLI's positional-path parser.
+    let raw_argv: Vec<String> = std::env::args().collect();
+    if raw_argv.get(1).map(String::as_str) == Some("gate") {
+        return run_gate_subcommand(&raw_argv[2..]);
+    }
     let cli = Cli::parse();
     let path = cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
@@ -1789,3 +1796,80 @@ mod tests {
 // `width_of` helpers were removed. Table rendering now lives in
 // `output::emit` next to the other emitters, using the Ruby
 // `emit_table` layout (section headers, column widths, footer).
+
+/// `stud-finder gate [--input FILE] [--enforce]` — reads a prior
+/// `stud-finder --output json` run and prints a markdown findings
+/// report over three CI-safety checks. Matches Ruby `run_gate` at
+/// `lib/stud_finder/cli.rb:147` verbatim on arguments + exit code
+/// semantics.
+///
+/// Input source cascade: `--input FILE` wins, else stdin (if
+/// piped), else error. `--enforce` makes the return non-zero when
+/// any check produced findings; without it the command always
+/// returns 0 (observation mode).
+fn run_gate_subcommand(argv: &[String]) -> Result<()> {
+    let mut input_path: Option<String> = None;
+    let mut enforce = false;
+    let mut i = 0usize;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "--" {
+            break;
+        }
+        if a == "--enforce" {
+            enforce = true;
+            i += 1;
+            continue;
+        }
+        if a == "--input" {
+            let v = argv.get(i + 1).cloned().unwrap_or_else(|| {
+                eprintln!("Error: --input requires a value.");
+                std::process::exit(2);
+            });
+            input_path = Some(v);
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--input=") {
+            input_path = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        eprintln!("Error: unexpected arguments: {a}");
+        std::process::exit(2);
+    }
+
+    let raw = match input_path {
+        Some(p) => std::fs::read_to_string(&p).unwrap_or_else(|err| {
+            eprintln!("Error: failed to read --input {p}: {err}");
+            std::process::exit(2);
+        }),
+        None => {
+            // No --input: pull from stdin. A TTY stdin without a
+            // path is user error — Ruby prints a help hint here.
+            use std::io::{IsTerminal, Read};
+            let mut buf = String::new();
+            if std::io::stdin().is_terminal() {
+                eprintln!("Error: no input. Pass --input FILE or pipe stud-finder JSON on stdin.");
+                std::process::exit(2);
+            }
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .unwrap_or_else(|err| {
+                    eprintln!("Error: failed to read stdin: {err}");
+                    std::process::exit(2);
+                });
+            buf
+        }
+    };
+
+    let result = sf_gate::run(&raw).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(2);
+    });
+    print!("{}", sf_gate::markdown(&result, enforce));
+    if enforce && result.has_findings() {
+        std::process::exit(1);
+    }
+    Ok(())
+}

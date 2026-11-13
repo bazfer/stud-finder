@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 sf-core = { path = "crates/sf-core" }
 sf-coverage = { path = "crates/sf-coverage" }
+sf-gate = { path = "crates/sf-gate" }
 sf-history = { path = "crates/sf-history" }
 sf-js = { path = "crates/sf-js" }
 sf-newness = { path = "crates/sf-newness" }

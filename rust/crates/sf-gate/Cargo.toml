@@ -1,0 +1,12 @@
+[package]
+name = "sf-gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CI-enforcement gate over a stud-finder JSON output: trunk_touched, low_evidence_high_score, newness_trunk_adjacent."
+
+[dependencies]
+serde_json = "1"
