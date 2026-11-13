@@ -249,14 +249,22 @@ fn coerce_f64(field: &str, v: Option<&Value>) -> Result<Option<f64>, Error> {
     }
 }
 
-/// Port of Ruby `String#to_f`: returns the numeric prefix as f64,
-/// or `0.0` on anything Ruby wouldn't accept (garbage input,
-/// `NaN`/`Infinity` literals, no numeric prefix). Preserves
-/// Infinity when the numeric magnitude overflows f64 — Ruby
-/// `"1e999".to_f` returns `Infinity`, which the gate's score
-/// comparison treats as >= HIGH_SCORE_THRESHOLD. Verified against
-/// `ruby:3.3.13-slim`. Underscores between digits are stripped
-/// (Ruby `"0.7_5".to_f == 0.75`, `"1_0.5".to_f == 10.5`).
+/// Port of Ruby `String#to_f` (verified against ruby:3.3.13-slim):
+/// - Skip leading whitespace.
+/// - Optional `+`/`-`.
+/// - Digit-sequence (optional `.` + digit-sequence) + optional
+///   `e`/`E` + optional sign + digit-sequence.
+/// - Digit-sequences allow underscores wedged BETWEEN two digits
+///   (Ruby numeric-literal rule). A leading/trailing `_` ends the
+///   sequence — in `"1e_1"` or `"_1"` the parser stops before `_`.
+/// - No numeric prefix at all → 0.0. `"NaN"`/`"Infinity"` have no
+///   leading digit so they parse to 0.0.
+/// - Overflow keeps the Infinity result (Ruby `"1e999".to_f` is
+///   Infinity, which the >= 0.75 check still satisfies).
+///
+/// Caught as Ohm's P2 on PR #91 r3: prior hand-rolled walk
+/// panicked on `"_1"` (indexed `bytes[end-1]` at end=0) and
+/// mishandled underscored exponents (`"1e-0_1"`).
 fn ruby_to_f(s: &str) -> f64 {
     let bytes = s.as_bytes();
     let mut i = 0usize;
@@ -267,62 +275,69 @@ fn ruby_to_f(s: &str) -> f64 {
     if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
         end += 1;
     }
-    let digits_start = end;
-    // Accept digits and `_` where the underscore is wedged between
-    // two digits — Ruby's numeric-literal underscore rule.
-    while end < bytes.len()
-        && (bytes[end].is_ascii_digit()
-            || (bytes[end] == b'_'
-                && end + 1 < bytes.len()
-                && bytes[end + 1].is_ascii_digit()
-                && bytes[end - 1].is_ascii_digit()))
-    {
-        end += 1;
-    }
-    let had_digits_before_dot = end > digits_start;
+    let int_start = end;
+    advance_digit_run(bytes, &mut end);
+    let had_int_digits = end > int_start;
     if end < bytes.len() && bytes[end] == b'.' {
         end += 1;
         let frac_start = end;
-        while end < bytes.len()
-            && (bytes[end].is_ascii_digit()
-                || (bytes[end] == b'_'
-                    && end + 1 < bytes.len()
-                    && bytes[end + 1].is_ascii_digit()
-                    && bytes[end - 1].is_ascii_digit()))
-        {
-            end += 1;
-        }
-        if !had_digits_before_dot && end == frac_start {
+        advance_digit_run(bytes, &mut end);
+        let had_frac_digits = end > frac_start;
+        // Ruby `.` must have EITHER an integer-part digit before it
+        // OR a fractional-part digit after it. Neither → no numeric
+        // prefix at all → 0.0.
+        if !had_int_digits && !had_frac_digits {
             return 0.0;
         }
-    } else if !had_digits_before_dot {
+    } else if !had_int_digits {
         return 0.0;
     }
     if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
         let exp_marker = end;
-        end += 1;
-        if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
-            end += 1;
+        let mut exp_end = end + 1;
+        if exp_end < bytes.len() && (bytes[exp_end] == b'+' || bytes[exp_end] == b'-') {
+            exp_end += 1;
         }
-        let exp_digits_start = end;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-        if end == exp_digits_start {
+        let exp_digits_start = exp_end;
+        advance_digit_run(bytes, &mut exp_end);
+        if exp_end == exp_digits_start {
+            // Bare `e` with no digits → Ruby snips it (`"1e"` →
+            // 1.0, `"1e_1"` → 1.0).
             end = exp_marker;
+        } else {
+            end = exp_end;
         }
     }
-    // Strip underscores for the final `parse::<f64>` (Rust parser
-    // doesn't accept them even where Ruby does).
     let raw = &s[i..end];
     let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
     match cleaned.parse::<f64>() {
-        // Ruby accepts overflow as Infinity (e.g. `"1e999"` →
-        // Infinity). Keep it — the composite check `>= 0.75` still
-        // fires correctly, and callers who want finite values can
-        // test themselves.
         Ok(n) if !n.is_nan() => n,
         _ => 0.0,
+    }
+}
+
+/// Advance `end` across a Ruby-style digit sequence: ascii digits
+/// with optional single underscores between consecutive digits.
+/// A leading `_` (before any digit) or a trailing `_` (no digit
+/// after) terminates the run without consuming the `_`. Never
+/// indexes `bytes[end - 1]` without first proving `end > start`.
+fn advance_digit_run(bytes: &[u8], end: &mut usize) {
+    // Need at least one leading digit before `_` is legal.
+    while *end < bytes.len() {
+        let b = bytes[*end];
+        if b.is_ascii_digit() {
+            *end += 1;
+            continue;
+        }
+        if b == b'_' {
+            let has_prev_digit = *end > 0 && bytes[*end - 1].is_ascii_digit();
+            let has_next_digit = *end + 1 < bytes.len() && bytes[*end + 1].is_ascii_digit();
+            if has_prev_digit && has_next_digit {
+                *end += 1;
+                continue;
+            }
+        }
+        break;
     }
 }
 
@@ -656,6 +671,41 @@ mod tests {
         let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":[0.1]}],"javascript":[]}"#;
         let err = run(json).unwrap_err();
         assert!(err.to_string().contains("malformed stud-finder report"));
+    }
+
+    #[test]
+    fn leading_underscore_string_does_not_panic_and_returns_zero() {
+        // Ohm P2 on PR #91 r3: `"_1"` previously panicked at
+        // `bytes[end - 1]` with end=0. Must now return 0.0 like
+        // Ruby `"_1".to_f`.
+        assert_eq!(ruby_to_f("_1"), 0.0);
+        assert_eq!(ruby_to_f("__"), 0.0);
+        assert_eq!(ruby_to_f("_"), 0.0);
+    }
+
+    #[test]
+    fn exponent_underscore_matches_ruby_to_f() {
+        // Ohm P2 on PR #91 r3: `"1e-0_1".to_f == 0.1` in Ruby
+        // (exponent is -01 after underscore strip). Prior
+        // revision only accepted underscores in the mantissa.
+        assert_eq!(ruby_to_f("1e-0_1"), 0.1);
+        // Trailing/leading underscore in exponent disallowed
+        // (Ruby snips the whole `e...` suffix).
+        assert_eq!(ruby_to_f("1e_1"), 1.0);
+        assert_eq!(ruby_to_f("1_e1"), 1.0);
+    }
+
+    #[test]
+    fn exponent_underscore_evidence_flags_low_evidence_high_score() {
+        // Composite check — `"1e-0_1"` evidence = 0.1 < 0.5 → low.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":"1e-0_1"}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            1,
+            "`1e-0_1` → 0.1 → low: {:?}",
+            r.low_evidence_high_score
+        );
     }
 
     #[test]
