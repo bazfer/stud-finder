@@ -55,22 +55,68 @@ pub const COMPLEXITY_FLOOR: usize = 15;
 // sum is 0.76, so each renormalized weight is `raw / 0.76` and the
 // ratio is preserved. When a signal is missing the sum shrinks and the
 // remaining weights renormalize automatically.
+/// Raw per-signal weight values used by the composite before
+/// renormalization. Matches Ruby `Scorer::DEFAULT_WEIGHTS` key set
+/// so sf-cli's `--weights` / `--interaction-weight` /
+/// `--coupling-weight` flags can override the whole hash or
+/// individual fields.
+///
+/// Defaults are Ruby's `DEFAULT_WEIGHTS` verbatim: fan_in 0.19,
+/// fan_out 0.095, complexity 0.2375, churn 0.2375, coverage 0.095,
+/// interaction 0.095, coupling 0.05.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawWeights {
+    pub fan_in: f64,
+    pub fan_out: f64,
+    pub complexity: f64,
+    pub churn: f64,
+    pub coverage: f64,
+    pub interaction: f64,
+    pub coupling: f64,
+}
+
+impl Default for RawWeights {
+    fn default() -> Self {
+        Self {
+            fan_in: 0.19,
+            fan_out: 0.095,
+            complexity: 0.2375,
+            churn: 0.2375,
+            coverage: 0.095,
+            interaction: 0.095,
+            coupling: 0.05,
+        }
+    }
+}
+
+// Default base weights are kept as named constants so sf-score
+// tests can assert against them symbolically. The production
+// scoring path reads the equivalent fields on `RawWeights::default`
+// (slice #10f); `#[allow(dead_code)]` keeps the symbols around for
+// the test suite without warning on the lib side.
+#[allow(dead_code)]
 const BASE_WEIGHT_FAN_IN: f64 = 0.19;
+#[allow(dead_code)]
 const BASE_WEIGHT_FAN_OUT: f64 = 0.095;
+#[allow(dead_code)]
 const BASE_WEIGHT_COMPLEXITY: f64 = 0.2375;
+#[allow(dead_code)]
 const BASE_WEIGHT_CHURN: f64 = 0.2375;
 /// Extra-signal weight for temporal coupling, from the Ruby
 /// `DEFAULT_WEIGHTS[:coupling]`. Outside the base `4 : 2 : 5 : 5` ratio.
+#[allow(dead_code)]
 const EXTRA_WEIGHT_COUPLING: f64 = 0.05;
 /// Coverage base-signal weight from Ruby `DEFAULT_WEIGHTS[:coverage]`.
 /// Ruby lumps coverage into the active-keys sum next to the base
 /// four, so a single Rust renormalization over "all active" handles
 /// it identically. Coverage only lands together with interaction.
+#[allow(dead_code)]
 const BASE_WEIGHT_COVERAGE: f64 = 0.095;
 /// Interaction cross-term weight from Ruby
 /// `DEFAULT_WEIGHTS[:interaction]`. Ruby's interaction score is
 /// `interaction_weight * fan_in_pct * coverage_pct` — not a
 /// percentile-ranked signal. See `interaction_score` in scorer.rb.
+#[allow(dead_code)]
 const EXTRA_WEIGHT_INTERACTION: f64 = 0.095;
 
 /// Classification tier for a scored file. `Trunk` is load-bearing;
@@ -335,22 +381,33 @@ pub fn effective_weights(
     has_coupling: bool,
     has_coverage: bool,
 ) -> EffectiveWeights {
-    let mut active_total =
-        BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
+    effective_weights_from(&RawWeights::default(), has_coupling, has_coverage)
+}
+
+/// Like `effective_weights` but accepts an explicit raw-weight
+/// override. sf-cli reaches for this when `--weights` /
+/// `--interaction-weight` / `--coupling-weight` supply non-default
+/// values; `meta.weights` reflects whatever the user passed.
+pub fn effective_weights_from(
+    raw: &RawWeights,
+    has_coupling: bool,
+    has_coverage: bool,
+) -> EffectiveWeights {
+    let mut active_total = raw.fan_in + raw.fan_out + raw.complexity + raw.churn;
     if has_coupling {
-        active_total += EXTRA_WEIGHT_COUPLING;
+        active_total += raw.coupling;
     }
     if has_coverage {
-        active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
+        active_total += raw.coverage + raw.interaction;
     }
     EffectiveWeights {
-        fan_in: BASE_WEIGHT_FAN_IN / active_total,
-        fan_out: BASE_WEIGHT_FAN_OUT / active_total,
-        complexity: BASE_WEIGHT_COMPLEXITY / active_total,
-        churn: BASE_WEIGHT_CHURN / active_total,
-        coupling: has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total),
-        coverage: has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total),
-        interaction: has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total),
+        fan_in: raw.fan_in / active_total,
+        fan_out: raw.fan_out / active_total,
+        complexity: raw.complexity / active_total,
+        churn: raw.churn / active_total,
+        coupling: has_coupling.then(|| raw.coupling / active_total),
+        coverage: has_coverage.then(|| raw.coverage / active_total),
+        interaction: has_coverage.then(|| raw.interaction / active_total),
     }
 }
 
@@ -362,6 +419,11 @@ pub struct Scorer {
     pub branch_threshold_pct: f64,
     pub fan_in_floor: usize,
     pub complexity_floor: usize,
+    /// Optional custom raw weights. `None` = Ruby `DEFAULT_WEIGHTS`
+    /// (the inline constants). `Some` overrides every signal weight
+    /// before renormalization, matching Ruby's `--weights`,
+    /// `--interaction-weight`, `--coupling-weight`.
+    pub weights: Option<RawWeights>,
 }
 
 impl Default for Scorer {
@@ -377,6 +439,7 @@ impl Scorer {
             branch_threshold_pct: BRANCH_THRESHOLD_PCT,
             fan_in_floor: FAN_IN_FLOOR,
             complexity_floor: COMPLEXITY_FLOOR,
+            weights: None,
         }
     }
 
@@ -390,6 +453,7 @@ impl Scorer {
             branch_threshold_pct,
             fan_in_floor,
             complexity_floor: COMPLEXITY_FLOOR,
+            weights: None,
         }
     }
 
@@ -404,7 +468,16 @@ impl Scorer {
             branch_threshold_pct,
             fan_in_floor,
             complexity_floor,
+            weights: None,
         }
+    }
+
+    /// Override the composite weights for this scorer. Pass the
+    /// RawWeights returned by `sf-cli` after parsing
+    /// `--weights`/`--interaction-weight`/`--coupling-weight`.
+    pub fn with_weights(mut self, weights: RawWeights) -> Self {
+        self.weights = Some(weights);
+        self
     }
 
     /// Score every registered file in `graph` using fan_in and fan_out
@@ -585,32 +658,37 @@ impl Scorer {
         // still occupies the ratio share — so remaining signals
         // don't balloon to fill the gap. coverage/interaction add
         // only when coverage is loaded; coupling only when coupling
-        // data is available. Caught as Ohm non-blocking on PR #86;
-        // fixed here in slice #10d together with effective_weights().
-        let mut active_total =
-            BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
+        // data is available.
+        //
+        // Uses `self.weights` when sf-cli supplied a custom override
+        // via `--weights`/`--interaction-weight`/`--coupling-weight`,
+        // else Ruby's `DEFAULT_WEIGHTS`. Slice #10f adds the custom-
+        // weights path; the default path matches the slice #10d
+        // Ruby-parity fix.
+        let raw = self.weights.unwrap_or_default();
+        let mut active_total = raw.fan_in + raw.fan_out + raw.complexity + raw.churn;
         if has_coupling {
-            active_total += EXTRA_WEIGHT_COUPLING;
+            active_total += raw.coupling;
         }
         if has_coverage {
-            active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
+            active_total += raw.coverage + raw.interaction;
         }
-        let w_fi = BASE_WEIGHT_FAN_IN / active_total;
-        let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
-        let w_cx = BASE_WEIGHT_COMPLEXITY / active_total;
-        let w_ch = BASE_WEIGHT_CHURN / active_total;
+        let w_fi = raw.fan_in / active_total;
+        let w_fo = raw.fan_out / active_total;
+        let w_cx = raw.complexity / active_total;
+        let w_ch = raw.churn / active_total;
         let w_cp = if has_coupling {
-            EXTRA_WEIGHT_COUPLING / active_total
+            raw.coupling / active_total
         } else {
             0.0
         };
         let w_cov = if has_coverage {
-            BASE_WEIGHT_COVERAGE / active_total
+            raw.coverage / active_total
         } else {
             0.0
         };
         let w_int = if has_coverage {
-            EXTRA_WEIGHT_INTERACTION / active_total
+            raw.interaction / active_total
         } else {
             0.0
         };

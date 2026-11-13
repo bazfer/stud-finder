@@ -1515,6 +1515,226 @@ fn js_timeout_is_accepted_for_parity() {
 }
 
 #[test]
+fn coupling_max_commit_files_cap_one_suppresses_coupling_with_bulk_warning() {
+    // Ohm non-blocking on PR #89: pair the parsing-only zero test
+    // with a real-git behavior regression. A commit touching 2
+    // files with --coupling-max-commit-files=1 must be skipped
+    // from coupling (bulk-commits warning fires) while churn
+    // stays unchanged.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    // Two files committed together → one commit touching 2 files.
+    std::fs::write(repo.join("a.rb"), "class A\n  def one; end\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\n  def one; end\nend\n").unwrap();
+    std::fs::write(repo.join("c.rb"), "class C\nend\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "both"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(repo)
+        .arg("--coupling-max-commit-files")
+        .arg("1")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bulk commits"),
+        "cap=1 must trip the bulk-commits warning: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    // With cap=1 the 2-file commit is skipped → max_coupling is 0 for every row.
+    for r in v["ruby"].as_array().unwrap() {
+        let mc = r["max_coupling"].as_f64().unwrap();
+        assert_eq!(mc, 0.0, "cap=1 should strip all coupling (row: {r})");
+    }
+    // Churn unaffected: a.rb and b.rb should each carry
+    // churn_commits = 1.
+    for path in ["a.rb", "b.rb"] {
+        let row = v["ruby"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["path"] == serde_json::json!(path))
+            .unwrap_or_else(|| panic!("no row for {path}"));
+        assert_eq!(
+            row["churn_commits"].as_u64().unwrap(),
+            1,
+            "churn should survive cap=1 (row: {row})"
+        );
+    }
+}
+
+#[test]
+fn coupling_max_commit_files_zero_keeps_coupling_present() {
+    // Companion to the _unlimited parsing test: with cap=0 and a
+    // real commit touching >1 file, the bulk-commits warning MUST
+    // NOT fire and both files should land in each other's coupling.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.rb"), "class A\n  def one; end\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\n  def one; end\nend\n").unwrap();
+    std::fs::write(repo.join("c.rb"), "class C\nend\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "both"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(repo)
+        .arg("--coupling-max-commit-files")
+        .arg("0")
+        .arg("--coupling-min-commits")
+        .arg("1")
+        .arg("--coupling-threshold")
+        .arg("0.0")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("bulk commits"),
+        "cap=0 must disable the bulk-commits warning: {stderr}"
+    );
+}
+
+#[test]
+fn weights_flag_requires_all_five_keys() {
+    // Ruby `parse_weights` raises when any of fan_in/fan_out/
+    // complexity/churn/coverage is missing. A bare fan_in-only
+    // spec must exit non-zero with that message.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0.5")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "incomplete --weights must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must include fan_in, fan_out, complexity, churn, and coverage"),
+        "expected Ruby missing-keys error: {stderr}"
+    );
+}
+
+#[test]
+fn weights_flag_rejects_values_outside_unit_interval() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:1.5,fan_out:0.1,complexity:0.2,churn:0.2,coverage:0.1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("between 0.0 and 1.0"),
+        "expected range error: {stderr}"
+    );
+}
+
+#[test]
+fn weights_flag_flows_into_meta_weights() {
+    // A valid --weights override must land in meta.weights after
+    // renormalization. Pick fan_in dominant so after renorm it's
+    // still the largest share.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0.8,fan_out:0.05,complexity:0.05,churn:0.05,coverage:0.05")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let w = v["meta"]["weights"].as_object().unwrap();
+    // After renormalizing over the four base signals (no coverage
+    // loaded here, so coverage/interaction stay out), fan_in's
+    // share should dominate the others.
+    let fi = w["fan_in"].as_f64().unwrap();
+    let fo = w["fan_out"].as_f64().unwrap();
+    assert!(fi > fo * 5.0, "fan_in share should dominate: {w:?}");
+}
+
+#[test]
+fn interaction_weight_flag_overrides_weights_entry() {
+    // `--interaction-weight 0.3` layered on top of defaults should
+    // appear in meta.weights.interaction when coverage is loaded.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let cov = tmp.path().join("cov.json");
+    std::fs::write(&cov, r#"{"X": {"coverage": {}}}"#).unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--ruby-coverage")
+        .arg(&cov)
+        .arg("--interaction-weight")
+        .arg("0.3")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    // interaction weight is renormalized; with defaults (~.095)
+    // bumping to 0.3 should at least raise it above the default
+    // share (interaction / 0.76-ish ~= 0.125 → new share ~0.32).
+    let interaction = v["meta"]["weights"]["interaction"].as_f64().unwrap();
+    assert!(
+        interaction > 0.2,
+        "--interaction-weight 0.3 should give a larger share: {interaction}"
+    );
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)

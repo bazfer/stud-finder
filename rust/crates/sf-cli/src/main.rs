@@ -152,6 +152,23 @@ struct Cli {
     /// no-op today. Kept so Ruby-matching automation does not break.
     #[arg(long, default_value_t = 60, value_parser = parse_positive_u64)]
     js_timeout: u64,
+    /// Full weight override: comma-separated `key:float` pairs. Required
+    /// keys: `fan_in`, `fan_out`, `complexity`, `churn`, `coverage`.
+    /// Optional: `interaction` (defaults to 0.0), `coupling` (defaults
+    /// to 0.05). All values in `[0.0, 1.0]`. Matches Ruby `parse_weights`.
+    /// When supplied together with `--interaction-weight` or
+    /// `--coupling-weight` the per-key flags override the matching
+    /// entry from `--weights`.
+    #[arg(long)]
+    weights: Option<String>,
+    /// `fan_in × coverage_risk` interaction weight. Requires coverage;
+    /// if `--weights` is also set this overrides its `interaction:` entry.
+    #[arg(long, value_parser = parse_unit_float)]
+    interaction_weight: Option<f64>,
+    /// Temporal-coupling weight. If `--weights` is set this overrides
+    /// its `coupling:` entry.
+    #[arg(long, value_parser = parse_unit_float)]
+    coupling_weight: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -351,13 +368,42 @@ fn main() -> Result<()> {
     let coverage_available = signals.coverage.is_some();
     // Honor `--trunk-threshold` + `--branch-threshold` by converting
     // from Ruby's 0-100 percentile integers to the sf-score 0.0-1.0
-    // floats the composite classification uses.
-    let scorer = Scorer::with_floors(
-        cli.trunk_threshold as f64 / 100.0,
-        cli.branch_threshold as f64 / 100.0,
-        sf_score::FAN_IN_FLOOR,
-        sf_score::COMPLEXITY_FLOOR,
-    );
+    // floats the composite classification uses. Custom weights (if
+    // any) overlay on top of either `--weights` or the Ruby defaults.
+    let custom_weights = cli.weights.as_deref().map(|s| {
+        parse_weights_flag(s).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            std::process::exit(2);
+        })
+    });
+    let effective_raw = {
+        let mut w = custom_weights.unwrap_or_default();
+        if let Some(i) = cli.interaction_weight {
+            w.interaction = i;
+        }
+        if let Some(c) = cli.coupling_weight {
+            w.coupling = c;
+        }
+        // Ruby `--interaction-weight` + `--coupling-weight` both
+        // range-check (0.0..=1.0); parse_unit_float enforced that
+        // already.
+        w
+    };
+    let use_custom_weights = custom_weights.is_some()
+        || cli.interaction_weight.is_some()
+        || cli.coupling_weight.is_some();
+    let scorer = {
+        let mut s = Scorer::with_floors(
+            cli.trunk_threshold as f64 / 100.0,
+            cli.branch_threshold as f64 / 100.0,
+            sf_score::FAN_IN_FLOOR,
+            sf_score::COMPLEXITY_FLOOR,
+        );
+        if use_custom_weights {
+            s = s.with_weights(effective_raw);
+        }
+        s
+    };
     let scored = scorer.score_with_signals(signals);
     let mut ruby_rows = scored;
 
@@ -550,8 +596,12 @@ fn main() -> Result<()> {
         (has_js_complexity, false, false)
     };
     let formula = output::formula_label(has_coverage, has_coupling);
-    let weights =
-        sf_score::effective_weights(has_complexity, has_churn, has_coupling, has_coverage);
+    let _ = (has_complexity, has_churn);
+    let weights = if use_custom_weights {
+        sf_score::effective_weights_from(&effective_raw, has_coupling, has_coverage)
+    } else {
+        sf_score::effective_weights(true, true, has_coupling, has_coverage)
+    };
     // Ruby `meta.filtered` is set ONLY when `filter_set` is
     // populated — i.e. `--diff-base` or `--only`. `--top` is a
     // truncation knob, not a filter. Caught as Ohm's P2 on PR #86.
@@ -767,6 +817,56 @@ fn parse_positive_u64(s: &str) -> Result<u64, String> {
         return Err("value must be positive".to_string());
     }
     Ok(n)
+}
+
+/// Parse Ruby's `--weights` DSL: `fan_in:F,fan_out:O,complexity:C,
+/// churn:H,coverage:V[,interaction:I][,coupling:P]`. Required 5 keys
+/// must appear, extras must be in the optional set, values must be
+/// floats in `[0.0, 1.0]`. Missing `interaction` defaults to 0.0;
+/// missing `coupling` defaults to 0.05 — matches Ruby `parse_weights`
+/// at `lib/stud_finder/cli.rb:322`.
+fn parse_weights_flag(s: &str) -> Result<sf_score::RawWeights, String> {
+    let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for entry in s.split(',') {
+        let mut parts = entry.splitn(2, ':');
+        let key = parts.next().unwrap_or("").trim().to_string();
+        let raw = parts.next().unwrap_or("").trim();
+        if key.is_empty() || raw.is_empty() {
+            return Err("Error: invalid weights format.".to_string());
+        }
+        let v: f64 = raw
+            .parse()
+            .map_err(|_| "Error: weight values must be floats.".to_string())?;
+        map.insert(key, v);
+    }
+    let required = ["fan_in", "fan_out", "complexity", "churn", "coverage"];
+    let optional = ["interaction", "coupling"];
+    if required.iter().any(|k| !map.contains_key(*k)) {
+        return Err(
+            "Error: weights must include fan_in, fan_out, complexity, churn, and coverage."
+                .to_string(),
+        );
+    }
+    let allowed: std::collections::HashSet<&str> =
+        required.iter().chain(optional.iter()).copied().collect();
+    if map.keys().any(|k| !allowed.contains(k.as_str())) {
+        return Err(
+            "Error: weights must include fan_in, fan_out, complexity, churn, and coverage."
+                .to_string(),
+        );
+    }
+    if map.values().any(|v| *v < 0.0 || *v > 1.0) {
+        return Err("Error: weight values must be between 0.0 and 1.0.".to_string());
+    }
+    Ok(sf_score::RawWeights {
+        fan_in: map["fan_in"],
+        fan_out: map["fan_out"],
+        complexity: map["complexity"],
+        churn: map["churn"],
+        coverage: map["coverage"],
+        interaction: *map.get("interaction").unwrap_or(&0.0),
+        coupling: *map.get("coupling").unwrap_or(&0.05),
+    })
 }
 
 /// Parser for weight-shaped Floats in `[0.0, 1.0]`. Matches Ruby
