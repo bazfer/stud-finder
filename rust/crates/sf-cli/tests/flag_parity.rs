@@ -1452,7 +1452,11 @@ fn coupling_min_commits_zero_is_rejected() {
 }
 
 #[test]
-fn coupling_max_commit_files_zero_is_rejected() {
+fn coupling_max_commit_files_zero_means_unlimited() {
+    // Ohm P2 on PR #89 round 2: Ruby documents `0 = unlimited`
+    // for this flag (cli.rb:287-290). Must accept zero and skip
+    // the bulk-commit cap entirely — not reject, not treat as
+    // literal cap (which would skip every nonempty commit).
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let out = Command::new(stud_finder_bin())
@@ -1462,8 +1466,14 @@ fn coupling_max_commit_files_zero_is_rejected() {
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
-        "--coupling-max-commit-files 0 must exit non-zero"
+        out.status.success(),
+        "--coupling-max-commit-files 0 must be accepted as unlimited: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("bulk commits"),
+        "0 cap must disable bulk-commit filtering: {stderr}"
     );
 }
 

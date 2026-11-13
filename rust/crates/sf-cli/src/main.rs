@@ -133,8 +133,11 @@ struct Cli {
     coupling_min_commits: usize,
     /// Bulk-commit cutoff: commits touching strictly more files
     /// than this (within the scored set) are skipped from coupling.
-    /// They still contribute to churn. Ruby default: 50.
-    #[arg(long, default_value_t = sf_history::BULK_COMMIT_THRESHOLD, value_parser = parse_positive_usize)]
+    /// They still contribute to churn. Ruby default: 50. **Zero
+    /// disables the cap** — every commit participates in coupling
+    /// regardless of size. Caught as Ohm's P2 on PR #89: prior
+    /// revision rejected zero.
+    #[arg(long, default_value_t = sf_history::BULK_COMMIT_THRESHOLD)]
     coupling_max_commit_files: usize,
     /// Disable Rails association/string fan-in inference. Accepted
     /// for parity with Ruby — the Rust port does not yet perform

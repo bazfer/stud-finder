@@ -295,8 +295,10 @@ fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>, config: HistoryConfig) 
         // Coupling: skip bulk commits (> config.max_commit_files
         // in commit_files restricted to the file_set). Matches Ruby
         // `append_commit` which filters by the file-set-restricted
-        // count, not the total commit size.
-        if commit_files.len() > config.max_commit_files {
+        // count, not the total commit size. `0` disables the cap
+        // (Ruby documents `0 = unlimited`); without this guard a
+        // zero cap would skip every nonempty commit.
+        if config.max_commit_files > 0 && commit_files.len() > config.max_commit_files {
             bulk_commits_skipped += 1;
             continue;
         }
