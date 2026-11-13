@@ -137,6 +137,7 @@ fn main() -> Result<()> {
         loc,
     };
     let coverage_for_newness = signals.coverage.clone();
+    let coverage_available = signals.coverage.is_some();
     let scored = Scorer::new().score_with_signals(signals);
     let mut ruby_rows = scored;
 
@@ -170,6 +171,13 @@ fn main() -> Result<()> {
             .unwrap_or(false)
     });
     sort_rows(&mut ruby_rows);
+    // Assign ranks AFTER the primary sort but BEFORE any filters
+    // (`--top`, `--diff-base`). Preserving pre-filter ranks is the
+    // Ruby contract: a `--diff-base`-filtered output can legitimately
+    // land ranks like 1, 7, 23 rather than being renumbered. Caught
+    // as Ohm's P1 on PR #85.
+    assign_ranks(&mut ruby_rows);
+    let ruby_total_analyzed = ruby_rows.len();
 
     // Build the JavaScript section on its own graph + complexity so
     // JS files don't pool into the Ruby percentile distribution.
@@ -195,10 +203,12 @@ fn main() -> Result<()> {
             sf_newness::analyze(&cli.path, &js_refs, sf_newness::NewnessConfig::default());
         sf_score::apply_newness(&mut rows, &js_newness.metadata, &js_graph, |_| false);
         sort_rows(&mut rows);
+        assign_ranks(&mut rows);
         rows
     } else {
         Vec::new()
     };
+    let js_total_analyzed = js_rows.len();
 
     // --- Diff-base filter (applied BEFORE --top) ---
     // An explicitly-requested --diff-base that CAN'T be satisfied
@@ -256,11 +266,22 @@ fn main() -> Result<()> {
                 churn_days: DEFAULT_WINDOW_DAYS,
                 analyzed_at: &analyzed_at,
                 warnings: &warnings,
+                file_count: ruby_total_analyzed + js_total_analyzed,
+                coverage_available,
             },
         );
     }
 
     Ok(())
+}
+
+/// Walk the sorted rows and assign 1-based ranks. Must be called
+/// AFTER the primary sort and BEFORE any filters so filtered
+/// output preserves the Ruby-contract rank values.
+fn assign_ranks(rows: &mut [ScoredFile]) {
+    for (i, r) in rows.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
 }
 
 /// Minimal RFC3339-shaped UTC timestamp for `meta.analyzed_at`.
