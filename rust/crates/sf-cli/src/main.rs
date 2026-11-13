@@ -745,17 +745,23 @@ mod tests {
         // `strip` includes `\x0B`; Rust's `is_ascii_whitespace`
         // does not. Expected Ruby count: 2. Also caught by Ohm.
         mk("vtab_line.rb", b"a\n\x0B\x0B\n b\n");
-        // Mid-line invalid UTF-8: Ruby rescues `ArgumentError:
-        // invalid byte sequence in UTF-8` and returns 0 for the
-        // whole file. We match the rescued branch.
-        mk("midline_invalid.rb", b"ok\n\xff\n");
-        // Trailing invalid UTF-8 without newline: Ruby raises an
-        // UNRESCUED `Encoding::CompatibilityError` that escapes
-        // `non_blank_lines`. We deliberately diverge — Rust
+        // Fixture A — invalid UTF-8 whose iteration raises
+        // `ArgumentError: invalid byte sequence in UTF-8` which
+        // `LocCounter#non_blank_lines` rescues → returns 0 for
+        // the whole file. We match that branch. (Note: whether
+        // Ruby picks `ArgumentError` vs `Encoding::CompatibilityError`
+        // is NOT determined by mid-line-vs-trailing position per
+        // se — it's about which Ruby operation encounters the
+        // bad bytes first. Per Ohm's non-blocking naming note on
+        // PR #83; the fixtures still cover both outcomes.)
+        mk("rescued_invalid_utf8.rb", b"ok\n\xff\n");
+        // Fixture B — invalid UTF-8 whose iteration raises an
+        // UNRESCUED `Encoding::CompatibilityError` escaping
+        // `non_blank_lines` entirely. Rust deliberately diverges:
         // returns 0 instead of propagating, keeping the run
         // robust. Documented divergence in the `count_loc`
         // docstring.
-        mk("trailing_invalid.rb", b"hello \xff world");
+        mk("unrescued_invalid_utf8.rb", b"hello \xff world");
         // Unreadable path: missing file -> 0, row still present.
         let files: Vec<&Path> = [
             "a.rb",
@@ -763,8 +769,8 @@ mod tests {
             "no_newline.rb",
             "nul_line.rb",
             "vtab_line.rb",
-            "midline_invalid.rb",
-            "trailing_invalid.rb",
+            "rescued_invalid_utf8.rb",
+            "unrescued_invalid_utf8.rb",
             "ghost.rb",
         ]
         .iter()
@@ -785,14 +791,14 @@ mod tests {
             "VT-only lines must not count — Ruby `strip` set includes `\\v`"
         );
         assert_eq!(
-            loc.get(Path::new("midline_invalid.rb")).copied(),
+            loc.get(Path::new("rescued_invalid_utf8.rb")).copied(),
             Some(0),
-            "mid-line invalid UTF-8 matches Ruby's rescued ArgumentError → 0"
+            "fixture that trips Ruby's rescued ArgumentError must also return 0 in Rust"
         );
         assert_eq!(
-            loc.get(Path::new("trailing_invalid.rb")).copied(),
+            loc.get(Path::new("unrescued_invalid_utf8.rb")).copied(),
             Some(0),
-            "trailing invalid UTF-8 — documented divergence; Rust = 0 (robust), Ruby = unrescued crash"
+            "fixture that trips Ruby's unrescued Encoding::CompatibilityError — Rust diverges to 0 (robust) instead of crashing"
         );
         assert_eq!(
             loc.get(Path::new("ghost.rb")).copied(),
