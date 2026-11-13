@@ -328,15 +328,40 @@ fn parse_history(
         touched.clear();
     };
 
-    // Local helper closure: rebase a git-emitted path to the analysis
-    // root. Returns `None` when the path lies outside the subdirectory
-    // being scanned (and should be ignored entirely).
+    // Rebase a git-emitted path to the analysis root. Returns
+    // `None` when the path is outside the scanned subdirectory —
+    // which only disqualifies it from direct matching; alias
+    // lookups can still rescue cross-boundary renames (see
+    // `trackable_canonical` below).
     let rebase = |raw: &str| -> Option<PathBuf> {
         match analysis_prefix {
             None => Some(PathBuf::from(raw)),
             Some(prefix) => raw.strip_prefix(prefix).map(PathBuf::from),
         }
     };
+
+    // Ruby `trackable_canonical_path`: if a raw path rebases
+    // cleanly, canonicalize the rebased form; if it DOESN'T
+    // rebase (out-of-prefix) BUT is a known alias key (from an
+    // earlier cross-boundary rename), canonicalize the raw form
+    // through the alias table instead. Returns None when neither
+    // path lives in scope.
+    let trackable_canonical = |raw: &str, aliases: &HashMap<PathBuf, PathBuf>| -> Option<PathBuf> {
+        if let Some(rebased) = rebase(raw) {
+            return canonical_path(&rebased, aliases);
+        }
+        let raw_path = PathBuf::from(raw);
+        if aliases.contains_key(&raw_path) {
+            return canonical_path(&raw_path, aliases);
+        }
+        None
+    };
+
+    // Ruby `alias_key_for`: prefer the rebased form if it exists,
+    // otherwise keep the raw path. This is what lets a later touch
+    // of an out-of-prefix predecessor path find its alias.
+    let alias_key_for =
+        |raw: &str| -> PathBuf { rebase(raw).unwrap_or_else(|| PathBuf::from(raw)) };
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix('\x1e') {
@@ -356,26 +381,26 @@ fn parse_history(
         let mut parts = line.split('\t');
         let status = parts.next().unwrap_or("");
         if status.starts_with('D') {
-            // Deletion: mark the deleted path as a lineage boundary
-            // so a later same-path file doesn't inherit this
-            // lineage.
+            // Deletion: canonicalize the raw deleted path through
+            // aliases (works for out-of-prefix paths too), and if
+            // it resolves to a wanted file, mark the RAW path as
+            // the lineage boundary — matches Ruby.
             if let Some(path) = parts.next() {
-                let rebased = match rebase(path) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if let Some(canonical) = canonical_path(&rebased, &aliases) {
+                if let Some(canonical) = trackable_canonical(path, &aliases) {
                     if wanted.contains(&canonical) {
-                        lineage_boundaries.insert(rebased);
+                        lineage_boundaries.insert(PathBuf::from(path));
                     }
                 }
             }
             continue;
         }
         if status.starts_with('R') || status.starts_with('C') {
-            // Rename / copy: status is `R<score>` or `C<score>`,
-            // followed by old path + new path. The NEW path is the
-            // active one going forward.
+            // Rename / copy. Rebase the NEW path — if the file is
+            // being moved OUT of our view entirely, skip. Then
+            // store the alias keyed by `alias_key_for(old)` so a
+            // later (older in NEWEST→OLDEST walk) touch of the
+            // out-of-prefix old path still canonicalizes to the
+            // in-scope new path.
             let raw_old = match parts.next() {
                 Some(p) => p,
                 None => continue,
@@ -384,42 +409,30 @@ fn parse_history(
                 Some(p) => p,
                 None => continue,
             };
-            // Rebase both; if the new path is outside the analysis
-            // subdirectory, skip the record (the file is being moved
-            // out of our view). If only the old path is outside,
-            // still track the new one — it just has no prior
-            // in-scope lineage.
             let new_path = match rebase(raw_new) {
                 Some(p) => p,
                 None => continue,
             };
-            let old_path = rebase(raw_old);
             let canonical_new = canonical_path(&new_path, &aliases).unwrap_or(new_path.clone());
-            let old_boundary_hit = old_path
-                .as_ref()
-                .map(|p| lineage_boundaries.contains(p))
-                .unwrap_or(false);
+            let old_key = alias_key_for(raw_old);
+            let old_boundary_hit = lineage_boundaries.contains(&old_key)
+                || lineage_boundaries.contains(&PathBuf::from(raw_old));
             if wanted.contains(&canonical_new)
                 && !old_boundary_hit
                 && !lineage_boundaries.contains(&new_path)
             {
                 touched.insert(canonical_new.clone());
-                if let Some(old) = old_path {
-                    aliases.insert(old, canonical_new);
-                }
+                aliases.insert(old_key, canonical_new);
             }
             continue;
         }
         // Add / modify / else (A, M, T, …): single path follows.
         if let Some(path) = parts.next() {
-            let rebased = match rebase(path) {
-                Some(p) => p,
-                None => continue,
-            };
-            if lineage_boundaries.contains(&rebased) {
+            let raw_path = PathBuf::from(path);
+            if lineage_boundaries.contains(&raw_path) {
                 continue;
             }
-            if let Some(canonical) = canonical_path(&rebased, &aliases) {
+            if let Some(canonical) = trackable_canonical(path, &aliases) {
                 if wanted.contains(&canonical) {
                     touched.insert(canonical);
                 }

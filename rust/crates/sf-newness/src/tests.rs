@@ -459,3 +459,73 @@ fn analyze_over_real_repo_subdirectory_rebases_paths_correctly() {
     assert_eq!(meta.age_days, 30, "oldest commit was 30 days ago");
     assert!(meta.metadata_available);
 }
+
+#[test]
+fn cross_boundary_rename_preserves_pre_rename_lineage() {
+    // A file that was committed OUTSIDE the analysis prefix and
+    // later renamed INTO it must still have its pre-rename commits
+    // counted. Caught as Ohm's P1 sub-finding on PR #84 — Rust
+    // dropped the pre-rename `A lib/a.rb` because it couldn't
+    // rebase, even though an alias was being built pointing at
+    // `app/a.rb`.
+    //
+    // Walk order NEWEST → OLDEST:
+    //   commit 3 (newest): M app/a.rb       — post-rename modify
+    //   commit 2: R100 lib/a.rb app/a.rb    — rename INTO prefix
+    //   commit 1 (oldest): A lib/a.rb       — pre-rename add
+    //
+    // Expected: total_commits = 3. first_commit_epoch = epoch of
+    // the pre-rename `A`. Ruby yields 3; pre-fix Rust yielded 1.
+    let now = 1_700_000_000;
+    let log = fake_log(&[
+        (now - 5 * 86_400, &[&["M", "app/a.rb"]]),
+        (now - 10 * 86_400, &[&["R100", "lib/a.rb", "app/a.rb"]]),
+        (now - 20 * 86_400, &[&["A", "lib/a.rb"]]),
+    ]);
+    let wanted = files_set(&["a.rb"]);
+    let parsed = parse_history(&log, &wanted, Some("app/"));
+    assert_eq!(
+        parsed.total_commits.get(&p("a.rb")).copied(),
+        Some(3),
+        "cross-boundary rename must carry pre-rename commits through the alias"
+    );
+    assert_eq!(
+        parsed.first_commit_epoch.get(&p("a.rb")).copied(),
+        Some(now - 20 * 86_400),
+        "first_commit_epoch must reach the pre-rename add"
+    );
+}
+
+#[test]
+fn cross_boundary_rename_still_respects_deletion_boundary_on_old_path() {
+    // If the out-of-prefix predecessor was DELETED before the
+    // rename lineage, its touches don't flow through into scope.
+    // Walk order NEWEST → OLDEST:
+    //   commit 4 (newest): M app/a.rb
+    //   commit 3: R100 lib/a.rb app/a.rb (fresh lineage)
+    //   commit 2: D lib/a.rb    (out-of-prefix, but resolves via
+    //                            alias to app/a.rb which is in
+    //                            scope AFTER the rename above)
+    // The deletion fires BEFORE the older `A` in the stream, so
+    // the pre-deletion add is suppressed. Final count = 2
+    // (M + R post-deletion add), not 3.
+    let now = 1_700_000_000;
+    let log = fake_log(&[
+        (now - 5 * 86_400, &[&["M", "app/a.rb"]]),
+        (now - 10 * 86_400, &[&["R100", "lib/a.rb", "app/a.rb"]]),
+        (now - 15 * 86_400, &[&["D", "lib/a.rb"]]),
+        (now - 30 * 86_400, &[&["A", "lib/a.rb"]]),
+    ]);
+    let wanted = files_set(&["a.rb"]);
+    let parsed = parse_history(&log, &wanted, Some("app/"));
+    assert_eq!(
+        parsed.total_commits.get(&p("a.rb")).copied(),
+        Some(2),
+        "pre-deletion lineage must be suppressed through the alias too — only M + R count"
+    );
+    assert_eq!(
+        parsed.first_commit_epoch.get(&p("a.rb")).copied(),
+        Some(now - 10 * 86_400),
+        "first_commit_epoch is the rename commit, not the suppressed pre-deletion add"
+    );
+}
