@@ -267,7 +267,14 @@ fn main() -> Result<()> {
                 analyzed_at: &analyzed_at,
                 warnings: &warnings,
                 file_count: ruby_total_analyzed + js_total_analyzed,
-                coverage_available,
+                // Coverage is loaded per section in Ruby (--ruby-coverage,
+                // --js-coverage). We currently only wire a single
+                // `--coverage` flag that loads for the Ruby section;
+                // JS stays unavailable. When the JS-coverage flag
+                // lands in a later slice, this gains a second
+                // boolean. Caught as Ohm's P1 on PR #85.
+                ruby_coverage_available: coverage_available,
+                js_coverage_available: false,
             },
         );
     }

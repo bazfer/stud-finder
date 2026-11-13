@@ -31,8 +31,12 @@
 //! - `meta.formula` (human-readable signal-inclusion label),
 //!   `meta.weights` (renormalized weight map from sf-score), and
 //!   `meta.files_skipped` (requires a skipped-files count through
-//!   from sf-cli's collector/parser pipeline). Documented as the
-//!   compatibility backlog.
+//!   from sf-cli's collector/parser pipeline).
+//! - Warning propagation: `sf-history`, `sf-newness`, and
+//!   `sf-coverage` warnings currently go to stderr only; they
+//!   need to flow into `Sections.warnings` so `meta.warnings` and
+//!   the root `warnings` array carry them. PR #85 (Ohm follow-up)
+//!   note.
 
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
@@ -75,15 +79,17 @@ pub struct Sections<'a> {
     /// output row count — `--top` and `--diff-base` don't shrink
     /// `file_count`.
     pub file_count: usize,
-    /// `true` when the caller loaded a coverage report (i.e.
-    /// `--coverage` was provided and the file loaded cleanly).
-    /// Matches Ruby `coverage_available?`. When `false`, the
-    /// per-row `coverage` value is JSON `null` regardless of the
-    /// numeric. When `true`, a row's coverage value is the number
-    /// when `row.coverage_reported` is true, or the em-dash
-    /// `"—"` placeholder when the file is missing from the report
-    /// — matches Ruby's three-state coverage emission.
-    pub coverage_available: bool,
+    /// `true` when a Ruby-coverage report was loaded for this
+    /// run. Gates the Ruby-section rows' coverage tri-state:
+    /// unavailable → JSON null + CSV empty cell; available but
+    /// not reported → em-dash; available + reported → number.
+    pub ruby_coverage_available: bool,
+    /// Same as `ruby_coverage_available` but for the JavaScript
+    /// section. A Ruby-only run must still emit `null` coverage
+    /// on every JS/TS row — coverage availability is PER SECTION,
+    /// not global, matching Ruby where `--ruby-coverage` and
+    /// `--js-coverage` are separate flags.
+    pub js_coverage_available: bool,
 }
 
 /// A warning payload shaped for the Ruby JSON contract. `code` is
@@ -211,12 +217,12 @@ fn emit_json(sections: Sections<'_>) {
     let ruby_rows: Vec<Value> = sections
         .ruby
         .iter()
-        .map(|r| row_json("ruby", sections.coverage_available, r))
+        .map(|r| row_json("ruby", sections.ruby_coverage_available, r))
         .collect();
     let js_rows: Vec<Value> = sections
         .js
         .iter()
-        .map(|r| row_json("javascript", sections.coverage_available, r))
+        .map(|r| row_json("javascript", sections.js_coverage_available, r))
         .collect();
 
     let mut root = Map::new();
@@ -268,24 +274,33 @@ pub const RESULT_COLUMNS: &[&str] = &[
 fn emit_csv(sections: Sections<'_>) {
     println!("{}", RESULT_COLUMNS.join(","));
     for r in sections.ruby.iter() {
-        println!("{}", csv_row("ruby", sections.coverage_available, r));
+        println!("{}", csv_row("ruby", sections.ruby_coverage_available, r));
     }
     for r in sections.js.iter() {
-        println!("{}", csv_row("javascript", sections.coverage_available, r));
+        println!(
+            "{}",
+            csv_row("javascript", sections.js_coverage_available, r)
+        );
     }
 }
 
 fn csv_row(section_language: &str, coverage_available: bool, r: &ScoredFile) -> String {
-    // Coverage CSV cell matches Ruby:
-    //   - run-level unavailable → empty string (Ruby `row[:coverage] || ''`)
-    //   - available but file not reported → em-dash literal
-    //   - available + reported → number, formatted
+    // CSV coverage cell matches Ruby `CSV.generate_line`:
+    //   - unavailable → Ruby `row[:coverage] || ''` produces an
+    //     EMPTY STRING that `CSV.generate_line` emits as quoted
+    //     `""` (verified in docker ruby:3.3.13-slim). Rust must
+    //     match — a bare empty cell would be `,,` which Ruby
+    //     emits only for `nil`, not for `''`.
+    //   - available + not reported → em-dash literal.
+    //   - available + reported → shortest-form float matching
+    //     Ruby `0.5.to_s = "0.5"` (not `"0.5000"`); integer-valued
+    //     floats keep the trailing `.0` (Ruby `0.0.to_s = "0.0"`).
     let coverage_cell = if !coverage_available {
-        String::new()
+        "\"\"".to_string() // emit quoted empty string verbatim
     } else if !r.coverage_reported {
         "—".to_string()
     } else {
-        format_score(r.coverage)
+        ruby_float_to_csv(round4(r.coverage))
     };
     let cells: Vec<String> = vec![
         r.rank.to_string(),
@@ -314,9 +329,26 @@ fn csv_row(section_language: &str, coverage_available: bool, r: &ScoredFile) -> 
         csv_escape(&r.max_coupling_partner.display().to_string()),
         r.coupling_partners.to_string(),
         format_score(r.coupling_pct),
-        csv_escape(&coverage_cell),
+        // coverage_cell is pre-escaped: `""` quoted-empty,
+        // em-dash literal, or a bare number. Never contains a
+        // comma / newline / unescaped quote, so pass through
+        // verbatim rather than running csv_escape (which would
+        // double-escape the quoted-empty form).
+        coverage_cell,
     ];
     cells.join(",")
+}
+
+/// Emit `x` the way Ruby `Float#to_s` would: shortest form, with
+/// a trailing `.0` preserved on integer-valued floats. Ruby's
+/// `CSV.generate_line` takes each cell's `to_s`, so a Rust-side
+/// `format!("{x}")` that drops `.0` on `0.0` → `"0"` diverges.
+fn ruby_float_to_csv(x: f64) -> String {
+    if x.is_finite() && x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x}")
+    }
 }
 
 fn csv_escape(s: &str) -> String {
@@ -637,6 +669,73 @@ mod tests {
         r.rank = 42;
         let v = row_json("ruby", false, &r);
         assert_eq!(v["rank"], json!(42));
+    }
+
+    #[test]
+    fn coverage_availability_is_per_section_not_global() {
+        // Ohm's PR #85 re-review follow-up: a Ruby-only coverage
+        // run must emit `coverage: null` on JS/TS rows, NOT the
+        // em-dash. `coverage_available` lives on each section
+        // independently.
+        let r_ruby = mk_row("a.rb", 0.0, Class::Leaf);
+        let r_js = mk_row("app/foo.js", 0.0, Class::Leaf);
+        // Ruby loaded with no entries → em-dash for Ruby row
+        // (its availability is true).
+        let v_ruby = row_json("ruby", true, &r_ruby);
+        assert_eq!(v_ruby["coverage"], json!("—"));
+        // JS lane has availability=false → null even though the
+        // run loaded Ruby coverage.
+        let v_js = row_json("javascript", false, &r_js);
+        assert_eq!(v_js["coverage"], Value::Null);
+    }
+
+    #[test]
+    fn csv_coverage_reported_is_shortest_float_form() {
+        // Ruby's `row[:coverage]` lands verbatim in
+        // CSV.generate_line as a Float, which `to_s` serializes
+        // to the shortest form — `0.5`, not `0.5000`. And
+        // integer-valued floats keep `.0` — `0.0.to_s == "0.0"`.
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.coverage = 0.5;
+        r.coverage_reported = true;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.5", "CSV coverage must be `0.5` not `0.5000`: {row}");
+
+        r.coverage = 0.0;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.0", "integer-valued floats keep `.0`: {row}");
+
+        r.coverage = 0.3333;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.3333", "fractional emits unchanged: {row}");
+    }
+
+    #[test]
+    fn csv_coverage_unavailable_is_quoted_empty_string() {
+        // Ruby `row[:coverage] || ''` yields `""` which
+        // CSV.generate_line emits as quoted `""` (verified in
+        // ruby:3.3.13-slim). A bare empty cell `,,` is Ruby's
+        // `nil` encoding, not what we want here.
+        let r = mk_row("a.rb", 0.0, Class::Leaf);
+        let row = csv_row("ruby", false, &r);
+        assert!(
+            row.ends_with(",\"\""),
+            "unavailable coverage must be quoted empty: {row}"
+        );
+    }
+
+    #[test]
+    fn csv_coverage_unreported_is_em_dash_literal() {
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.coverage_reported = false;
+        let row = csv_row("ruby", true, &r);
+        assert!(
+            row.ends_with(",—"),
+            "unreported coverage must be em-dash literal: {row}"
+        );
     }
 
     #[test]
