@@ -108,6 +108,7 @@ fn main() -> Result<()> {
                     partner: v.partner,
                     ratio: v.ratio,
                     co_changes: v.co_changes,
+                    partners: v.partners,
                 },
             )
         })
@@ -120,6 +121,12 @@ fn main() -> Result<()> {
     // semantics).
     let coverage = load_coverage(cli.coverage.as_deref(), &cli.path, &ruby_refs);
 
+    // LOC pass — non-blank line count per Ruby file. Ruby
+    // `LocCounter#non_blank_lines`. Unreadable files map to 0 and
+    // land in the ScoredFile row anyway so a rename-at-scan-time
+    // doesn't drop the row from the output.
+    let loc = count_loc(&cli.path, &ruby_refs);
+
     let signals = Signals {
         graph: &graph,
         complexity,
@@ -127,6 +134,7 @@ fn main() -> Result<()> {
         churn_lines: history.churn_lines,
         coupling,
         coverage,
+        loc,
     };
     let scored = Scorer::new().score_with_signals(signals);
     let mut ruby_rows = scored;
@@ -136,6 +144,9 @@ fn main() -> Result<()> {
     // JS files don't pool into the Ruby percentile distribution.
     let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
     let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
+        let js_paths: Vec<PathBuf> = js_graph.files().map(Path::to_path_buf).collect();
+        let js_refs: Vec<&Path> = js_paths.iter().map(PathBuf::as_path).collect();
+        let js_loc = count_loc(&cli.path, &js_refs);
         let js_signals = Signals {
             graph: &js_graph,
             complexity: js_complexity,
@@ -143,6 +154,7 @@ fn main() -> Result<()> {
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
             coverage: None,
+            loc: js_loc,
         };
         let mut rows = Scorer::new().score_with_signals(js_signals);
         sort_rows(&mut rows);
@@ -520,6 +532,65 @@ fn load_coverage(
     }
 }
 
+/// Non-blank line count per file. Matches Ruby
+/// `LocCounter#non_blank_lines`: a line counts when it has any
+/// character outside Ruby `String#strip`'s whitespace set. That
+/// set is BROADER than Rust's `u8::is_ascii_whitespace` — Ruby
+/// includes NUL (`\0`) and vertical tab (`\x0B`), Rust's built-in
+/// check does not. Using Rust's set caused Ohm's PR #83 defects
+/// where a NUL-only or VT-only line counted in Rust but not in
+/// Ruby.
+///
+/// **Invalid UTF-8:** Ruby's `strip` raises either
+/// `ArgumentError: invalid byte sequence in UTF-8` (which
+/// LocCounter catches and returns 0 for) or — on Ruby 3.3 — an
+/// unrescued `Encoding::CompatibilityError` that escapes the
+/// method entirely. We mimic the rescued case uniformly: any
+/// non-UTF-8 file returns 0 for the whole file. That is a
+/// **documented divergence** from the unrescued-error path; Rust
+/// is strictly more robust (0 vs crash). Verified against Ruby
+/// 3.3.13 in a `ruby:3.3.13-slim` container during PR #83.
+///
+/// **Unreadable paths:** also 0, so the row still lands in the
+/// output rather than being dropped (Ruby `rescue Encoding::* =>
+/// 0`).
+fn count_loc(root: &Path, files: &[&Path]) -> HashMap<PathBuf, usize> {
+    files
+        .iter()
+        .map(|rel| {
+            let abs = root.join(rel);
+            let count = match std::fs::read(&abs) {
+                Ok(bytes) => count_non_blank_lines(&bytes),
+                Err(_) => 0,
+            };
+            (rel.to_path_buf(), count)
+        })
+        .collect()
+}
+
+/// Returns `true` iff `b` is in Ruby `String#strip`'s whitespace
+/// set: NUL (0x00), HT (0x09), LF (0x0A), VT (0x0B), FF (0x0C),
+/// CR (0x0D), SPACE (0x20). Rust's built-in
+/// `u8::is_ascii_whitespace` omits NUL and VT.
+fn is_ruby_strip_whitespace(b: u8) -> bool {
+    matches!(b, 0x00 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20)
+}
+
+fn count_non_blank_lines(bytes: &[u8]) -> usize {
+    // Ruby's rescue path returns 0 on invalid UTF-8. Mimicking
+    // that at the whole-file level matches the captured branch of
+    // LocCounter#non_blank_lines and improves on the unrescued
+    // Encoding::CompatibilityError branch (Rust returns 0 instead
+    // of crashing the whole run).
+    if std::str::from_utf8(bytes).is_err() {
+        return 0;
+    }
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| line.iter().any(|b| !is_ruby_strip_whitespace(*b)))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +679,7 @@ mod tests {
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
             coverage: None,
+            loc: HashMap::new(),
         });
         let clean_rows = scorer.score_with_signals(Signals {
             graph: &g_clean,
@@ -616,6 +688,7 @@ mod tests {
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
             coverage: None,
+            loc: HashMap::new(),
         });
 
         assert_eq!(
@@ -641,6 +714,112 @@ mod tests {
                 clean_row.composite
             );
             assert_eq!(mixed_row.class, clean_row.class);
+        }
+    }
+
+    #[test]
+    fn count_loc_matches_ruby_non_blank_lines_semantics() {
+        // Verified case-by-case against Ruby 3.3.13 in a
+        // `ruby:3.3.13-slim` container during PR #83 review.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let mk = |rel: &str, body: &[u8]| {
+            let full = root.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, body).unwrap();
+        };
+        // Ordinary file: 3 non-blank lines (2nd and 4th are blank/ws).
+        mk("a.rb", b"class A\n\n  def f; end\n   \t  \nend\n");
+        // All blank -> 0.
+        mk("blank.rb", b"\n\n  \n");
+        // No trailing newline -> last line still counts.
+        mk("no_newline.rb", b"a = 1");
+        // NUL-only middle line must NOT count — Ruby `strip`
+        // includes `\0` in its whitespace set (Rust's
+        // `is_ascii_whitespace` does not). Expected Ruby count: 2.
+        // Caught by Ohm's PR #83 review.
+        mk("nul_line.rb", b"a\n\x00\x00\x00\nb\n");
+        // Vertical-tab-only middle line must NOT count — Ruby
+        // `strip` includes `\x0B`; Rust's `is_ascii_whitespace`
+        // does not. Expected Ruby count: 2. Also caught by Ohm.
+        mk("vtab_line.rb", b"a\n\x0B\x0B\n b\n");
+        // Fixture A — invalid UTF-8 whose iteration raises
+        // `ArgumentError: invalid byte sequence in UTF-8` which
+        // `LocCounter#non_blank_lines` rescues → returns 0 for
+        // the whole file. We match that branch. (Note: whether
+        // Ruby picks `ArgumentError` vs `Encoding::CompatibilityError`
+        // is NOT determined by mid-line-vs-trailing position per
+        // se — it's about which Ruby operation encounters the
+        // bad bytes first. Per Ohm's non-blocking naming note on
+        // PR #83; the fixtures still cover both outcomes.)
+        mk("rescued_invalid_utf8.rb", b"ok\n\xff\n");
+        // Fixture B — invalid UTF-8 whose iteration raises an
+        // UNRESCUED `Encoding::CompatibilityError` escaping
+        // `non_blank_lines` entirely. Rust deliberately diverges:
+        // returns 0 instead of propagating, keeping the run
+        // robust. Documented divergence in the `count_loc`
+        // docstring.
+        mk("unrescued_invalid_utf8.rb", b"hello \xff world");
+        // Unreadable path: missing file -> 0, row still present.
+        let files: Vec<&Path> = [
+            "a.rb",
+            "blank.rb",
+            "no_newline.rb",
+            "nul_line.rb",
+            "vtab_line.rb",
+            "rescued_invalid_utf8.rb",
+            "unrescued_invalid_utf8.rb",
+            "ghost.rb",
+        ]
+        .iter()
+        .map(Path::new)
+        .collect();
+        let loc = count_loc(root, &files);
+        assert_eq!(loc.get(Path::new("a.rb")).copied(), Some(3));
+        assert_eq!(loc.get(Path::new("blank.rb")).copied(), Some(0));
+        assert_eq!(loc.get(Path::new("no_newline.rb")).copied(), Some(1));
+        assert_eq!(
+            loc.get(Path::new("nul_line.rb")).copied(),
+            Some(2),
+            "NUL-only lines must not count — Ruby `strip` set includes `\\0`"
+        );
+        assert_eq!(
+            loc.get(Path::new("vtab_line.rb")).copied(),
+            Some(2),
+            "VT-only lines must not count — Ruby `strip` set includes `\\v`"
+        );
+        assert_eq!(
+            loc.get(Path::new("rescued_invalid_utf8.rb")).copied(),
+            Some(0),
+            "fixture that trips Ruby's rescued ArgumentError must also return 0 in Rust"
+        );
+        assert_eq!(
+            loc.get(Path::new("unrescued_invalid_utf8.rb")).copied(),
+            Some(0),
+            "fixture that trips Ruby's unrescued Encoding::CompatibilityError — Rust diverges to 0 (robust) instead of crashing"
+        );
+        assert_eq!(
+            loc.get(Path::new("ghost.rb")).copied(),
+            Some(0),
+            "unreadable path must land as 0, not be dropped — Ruby `rescue Encoding::* => 0`"
+        );
+    }
+
+    #[test]
+    fn is_ruby_strip_whitespace_matches_the_full_ruby_set() {
+        // Ruby's `String#strip` whitespace set, verified against
+        // Ruby 3.3.13: NUL, HT, LF, VT, FF, CR, SPACE. Nothing else.
+        for b in [0x00u8, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20] {
+            assert!(is_ruby_strip_whitespace(b), "0x{b:02X} should be ws");
+        }
+        // A sampling of non-whitespace bytes that must NOT count.
+        for b in [0x01u8, 0x08, 0x0E, 0x1F, 0x21, 0x41, 0x7E, 0x7F, 0xFF] {
+            assert!(
+                !is_ruby_strip_whitespace(b),
+                "0x{b:02X} must not be treated as ws"
+            );
         }
     }
 }

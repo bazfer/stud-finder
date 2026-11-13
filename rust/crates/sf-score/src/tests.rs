@@ -43,6 +43,7 @@ fn signals_with_complexity<'a>(
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     }
 }
 
@@ -320,6 +321,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows_no_floor = no_cx_floor.score_with_signals(signals);
     let spiky_no_floor = row(&rows_no_floor, "spiky.rb");
@@ -333,6 +335,7 @@ fn complexity_floor_escalates_leaf_to_branch_when_composite_is_low() {
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows_default = Scorer::new().score_with_signals(default_signals);
     let spiky_default = row(&rows_default, "spiky.rb");
@@ -364,6 +367,7 @@ fn complexity_floor_never_downgrades_trunk_or_branch() {
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let top = row(&rows, "top.rb");
@@ -395,6 +399,7 @@ fn signals_with_churn<'a>(
         churn_lines: churn_l,
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     }
 }
 
@@ -516,6 +521,7 @@ fn coupling_appears_in_row_and_lifts_composite() {
             partner: PathBuf::from("b.rb"),
             ratio: 0.9,
             co_changes: 12,
+            partners: 1,
         },
     );
     coupling.insert(
@@ -524,6 +530,7 @@ fn coupling_appears_in_row_and_lifts_composite() {
             partner: PathBuf::from("a.rb"),
             ratio: 0.9,
             co_changes: 12,
+            partners: 1,
         },
     );
 
@@ -534,6 +541,7 @@ fn coupling_appears_in_row_and_lifts_composite() {
         churn_lines: HashMap::new(),
         coupling,
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let a = row(&rows, "a.rb");
@@ -586,6 +594,7 @@ fn empty_coupling_map_degenerates_to_four_signal_mode() {
             .collect(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows_four_cp_empty = Scorer::new().score_with_signals(signals_four_empty_cp);
 
@@ -643,6 +652,7 @@ fn churn_composite_rounds_near_ties_before_ranking() {
         churn_lines: churn_l,
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     let pct_for = |name: &str| {
@@ -700,6 +710,7 @@ fn signals_with_coverage<'a>(
         churn_lines: churn_l,
         coupling: HashMap::new(),
         coverage: Some(cov),
+        loc: HashMap::new(),
     }
 }
 
@@ -906,6 +917,7 @@ fn absent_coverage_degrades_to_five_signal_mode() {
             .collect(),
         coupling: HashMap::new(),
         coverage: None,
+        loc: HashMap::new(),
     });
     assert_eq!(rows_four.len(), rows_cov_empty.len());
     for a in &rows_four {
@@ -934,6 +946,7 @@ fn provided_empty_coverage_still_activates_signal() {
         churn_lines: HashMap::new(),
         coupling: HashMap::new(),
         coverage: Some(HashMap::new()),
+        loc: HashMap::new(),
     };
     let rows = Scorer::new().score_with_signals(signals);
     // Every file defaulted to coverage = 0.0 (risk 1.0). That's an
@@ -985,4 +998,176 @@ fn churn_composite_is_percentile_of_avg_count_and_line_pcts() {
     assert!((a.churn_pct - 1.0).abs() < 1e-9);
     assert!((b.churn_pct - 0.5).abs() < 1e-9);
     assert!((c.churn_pct - 0.0).abs() < 1e-9);
+}
+
+// --- sf-signals-expand (PR #83) regression tests ---
+
+#[test]
+fn instability_is_fan_out_over_total_rounded_to_4() {
+    // User: fan_in 2, fan_out 1 -> instability = 1/3 = 0.3333 (round4)
+    // Profile: fan_in 0, fan_out 2 -> instability = 1.0
+    // Noop: fan_in 0, fan_out 0 -> instability = 0.0 (both-zero guard)
+    let g = tiny_graph();
+    let rows = Scorer::new().score(&g);
+    assert!((row(&rows, "app/models/user.rb").instability - 0.3333).abs() < 1e-9);
+    assert!((row(&rows, "app/models/profile.rb").instability - 1.0).abs() < 1e-9);
+    assert!((row(&rows, "app/services/noop.rb").instability - 0.0).abs() < 1e-9);
+    assert!((row(&rows, "app/models/order.rb").instability - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn instability_pct_is_lower_bound_percentile_over_instability_values() {
+    // tiny_graph instability values:
+    //   Order 0.0, User 0.3333, Profile 1.0, Checkout 1.0, Noop 0.0
+    // Sorted: 0.0, 0.0, 0.3333, 1.0, 1.0
+    // Lower-bound ranks (strictly-smaller / (n-1) = /4):
+    //   0.0 -> 0/4 = 0.0
+    //   0.3333 -> 2/4 = 0.5
+    //   1.0 -> 3/4 = 0.75
+    let g = tiny_graph();
+    let rows = Scorer::new().score(&g);
+    assert!((row(&rows, "app/models/order.rb").instability_pct - 0.0).abs() < 1e-9);
+    assert!((row(&rows, "app/services/noop.rb").instability_pct - 0.0).abs() < 1e-9);
+    assert!((row(&rows, "app/models/user.rb").instability_pct - 0.5).abs() < 1e-9);
+    assert!((row(&rows, "app/models/profile.rb").instability_pct - 0.75).abs() < 1e-9);
+    assert!((row(&rows, "app/services/checkout.rb").instability_pct - 0.75).abs() < 1e-9);
+}
+
+#[test]
+fn loc_defaults_to_zero_when_signal_absent() {
+    // from_graph() has empty loc map. ScoredFile.loc must be 0 and
+    // loc_pct must degenerate to 0.0 (no ranking of an all-zero column).
+    let g = tiny_graph();
+    let rows = Scorer::new().score(&g);
+    for r in &rows {
+        assert_eq!(r.loc, 0);
+        assert!((r.loc_pct - 0.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn loc_and_loc_pct_are_populated_from_signal_map() {
+    let g = tiny_graph();
+    let mut loc = HashMap::new();
+    loc.insert(PathBuf::from("app/models/order.rb"), 100);
+    loc.insert(PathBuf::from("app/models/user.rb"), 50);
+    loc.insert(PathBuf::from("app/models/profile.rb"), 25);
+    loc.insert(PathBuf::from("app/services/checkout.rb"), 10);
+    loc.insert(PathBuf::from("app/services/noop.rb"), 5);
+    let signals = Signals {
+        graph: &g,
+        complexity: HashMap::new(),
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling: HashMap::new(),
+        coverage: None,
+        loc,
+    };
+    let rows = Scorer::new().score_with_signals(signals);
+    // Raw values forward verbatim.
+    assert_eq!(row(&rows, "app/models/order.rb").loc, 100);
+    assert_eq!(row(&rows, "app/services/noop.rb").loc, 5);
+    // 5 distinct values -> endpoints 0.0 and 1.0.
+    assert!((row(&rows, "app/models/order.rb").loc_pct - 1.0).abs() < 1e-9);
+    assert!((row(&rows, "app/services/noop.rb").loc_pct - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn escalation_tags_complexity_floor_over_fan_in_floor_on_tie() {
+    // Ruby `floored_classification` checks complexity first — so a
+    // file meeting BOTH floors reports `complexity_floor`, not
+    // `fan_in_floor`. floor_test_graph already proves `hot.rb`
+    // meets FAN_IN_FLOOR and is Leaf-by-composite under default
+    // weights. Hand it a COMPLEXITY_FLOOR-meeting complexity and
+    // the two floors both fire on the same file.
+    let g = floor_test_graph();
+    // Give every peer a high complexity so hot.rb sits at the
+    // bottom of the complexity percentile despite meeting the
+    // absolute floor — the composite then still lands in Leaf.
+    let mut complexity = HashMap::new();
+    for i in 0..100 {
+        complexity.insert(PathBuf::from(format!("peer_{i}.rb")), 50);
+    }
+    complexity.insert(PathBuf::from("hot.rb"), COMPLEXITY_FLOOR);
+    let signals = Signals {
+        graph: &g,
+        complexity,
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling: HashMap::new(),
+        coverage: None,
+        loc: HashMap::new(),
+    };
+    let rows = Scorer::new().score_with_signals(signals);
+    let hot = row(&rows, "hot.rb");
+    assert!(hot.fan_in >= FAN_IN_FLOOR, "setup: hot meets fan_in floor");
+    assert!(
+        hot.complexity >= COMPLEXITY_FLOOR,
+        "setup: hot meets complexity floor"
+    );
+    assert_eq!(hot.class, Class::Branch);
+    assert_eq!(
+        hot.escalation, "complexity_floor",
+        "complexity_floor must win the tag tie — matches Ruby's check order"
+    );
+}
+
+#[test]
+fn escalation_is_empty_when_classification_not_floor_escalated() {
+    // tiny_graph has no file meeting either floor so escalation is "".
+    let g = tiny_graph();
+    let rows = Scorer::new().score(&g);
+    for r in &rows {
+        assert_eq!(r.escalation, "");
+    }
+}
+
+#[test]
+fn coupling_partners_count_forwards_from_signal() {
+    let mut g = DependencyGraph::new();
+    g.register_file("a.rb");
+    g.register_file("b.rb");
+    g.register_file("c.rb");
+    g.register_file("d.rb");
+    // Give everyone a reference so percentiles aren't all zero.
+    for p in ["a.rb", "b.rb", "c.rb", "d.rb"] {
+        g.add_reference(p, "External");
+    }
+
+    let mut coupling = HashMap::new();
+    // a.rb has 3 qualifying partners (b, c, d); strongest is b.
+    coupling.insert(
+        PathBuf::from("a.rb"),
+        CouplingSignal {
+            partner: PathBuf::from("b.rb"),
+            ratio: 0.9,
+            co_changes: 9,
+            partners: 3,
+        },
+    );
+    // b.rb has 1 (just a).
+    coupling.insert(
+        PathBuf::from("b.rb"),
+        CouplingSignal {
+            partner: PathBuf::from("a.rb"),
+            ratio: 0.9,
+            co_changes: 9,
+            partners: 1,
+        },
+    );
+    let signals = Signals {
+        graph: &g,
+        complexity: HashMap::new(),
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling,
+        coverage: None,
+        loc: HashMap::new(),
+    };
+    let rows = Scorer::new().score_with_signals(signals);
+    assert_eq!(row(&rows, "a.rb").coupling_partners, 3);
+    assert_eq!(row(&rows, "b.rb").coupling_partners, 1);
+    // c.rb and d.rb have no coupling entry -> 0.
+    assert_eq!(row(&rows, "c.rb").coupling_partners, 0);
+    assert_eq!(row(&rows, "d.rb").coupling_partners, 0);
 }

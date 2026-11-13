@@ -511,3 +511,80 @@ fn coupling_ratio_near_threshold_rounds_before_check() {
         "5/17 = 0.2941 rounds to 0.2941 which is < 0.30 threshold, must drop"
     );
 }
+
+#[test]
+fn coupling_partner_counts_all_qualifying_partners_not_just_the_strongest() {
+    // a.rb co-changes with b, c, d above threshold; b.rb only with a.
+    // partners count: a -> 3, b -> 1, c -> 1, d -> 1
+    // (Each pair needs >=5 co-changes and ratio >= 0.30.)
+    let mut commits: Vec<(&str, Vec<(&str, &str, &str)>)> = Vec::new();
+    // 5 x (a,b) pairs
+    for i in 0..5 {
+        let hash = Box::leak(format!("ab{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "b.rb")],
+        ));
+    }
+    // 5 x (a,c) pairs
+    for i in 0..5 {
+        let hash = Box::leak(format!("ac{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "c.rb")],
+        ));
+    }
+    // 5 x (a,d) pairs
+    for i in 0..5 {
+        let hash = Box::leak(format!("ad{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "d.rb")],
+        ));
+    }
+    let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
+        commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
+    let log = fake_log(&commits_ref);
+    let report = parse_log(&log, &files_set(&["a.rb", "b.rb", "c.rb", "d.rb"]));
+    assert_eq!(
+        report.coupling.get(&p("a.rb")).map(|c| c.partners),
+        Some(3),
+        "a.rb has three qualifying partners"
+    );
+    assert_eq!(report.coupling.get(&p("b.rb")).map(|c| c.partners), Some(1));
+    assert_eq!(report.coupling.get(&p("c.rb")).map(|c| c.partners), Some(1));
+    assert_eq!(report.coupling.get(&p("d.rb")).map(|c| c.partners), Some(1));
+}
+
+#[test]
+fn coupling_partners_count_excludes_below_threshold_pairs() {
+    // a-b: 3 co-changes (below MIN_CO_CHANGES=5) — dropped.
+    // a-c: 5 co-changes, min_own=5 -> ratio 1.0 (kept).
+    // partners count for a.rb must be 1, not 2.
+    let mut commits: Vec<(&str, Vec<(&str, &str, &str)>)> = Vec::new();
+    for i in 0..3 {
+        let hash = Box::leak(format!("ab{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "b.rb")],
+        ));
+    }
+    for i in 0..5 {
+        let hash = Box::leak(format!("ac{i:02}").into_boxed_str());
+        commits.push((
+            hash as &'static str,
+            vec![("1", "1", "a.rb"), ("1", "1", "c.rb")],
+        ));
+    }
+    let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
+        commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
+    let log = fake_log(&commits_ref);
+    let report = parse_log(&log, &files_set(&["a.rb", "b.rb", "c.rb"]));
+    assert_eq!(
+        report.coupling.get(&p("a.rb")).map(|c| c.partners),
+        Some(1),
+        "below-MIN_CO_CHANGES pair must not count toward partners"
+    );
+    // b.rb never cleared threshold on any pair, so no entry at all.
+    assert!(!report.coupling.contains_key(&p("b.rb")));
+}
