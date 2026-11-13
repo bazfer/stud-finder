@@ -20,12 +20,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use clap::Parser;
+use serde_json::{Map, json};
 use sf_core::{DependencyGraph, FileRef, Language};
 use sf_history::{DEFAULT_WINDOW_DAYS, HistoryWarning};
 use sf_score::{CouplingSignal, ScoredFile, Scorer, Signals};
 use walkdir::WalkDir;
 
-use output::{OutputFormat, Sections};
+use output::{OutputFormat, Sections, WarningPayload};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -70,7 +71,14 @@ fn main() -> Result<()> {
     // distribution and depress Ruby percentiles). sf-js builds its own
     // graph in a later slice; each language gets its own ranking
     // section, matching the Ruby implementation.
-    let (graph, complexity) = build_signals(&cli.path, &files);
+    let (graph, complexity, ruby_skipped) = build_signals(&cli.path, &files);
+
+    // Collected warning payloads flow to both stderr (existing CLI
+    // behavior for terminal users) and `Sections.warnings` → JSON
+    // `meta.warnings` + root `warnings` (slice #10b). Codes are the
+    // Ruby `Warnings::MESSAGES` identifiers so byte-level consumers
+    // comparing Ruby/Rust outputs see matching warning records.
+    let mut warnings: Vec<WarningPayload> = Vec::new();
 
     // Pull churn + coupling from git history over the same registered
     // Ruby files. A non-git-repo or missing `git` degrades to zero
@@ -83,19 +91,57 @@ fn main() -> Result<()> {
             HistoryWarning::BulkCommitsSkipped {
                 count,
                 max_commit_files,
-            } => eprintln!(
-                "stud-finder: {count} bulk commits (> {max_commit_files} files) skipped from coupling"
-            ),
-            HistoryWarning::NotAGitRepo => eprintln!(
-                "stud-finder: {} is not a git repository; churn + coupling signals are skipped",
-                cli.path.display()
-            ),
+            } => {
+                eprintln!(
+                    "stud-finder: {count} bulk commits (> {max_commit_files} files) skipped from coupling"
+                );
+                let mut extra = Map::new();
+                extra.insert("count".into(), json!(*count));
+                extra.insert("max_commit_files".into(), json!(*max_commit_files));
+                warnings.push(WarningPayload {
+                    code: "temporal_coupling_bulk_commits_skipped".into(),
+                    message: format!(
+                        "one or more bulk commits were skipped while computing temporal coupling \
+                         ({count} skipped; max_commit_files={max_commit_files})"
+                    ),
+                    extra,
+                });
+            }
+            HistoryWarning::NotAGitRepo => {
+                eprintln!(
+                    "stud-finder: {} is not a git repository; churn + coupling signals are skipped",
+                    cli.path.display()
+                );
+                warnings.push(WarningPayload {
+                    code: "git_error".into(),
+                    message: "git command failed while computing temporal coupling; \
+                              coupling is unavailable"
+                        .into(),
+                    extra: Map::new(),
+                });
+            }
             HistoryWarning::GitNotFound => {
                 eprintln!(
                     "stud-finder: `git` not found in PATH; churn + coupling signals are skipped"
-                )
+                );
+                warnings.push(WarningPayload {
+                    code: "git_not_found".into(),
+                    message: "git was not found in PATH while computing temporal coupling; \
+                              coupling is unavailable"
+                        .into(),
+                    extra: Map::new(),
+                });
             }
-            HistoryWarning::GitFailed(msg) => eprintln!("stud-finder: git log failed: {msg}"),
+            HistoryWarning::GitFailed(msg) => {
+                eprintln!("stud-finder: git log failed: {msg}");
+                warnings.push(WarningPayload {
+                    code: "git_error".into(),
+                    message: "git command failed while computing temporal coupling; \
+                              coupling is unavailable"
+                        .into(),
+                    extra: Map::new(),
+                });
+            }
         }
     }
     let coupling: HashMap<PathBuf, CouplingSignal> = history
@@ -127,6 +173,14 @@ fn main() -> Result<()> {
     // doesn't drop the row from the output.
     let loc = count_loc(&cli.path, &ruby_refs);
 
+    // Cache the active-signal booleans BEFORE Signals is moved into
+    // the scorer — the composite's active-weight renormalization and
+    // the `meta.formula` label both read these flags. Keeping them
+    // alongside `coverage_available` removes the earlier post-hoc
+    // row inspection.
+    let has_ruby_complexity = !complexity.is_empty();
+    let has_ruby_churn = !history.churn_commits.is_empty() || !history.churn_lines.is_empty();
+    let has_ruby_coupling = !coupling.is_empty();
     let signals = Signals {
         graph: &graph,
         complexity,
@@ -150,17 +204,27 @@ fn main() -> Result<()> {
         sf_newness::analyze(&cli.path, &ruby_refs, sf_newness::NewnessConfig::default());
     for warning in &newness_report.warnings {
         match warning {
-            sf_newness::NewnessWarning::ShallowClone => eprintln!(
-                "stud-finder: shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI)"
-            ),
+            sf_newness::NewnessWarning::ShallowClone => {
+                eprintln!(
+                    "stud-finder: shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI)"
+                );
+                warnings.push(WarningPayload {
+                    code: "shallow_clone_newness_disabled".into(),
+                    message: "shallow git clone detected; newness rules disabled \
+                              (use fetch-depth: 0)"
+                        .into(),
+                    extra: Map::new(),
+                });
+            }
             sf_newness::NewnessWarning::NotAGitRepo => {
-                eprintln!("stud-finder: not a git repository; newness signals skipped")
+                // No Ruby warning code — Ruby raises on non-repo here. Stderr only.
+                eprintln!("stud-finder: not a git repository; newness signals skipped");
             }
             sf_newness::NewnessWarning::GitNotFound => {
-                eprintln!("stud-finder: `git` not found in PATH; newness signals skipped")
+                eprintln!("stud-finder: `git` not found in PATH; newness signals skipped");
             }
             sf_newness::NewnessWarning::GitFailed(msg) => {
-                eprintln!("stud-finder: git log failed during newness: {msg}")
+                eprintln!("stud-finder: git log failed during newness: {msg}");
             }
         }
     }
@@ -181,7 +245,7 @@ fn main() -> Result<()> {
 
     // Build the JavaScript section on its own graph + complexity so
     // JS files don't pool into the Ruby percentile distribution.
-    let (js_graph, js_complexity) = build_js_signals(&cli.path, &files);
+    let (js_graph, js_complexity, js_skipped) = build_js_signals(&cli.path, &files);
     let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
         let js_paths: Vec<PathBuf> = js_graph.files().map(Path::to_path_buf).collect();
         let js_refs: Vec<&Path> = js_paths.iter().map(PathBuf::as_path).collect();
@@ -237,49 +301,68 @@ fn main() -> Result<()> {
     }
 
     // --- Emit ---
-    if cli.output.is_table() {
-        if !ruby_rows.is_empty() {
-            println!("# Ruby");
-            print_table(&ruby_rows);
-        }
-        if !js_rows.is_empty() {
-            if !ruby_rows.is_empty() {
-                println!();
-            }
-            println!("# JavaScript");
-            print_js_table(&js_rows);
-        }
-    } else {
-        // Build the warnings vector for the meta block from the
-        // signal subsystems that already ran. Currently sf-cli
-        // doesn't thread the live warning streams back here; a
-        // follow-up slice will. For now the vector is empty, which
-        // matches Ruby `Warnings.normalize([])`.
-        let warnings: Vec<output::WarningPayload> = Vec::new();
-        let analyzed_at = current_iso8601_utc();
-        output::emit(
-            cli.output,
-            Sections {
-                ruby: &ruby_rows,
-                js: &js_rows,
-                repo: &cli.path.display().to_string(),
-                churn_days: DEFAULT_WINDOW_DAYS,
-                analyzed_at: &analyzed_at,
-                warnings: &warnings,
-                file_count: ruby_total_analyzed + js_total_analyzed,
-                // Coverage is loaded per section in Ruby (--ruby-coverage,
-                // --js-coverage). We currently only wire a single
-                // `--coverage` flag that loads for the Ruby section;
-                // JS stays unavailable. When the JS-coverage flag
-                // lands in a later slice, this gains a second
-                // boolean. Caught as Ohm's P1 on PR #85.
-                ruby_coverage_available: coverage_available,
-                js_coverage_available: false,
-            },
-        );
-    }
+    let analyzed_at = current_iso8601_utc();
+    let analyzed_date = analyzed_at.get(0..10).unwrap_or(&analyzed_at).to_string();
+    // Active-signal booleans drive the `meta.weights` renormalization
+    // and the `meta.formula` label. Ruby `report_coverage_available?`
+    // is the union of per-section availability — a Ruby-only coverage
+    // run gets the 5-factor formula even though JS rows carry null
+    // coverage.
+    let has_coverage = output::report_coverage_available(coverage_available, false);
+    let formula = output::formula_label(has_coverage, has_ruby_coupling);
+    let weights = sf_score::effective_weights(
+        has_ruby_complexity,
+        has_ruby_churn,
+        has_ruby_coupling,
+        has_coverage,
+    );
+    // `--only` lands in slice #10c; for now the filter note + meta
+    // only cover `--diff-base`. `--top` triggers `filtered: true`
+    // because it also post-filters the row set.
+    let filter_note = build_filter_note(cli.diff_base.as_deref(), None);
+    let filtered = cli.diff_base.is_some() || cli.top.is_some();
+    let repo_display = cli.path.display().to_string();
+    let only_slice: Option<&[String]> = None;
+    output::emit(
+        cli.output,
+        Sections {
+            ruby: &ruby_rows,
+            js: &js_rows,
+            repo: &repo_display,
+            churn_days: DEFAULT_WINDOW_DAYS,
+            analyzed_at: &analyzed_at,
+            analyzed_date: &analyzed_date,
+            warnings: &warnings,
+            file_count: ruby_total_analyzed + js_total_analyzed,
+            files_skipped: ruby_skipped + js_skipped,
+            default_excluded_count: 0,
+            formula,
+            weights: &weights,
+            filter_note: filter_note.as_deref(),
+            diff_base: cli.diff_base.as_deref(),
+            only_paths: only_slice,
+            filtered,
+            ruby_coverage_available: coverage_available,
+            js_coverage_available: false,
+        },
+    );
 
     Ok(())
+}
+
+/// Build the Ruby `filter_note` string — attached below the markdown
+/// blockquote and the table header when a filter is active. Preserves
+/// the exact Ruby wording from `lib/stud_finder/cli.rb`.
+fn build_filter_note(diff_base: Option<&str>, only_paths: Option<&[String]>) -> Option<String> {
+    if let Some(base) = diff_base {
+        return Some(format!(
+            "Filtered to files changed vs {base} (ranks are against the full repo)."
+        ));
+    }
+    if only_paths.is_some() {
+        return Some("Filtered to --only paths (ranks are against the full repo).".to_string());
+    }
+    None
 }
 
 /// Walk the sorted rows and assign 1-based ranks. Must be called
@@ -418,9 +501,13 @@ fn diff_names(repo_root: &Path, base: &str) -> Result<HashSet<PathBuf>, String> 
     Ok(changed)
 }
 
-fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
+fn build_js_signals(
+    root: &Path,
+    files: &[FileRef],
+) -> (DependencyGraph, HashMap<PathBuf, usize>, usize) {
     let mut graph = DependencyGraph::new();
     let mut complexity: HashMap<PathBuf, usize> = HashMap::new();
+    let mut skipped = 0usize;
 
     // Pre-flight parse each JS file so we know which ones to EXCLUDE
     // from the scored population. Matches Ohm's exclusion-not-
@@ -435,6 +522,7 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
             Ok(s) => s,
             Err(err) => {
                 eprintln!("stud-finder: read {}: {}", abs.display(), err);
+                skipped += 1;
                 continue;
             }
         };
@@ -444,6 +532,7 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
                 "stud-finder: {} had parse errors; excluding the file from the JS scored population",
                 file.path.display()
             );
+            skipped += 1;
             continue;
         }
         included.push((file.path.as_path(), source, report.complexity));
@@ -466,7 +555,7 @@ fn build_js_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap
         }
     }
 
-    (graph, complexity)
+    (graph, complexity, skipped)
 }
 
 const JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
@@ -544,9 +633,13 @@ fn collect(root: &Path) -> Vec<FileRef> {
     out
 }
 
-fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<PathBuf, usize>) {
+fn build_signals(
+    root: &Path,
+    files: &[FileRef],
+) -> (DependencyGraph, HashMap<PathBuf, usize>, usize) {
     let mut graph = DependencyGraph::new();
     let mut complexity: HashMap<PathBuf, usize> = HashMap::new();
+    let mut skipped = 0usize;
     // Read + pre-flight-parse every Ruby file. Files with prism parse
     // errors are EXCLUDED from the scored population entirely — not
     // just from the complexity map. Imputation would otherwise leave a
@@ -560,6 +653,7 @@ fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<Pa
             Ok(s) => s,
             Err(err) => {
                 eprintln!("stud-finder: read {}: {}", abs.display(), err);
+                skipped += 1;
                 continue;
             }
         };
@@ -576,10 +670,11 @@ fn build_signals(root: &Path, files: &[FileRef]) -> (DependencyGraph, HashMap<Pa
                     "stud-finder: {} had parse errors; excluding the file from the scored population",
                     file.path.display()
                 );
+                skipped += 1;
             }
         }
     }
-    (graph, complexity)
+    (graph, complexity, skipped)
 }
 
 /// Outcome of a per-file Ruby pre-flight. `Included` carries the refs
@@ -936,151 +1031,7 @@ mod tests {
     }
 }
 
-fn print_js_table(rows: &[ScoredFile]) {
-    // JS table: class | score | fan_in | fan_out | complexity | file.
-    // fan_out is included because sf-score always activates it when
-    // the graph has any edges; the Ruby JS-section scorer uses only
-    // fan_in + complexity, but surfacing fan_out in the output keeps
-    // the composite's weighting explicit rather than hidden.
-    let class_width = rows
-        .iter()
-        .map(|r| r.class.as_str().len())
-        .max()
-        .unwrap_or(0)
-        .max("class".len());
-    let fan_in_width = rows
-        .iter()
-        .map(|r| width_of(r.fan_in))
-        .max()
-        .unwrap_or(1)
-        .max("fan_in".len());
-    let fan_out_width = rows
-        .iter()
-        .map(|r| width_of(r.fan_out))
-        .max()
-        .unwrap_or(1)
-        .max("fan_out".len());
-    let complexity_width = rows
-        .iter()
-        .map(|r| width_of(r.complexity))
-        .max()
-        .unwrap_or(1)
-        .max("complexity".len());
-    let score_width = "0.0000".len();
-
-    println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  file",
-        "class",
-        "score",
-        "fan_in",
-        "fan_out",
-        "complexity",
-        cw = class_width,
-        sw = score_width,
-        fi = fan_in_width,
-        fo = fan_out_width,
-        cx = complexity_width,
-    );
-    for r in rows {
-        println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {}",
-            r.class.as_str(),
-            r.composite,
-            r.fan_in,
-            r.fan_out,
-            r.complexity,
-            r.path.display(),
-            cw = class_width,
-            sw = score_width,
-            fi = fan_in_width,
-            fo = fan_out_width,
-            cx = complexity_width,
-        );
-    }
-}
-
-fn print_table(rows: &[ScoredFile]) {
-    let class_width = rows
-        .iter()
-        .map(|r| r.class.as_str().len())
-        .max()
-        .unwrap_or(0)
-        .max("class".len());
-    let fan_in_width = rows
-        .iter()
-        .map(|r| width_of(r.fan_in))
-        .max()
-        .unwrap_or(1)
-        .max("fan_in".len());
-    let fan_out_width = rows
-        .iter()
-        .map(|r| width_of(r.fan_out))
-        .max()
-        .unwrap_or(1)
-        .max("fan_out".len());
-    let complexity_width = rows
-        .iter()
-        .map(|r| width_of(r.complexity))
-        .max()
-        .unwrap_or(1)
-        .max("complexity".len());
-    let churn_width = rows
-        .iter()
-        .map(|r| width_of(r.churn_commits))
-        .max()
-        .unwrap_or(1)
-        .max("churn".len());
-    let coupling_width = "0.00".len().max("coupling".len());
-    let coverage_width = "0.00".len().max("coverage".len());
-    let score_width = "0.0000".len();
-
-    println!(
-        "{:<cw$}  {:>sw$}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$}  {:>cv$}  file",
-        "class",
-        "score",
-        "fan_in",
-        "fan_out",
-        "complexity",
-        "churn",
-        "coupling",
-        "coverage",
-        cw = class_width,
-        sw = score_width,
-        fi = fan_in_width,
-        fo = fan_out_width,
-        cx = complexity_width,
-        ch = churn_width,
-        cp = coupling_width,
-        cv = coverage_width,
-    );
-    for r in rows {
-        println!(
-            "{:<cw$}  {:>sw$.4}  {:>fi$}  {:>fo$}  {:>cx$}  {:>ch$}  {:>cp$.2}  {:>cv$.2}  {}",
-            r.class.as_str(),
-            r.composite,
-            r.fan_in,
-            r.fan_out,
-            r.complexity,
-            r.churn_commits,
-            r.max_coupling,
-            r.coverage,
-            r.path.display(),
-            cw = class_width,
-            sw = score_width,
-            fi = fan_in_width,
-            fo = fan_out_width,
-            cx = complexity_width,
-            ch = churn_width,
-            cp = coupling_width,
-            cv = coverage_width,
-        );
-    }
-}
-
-fn width_of(n: usize) -> usize {
-    if n == 0 {
-        1
-    } else {
-        (n as f64).log10().floor() as usize + 1
-    }
-}
+// Slice #10b: the inline `print_table` / `print_js_table` /
+// `width_of` helpers were removed. Table rendering now lives in
+// `output::emit` next to the other emitters, using the Ruby
+// `emit_table` layout (section headers, column widths, footer).

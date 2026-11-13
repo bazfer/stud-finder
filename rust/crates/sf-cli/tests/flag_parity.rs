@@ -143,7 +143,12 @@ fn output_csv_emits_single_combined_stream_with_ruby_result_columns_header() {
 }
 
 #[test]
-fn output_markdown_emits_pipe_table() {
+fn output_markdown_emits_ruby_parity_shape() {
+    // Slice #10b: markdown now matches Ruby `emit_markdown` —
+    // `## stud-finder — YYYY-MM-DD` title, `> formula` blockquote,
+    // `### Ruby` + `### JavaScript/TypeScript` section tables with
+    // the Ruby `MARKDOWN_COLUMNS` 22-column subset, closing with
+    // the fan_in disclaimer.
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let out = Command::new(stud_finder_bin())
@@ -154,39 +159,61 @@ fn output_markdown_emits_pipe_table() {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("# Ruby"));
     assert!(
-        stdout.contains("| class | score |"),
-        "pipe-table header missing: {stdout}"
+        stdout.starts_with("## stud-finder — "),
+        "markdown should start with Ruby-parity title: {stdout}"
     );
     assert!(
-        stdout.contains("| --- | --- |"),
-        "pipe-table separator missing: {stdout}"
+        stdout.contains("> 4-factor. Churn window: 180 days."),
+        "formula + churn blockquote missing: {stdout}"
     );
-    // At least one data row with pipes.
+    assert!(
+        stdout.contains("### Ruby"),
+        "Ruby section header missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("### JavaScript/TypeScript"),
+        "JS/TS section header missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("| rank | language | file | score |"),
+        "22-column MARKDOWN_COLUMNS header missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("*fan_in is a static approximation"),
+        "fan_in disclaimer footer missing: {stdout}"
+    );
+    // Count Ruby section data rows — lines inside the Ruby table
+    // with a `.rb` path cell.
     let data_row_count = stdout
         .lines()
-        .filter(|l| l.starts_with("| ") && !l.contains("---") && !l.contains("class |"))
+        .filter(|l| l.starts_with("| ") && l.contains(".rb") && !l.contains("---"))
         .count();
-    assert!(data_row_count >= 2, "expected 2+ data rows: {stdout}");
+    assert!(
+        data_row_count >= 2,
+        "expected 2+ Ruby data rows: {stdout}"
+    );
 }
 
 #[test]
 fn top_limits_rows_per_section() {
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
-    // Table format for a tight shape; count data rows.
+    // CSV format for a tight shape — each data row is one line with
+    // language in the second column. Header gets filtered out.
     let out = Command::new(stud_finder_bin())
         .arg(tmp.path())
         .arg("--top")
         .arg("1")
+        .arg("--output")
+        .arg("csv")
         .output()
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // After the Ruby header and the column-header line, there should
-    // be exactly 1 data row ending with `.rb`.
-    let data_rows: Vec<&str> = stdout.lines().filter(|l| l.ends_with(".rb")).collect();
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let data_rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(data_rows.len(), 1, "--top 1 should keep 1 row: {stdout}");
 }
 
@@ -214,9 +241,9 @@ fn top_zero_is_rejected_matching_ruby() {
 #[test]
 fn markdown_escapes_pipes_and_newlines_in_paths() {
     // Non-blocking from Ohm's PR #82 review: a path containing `|`
-    // or newlines must not break the pipe-table row. Build a
-    // tempdir with a Ruby file whose directory has a `|` in the
-    // name, and assert the markdown row keeps its column count.
+    // or newlines must not break the pipe-table row. Updated for
+    // slice #10b: header is now `| rank | language | file | ...`
+    // (22 cols — the Ruby MARKDOWN_COLUMNS subset).
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("weird|dir");
     std::fs::create_dir_all(&dir).unwrap();
@@ -231,23 +258,14 @@ fn markdown_escapes_pipes_and_newlines_in_paths() {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Header pipe count defines "columns + 1" since the format is
-    // `| h1 | h2 | ... | hN |`. Every DATA row must have the same
-    // pipe count; an unescaped `|` inside a cell would inflate it.
-    //
-    // The row filter below matches lines with a `.rb` substring and
-    // a trailing ` |` — that's the actual data-row shape. Earlier
-    // revisions of this test filtered on `"Order" || "Other"`, which
-    // never matched (paths are lowercased). Ohm flagged that
-    // vacuous loop on PR #82; this version asserts over real rows.
     let header_line = stdout
         .lines()
-        .find(|l| l.starts_with("| class |"))
+        .find(|l| l.starts_with("| rank |"))
         .expect("header");
     let header_pipe_count = header_line.matches('|').count();
     let data_rows: Vec<&str> = stdout
         .lines()
-        .filter(|l| l.ends_with(" |") && l.contains(".rb"))
+        .filter(|l| l.ends_with(" |") && l.contains(".rb") && !l.contains("---"))
         .collect();
     assert!(
         data_rows.len() >= 2,
@@ -260,8 +278,6 @@ fn markdown_escapes_pipes_and_newlines_in_paths() {
             "row pipe count differs from header; unescaped `|` in path? row={row:?}"
         );
     }
-    // And the weird-path row should carry the HTML-entity escape
-    // so no raw `|` char sits inside a cell.
     assert!(
         stdout.contains("weird&#124;dir"),
         "expected HTML-entity-escaped pipe in path: {stdout}"
@@ -291,17 +307,20 @@ fn csv_escapes_pipe_and_comma_in_paths() {
 
 #[test]
 fn absent_top_keeps_all_rows() {
+    // CSV for a tight shape — each data row is one line.
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let baseline = Command::new(stud_finder_bin())
         .arg(tmp.path())
+        .arg("--output")
+        .arg("csv")
         .output()
         .unwrap();
     assert!(baseline.status.success());
-    let row_count = String::from_utf8_lossy(&baseline.stdout)
-        .lines()
-        .filter(|l| l.ends_with(".rb"))
-        .count();
+    let stdout = String::from_utf8_lossy(&baseline.stdout);
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let row_count = lines.filter(|l| !l.is_empty()).count();
     assert_eq!(row_count, 3, "baseline should emit all 3 Ruby files");
 }
 
@@ -346,6 +365,8 @@ fn diff_base_filters_to_changed_files_only() {
         .arg(root)
         .arg("--diff-base")
         .arg("main")
+        .arg("--output")
+        .arg("csv")
         .output()
         .unwrap();
     assert!(
@@ -354,7 +375,9 @@ fn diff_base_filters_to_changed_files_only() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let file_lines: Vec<&str> = stdout.lines().filter(|l| l.ends_with(".rb")).collect();
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let file_lines: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(
         file_lines.len(),
         1,
@@ -467,6 +490,8 @@ fn diff_base_nested_scan_root_resolves_paths_correctly() {
         .arg(repo.join("lib/app"))
         .arg("--diff-base")
         .arg("main")
+        .arg("--output")
+        .arg("csv")
         .output()
         .unwrap();
     assert!(
@@ -475,7 +500,9 @@ fn diff_base_nested_scan_root_resolves_paths_correctly() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let file_lines: Vec<&str> = stdout.lines().filter(|l| l.ends_with(".rb")).collect();
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let file_lines: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(
         file_lines.len(),
         1,
