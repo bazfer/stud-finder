@@ -59,6 +59,12 @@ pub struct CouplingPartner {
     pub partner: PathBuf,
     pub ratio: f64,
     pub co_changes: usize,
+    /// Count of all qualifying partners for this file (pairs that
+    /// passed both `MIN_CO_CHANGES` and `COUPLING_THRESHOLD`). Equal to
+    /// the number of edges this file's node has in the coupling graph
+    /// after the threshold cut. Matches Ruby `aggregate_partners`'s
+    /// `partners: partners.length`.
+    pub partners: usize,
 }
 
 /// Non-fatal observations emitted during analysis — surfaced on stderr
@@ -318,6 +324,11 @@ fn select_strongest_partners(
     }
 
     let mut best: HashMap<PathBuf, CouplingPartner> = HashMap::new();
+    // Count of all qualifying partners per file (independent of which
+    // one wins `best`). Matches Ruby `aggregate_partners`'s
+    // `partners.length`. We tally here and fold into each best entry
+    // after the walk so one struct carries both facts.
+    let mut partner_counts: HashMap<PathBuf, usize> = HashMap::new();
     let mut consider = |file: &Path, partner: &Path, count: usize| {
         if count < MIN_CO_CHANGES {
             return;
@@ -332,10 +343,12 @@ fn select_strongest_partners(
         if ratio < COUPLING_THRESHOLD {
             return;
         }
+        *partner_counts.entry(file.to_path_buf()).or_insert(0) += 1;
         let candidate = CouplingPartner {
             partner: partner.to_path_buf(),
             ratio,
             co_changes: count,
+            partners: 0, // filled in after the walk from partner_counts
         };
         match best.get(file) {
             None => {
@@ -357,6 +370,11 @@ fn select_strongest_partners(
     for ((a, b), count) in &sorted {
         consider(a, b, **count);
         consider(b, a, **count);
+    }
+    // Fold the partner counts into each best entry so the consumer
+    // doesn't need a second map.
+    for (file, entry) in best.iter_mut() {
+        entry.partners = partner_counts.get(file).copied().unwrap_or(0);
     }
     best
 }

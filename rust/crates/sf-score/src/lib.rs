@@ -112,11 +112,24 @@ pub struct ScoredFile {
     pub complexity: usize,
     pub churn_commits: usize,
     pub churn_lines: usize,
+    /// Non-blank line count from `sf-cli`'s LOC pass. `0` when the
+    /// file was unreadable or LOC was not measured. Matches Ruby
+    /// `LocCounter#non_blank_lines`. Reported, not scored — loc
+    /// is NOT a signal in the composite.
+    pub loc: usize,
+    /// Fan-out / (fan_in + fan_out), rounded to 4 decimals. `0.0`
+    /// when both are zero. Matches Ruby `Scorer#instability`.
+    pub instability: f64,
     /// Coupling partner with the strongest ratio for this file, if any.
     /// Empty path means no coupling partner (no pair cleared the Ruby
     /// min_co_changes + coupling_threshold filters).
     pub max_coupling_partner: PathBuf,
     pub max_coupling: f64,
+    /// Count of qualifying coupling partners (ratio ≥ threshold AND
+    /// co_changes ≥ min) for this file. `0` when no pair cleared the
+    /// filters. Matches Ruby `aggregate_partners`'s `partners:
+    /// partners.length`.
+    pub coupling_partners: usize,
     /// Line coverage in `[0.0, 1.0]`. `0.0` when the coverage signal
     /// is unavailable OR when the file is missing from a provided
     /// coverage report.
@@ -127,8 +140,19 @@ pub struct ScoredFile {
     pub churn_pct: f64,
     pub coupling_pct: f64,
     pub coverage_pct: f64,
+    pub loc_pct: f64,
+    pub instability_pct: f64,
     pub composite: f64,
     pub class: Class,
+    /// Reason the composite classification was escalated beyond its
+    /// percentile band, as a short tag (empty when not escalated).
+    /// Current tags: `"complexity_floor"` (Leaf→Branch because raw
+    /// complexity ≥ COMPLEXITY_FLOOR), `"fan_in_floor"` (Leaf→Branch
+    /// because raw fan_in ≥ FAN_IN_FLOOR). Matches Ruby
+    /// `Scorer#floored_classification`'s second return value.
+    /// Future newness slice adds `"trunk_adjacent"` and
+    /// `"recency_floor"`.
+    pub escalation: String,
     pub evidence: f64,
 }
 
@@ -142,6 +166,13 @@ pub struct CouplingSignal {
     pub partner: PathBuf,
     pub ratio: f64,
     pub co_changes: usize,
+    /// Count of all qualifying partners for this file (ratio ≥
+    /// threshold AND co_changes ≥ min). Mirrors Ruby
+    /// `aggregate_partners`'s `partners: partners.length`. Equal to
+    /// the number of edges this file's node has in the coupling
+    /// graph after the threshold cut — NOT just the strongest
+    /// partner.
+    pub partners: usize,
 }
 
 /// Bundle of per-file signal data the scorer consumes. `graph` is
@@ -184,11 +215,20 @@ pub struct Signals<'a> {
     /// high risk. Fixes Ohm's P1 on PR #80 — ranking raw coverage
     /// instead of risk had reversed the scoring direction.
     pub coverage: Option<HashMap<PathBuf, f64>>,
+    /// Per-file non-blank LOC (from `sf-cli` LOC pass, Ruby
+    /// `LocCounter#non_blank_lines`). Empty map = LOC signal not
+    /// measured for this run — `ScoredFile.loc` defaults to 0 and
+    /// `loc_pct` degenerates to 0.0. Missing keys inside a
+    /// non-empty map default to 0. LOC is REPORTED, not SCORED:
+    /// it carries a percentile for display but no composite
+    /// weight — matches Ruby, which emits `loc`/`loc_pct` columns
+    /// but doesn't fold them into the composite.
+    pub loc: HashMap<PathBuf, usize>,
 }
 
 impl<'a> Signals<'a> {
     /// Signals bundle with just the graph — no complexity, no churn,
-    /// no coupling, no coverage. Matches the sf-score first-slice shape.
+    /// no coupling, no coverage, no loc. Matches the sf-score first-slice shape.
     pub fn from_graph(graph: &'a DependencyGraph) -> Self {
         Self {
             graph,
@@ -197,6 +237,7 @@ impl<'a> Signals<'a> {
             churn_lines: HashMap::new(),
             coupling: HashMap::new(),
             coverage: None,
+            loc: HashMap::new(),
         }
     }
 }
@@ -300,7 +341,7 @@ impl Scorer {
             .iter()
             .map(|p| signals.coupling.get(*p).map(|c| c.ratio).unwrap_or(0.0))
             .collect();
-        let coupling_partners: Vec<(PathBuf, f64)> = files
+        let coupling_strongest: Vec<(PathBuf, f64)> = files
             .iter()
             .map(|p| {
                 signals
@@ -310,6 +351,38 @@ impl Scorer {
                     .unwrap_or_default()
             })
             .collect();
+        let coupling_partner_counts: Vec<usize> = files
+            .iter()
+            .map(|p| signals.coupling.get(*p).map(|c| c.partners).unwrap_or(0))
+            .collect();
+
+        // LOC is reported, not scored. Percentile is emitted for
+        // display parity with Ruby but never enters the composite.
+        let loc_values: Vec<usize> = files
+            .iter()
+            .map(|p| signals.loc.get(*p).copied().unwrap_or(0))
+            .collect();
+        let loc_pcts = if !signals.loc.is_empty() {
+            percentile_rank_usize(&loc_values)
+        } else {
+            vec![0.0; files.len()]
+        };
+
+        // Instability = fan_out / (fan_in + fan_out), rounded to 4
+        // decimals — matches Ruby `Scorer#instability`. 0.0 when both
+        // sides are zero (an isolated file). Always available because
+        // fan_in/fan_out are always available.
+        let instability_values: Vec<f64> = (0..files.len())
+            .map(|i| {
+                let total = fan_ins[i] + fan_outs[i];
+                if total == 0 {
+                    0.0
+                } else {
+                    round4((fan_outs[i] as f64) / (total as f64))
+                }
+            })
+            .collect();
+        let instability_pcts = percentile_rank_f64(&instability_values);
 
         // Coverage + interaction activate together via the explicit
         // `Option` gate — matches Ruby `coverage_available? =
@@ -462,7 +535,10 @@ impl Scorer {
         let fan_in_floor = self.fan_in_floor;
         let complexity_floor = self.complexity_floor;
 
-        let classes: Vec<Class> = (0..files.len())
+        // Walk class + escalation together so the reason string stays
+        // in lock-step with the class decision. Matches Ruby
+        // `Scorer#floored_classification` returning `[class, reason]`.
+        let class_decisions: Vec<(Class, String)> = (0..files.len())
             .map(|i| {
                 let pct = composite_pcts[i];
                 let base = if pct >= trunk_cutoff {
@@ -475,14 +551,19 @@ impl Scorer {
                 // Absolute floors: a file whose raw fan_in or
                 // complexity meets or exceeds the respective threshold
                 // cannot classify below Branch. Floors only escalate —
-                // Trunk and Branch are never downgraded.
-                if base == Class::Leaf
-                    && (fan_ins[i] >= fan_in_floor
-                        || (has_complexity && complexities[i] >= complexity_floor))
-                {
-                    Class::Branch
+                // Trunk and Branch are never downgraded. Reason tag
+                // matches Ruby: complexity_floor wins the tie because
+                // Ruby checks it first.
+                if base == Class::Leaf {
+                    if has_complexity && complexities[i] >= complexity_floor {
+                        (Class::Branch, "complexity_floor".to_string())
+                    } else if fan_ins[i] >= fan_in_floor {
+                        (Class::Branch, "fan_in_floor".to_string())
+                    } else {
+                        (base, String::new())
+                    }
                 } else {
-                    base
+                    (base, String::new())
                 }
             })
             .collect();
@@ -491,7 +572,8 @@ impl Scorer {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                let (partner_path, _partner_ratio) = coupling_partners[i].clone();
+                let (partner_path, _partner_ratio) = coupling_strongest[i].clone();
+                let (class, escalation) = class_decisions[i].clone();
                 ScoredFile {
                     path: path.to_path_buf(),
                     fan_in: fan_ins[i],
@@ -499,8 +581,11 @@ impl Scorer {
                     complexity: complexities[i],
                     churn_commits: churn_commits[i],
                     churn_lines: churn_lines[i],
+                    loc: loc_values[i],
+                    instability: instability_values[i],
                     max_coupling_partner: partner_path,
                     max_coupling: coupling_values[i],
+                    coupling_partners: coupling_partner_counts[i],
                     coverage: coverage_values[i],
                     fan_in_pct: fan_in_pcts[i],
                     fan_out_pct: fan_out_pcts[i],
@@ -508,8 +593,11 @@ impl Scorer {
                     churn_pct: churn_pcts[i],
                     coupling_pct: coupling_pcts[i],
                     coverage_pct: coverage_pcts[i],
+                    loc_pct: loc_pcts[i],
+                    instability_pct: instability_pcts[i],
                     composite: round4(composites[i]),
-                    class: classes[i],
+                    class,
+                    escalation,
                     evidence: 1.0,
                 }
             })
