@@ -1842,6 +1842,56 @@ fn weight_flags_apply_in_argv_order() {
 }
 
 #[test]
+fn weights_coupling_only_with_history_validates_and_runs() {
+    // Ohm P2 on PR #90 r2: a `coupling:1.0` vector against a repo
+    // with real coupling data (two files committed together) is a
+    // VALID override — Ruby includes coupling in the active total
+    // when coupling is available. Prior revision rejected as
+    // `active weights must be greater than 0.0.`.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.rb"), "class A\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\nend\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "c1"]);
+    std::fs::write(repo.join("a.rb"), "class A\n  def x; end\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\n  def x; end\nend\n").unwrap();
+    run_git(&["commit", "-qam", "c2"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(repo)
+        .arg("--weights")
+        .arg("fan_in:0,fan_out:0,complexity:0,churn:0,coverage:0,interaction:0,coupling:1")
+        .arg("--coupling-min-commits")
+        .arg("1")
+        .arg("--coupling-threshold")
+        .arg("0.0")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "coupling-only valid override must succeed: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn coupling_weight_zero_strips_coupling_from_formula() {
     // Ohm P2 on PR #90: a run WITH coupling data but
     // --coupling-weight 0 must label as 4-factor, not

@@ -390,7 +390,19 @@ fn main() -> Result<()> {
     let full_weights_override = cli.weights.is_some();
     if full_weights_override {
         let has_coverage_for_validate = cli.ruby_coverage.is_some() || cli.coverage.is_some();
-        if let Err(msg) = effective_raw.validate_full_override(has_coverage_for_validate) {
+        // Coupling will be active for the scoring run when the user
+        // has not zeroed its weight AND the signal-availability
+        // path produces data. At validate time we don't yet know the
+        // git-history outcome, so permit `coupling > 0` to count as
+        // "coupling intended" — a `coupling:1.0` vector against a
+        // real repo should validate. If the run turns out to have
+        // no coupling data at scoring time, safe_normalize falls
+        // back to defaults rather than producing NaN. Caught as
+        // Ohm's P2 on PR #90 r2.
+        let has_coupling_for_validate = effective_raw.coupling > 0.0;
+        if let Err(msg) = effective_raw
+            .validate_full_override(has_coverage_for_validate, has_coupling_for_validate)
+        {
             eprintln!("{msg}");
             std::process::exit(2);
         }
@@ -857,6 +869,12 @@ fn apply_weight_overrides_in_argv_order() -> Result<(sf_score::RawWeights, bool)
     let mut i = 0usize;
     while i < argv.len() {
         let arg = &argv[i];
+        // Stop scanning at the standard `--` terminator so a later
+        // positional starting with `--weights` can't be mistaken
+        // for the option. Ohm's non-blocking on PR #90 r2.
+        if arg == "--" {
+            break;
+        }
         // Support `--flag value` and `--flag=value` for each of the
         // three weight flags.
         let (key, value): (Option<&str>, Option<String>) =

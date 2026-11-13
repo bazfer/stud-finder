@@ -1526,3 +1526,90 @@ fn apply_newness_does_not_cascade_trunk_promotions() {
     );
     assert_eq!(c.escalation, "recency_floor");
 }
+
+#[test]
+fn effective_weights_from_falls_back_on_all_zero_raw() {
+    // Ohm P2 on PR #90 round 2: library-level callers must not
+    // see NaN when they pass a degenerate RawWeights. safe_normalize
+    // substitutes the default weights for an all-zero (or any
+    // zero-active-total) input.
+    let zero = RawWeights {
+        fan_in: 0.0,
+        fan_out: 0.0,
+        complexity: 0.0,
+        churn: 0.0,
+        coverage: 0.0,
+        interaction: 0.0,
+        coupling: 0.0,
+    };
+    let ew = effective_weights_from(&zero, false, false);
+    assert!(ew.fan_in.is_finite() && ew.fan_in > 0.0);
+    assert!(ew.fan_out.is_finite() && ew.fan_out > 0.0);
+    assert!(ew.complexity.is_finite() && ew.complexity > 0.0);
+    assert!(ew.churn.is_finite() && ew.churn > 0.0);
+}
+
+#[test]
+fn effective_weights_from_falls_back_on_nan_input() {
+    let nan = RawWeights {
+        fan_in: f64::NAN,
+        fan_out: 0.095,
+        complexity: 0.2375,
+        churn: 0.2375,
+        coverage: 0.095,
+        interaction: 0.095,
+        coupling: 0.05,
+    };
+    let ew = effective_weights_from(&nan, false, false);
+    assert!(
+        ew.fan_in.is_finite(),
+        "NaN input must not propagate: {ew:?}"
+    );
+    assert!(ew.fan_out.is_finite());
+}
+
+#[test]
+fn scorer_with_all_zero_weights_does_not_produce_nan_rows() {
+    let g = tiny_graph();
+    let zero = RawWeights {
+        fan_in: 0.0,
+        fan_out: 0.0,
+        complexity: 0.0,
+        churn: 0.0,
+        coverage: 0.0,
+        interaction: 0.0,
+        coupling: 0.0,
+    };
+    let rows = Scorer::new().with_weights(zero).score(&g);
+    for r in rows {
+        assert!(
+            r.composite.is_finite(),
+            "zero weights must not produce NaN composite: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_full_override_permits_coupling_only_when_available() {
+    // Ohm P2 on PR #90 round 2: a `coupling:1.0` vector against
+    // a run that has coupling data is a valid override. Prior
+    // revision ignored has_coupling and rejected it. Zero-everything
+    // is still invalid when coupling data is absent.
+    let coupling_only = RawWeights {
+        fan_in: 0.0,
+        fan_out: 0.0,
+        complexity: 0.0,
+        churn: 0.0,
+        coverage: 0.0,
+        interaction: 0.0,
+        coupling: 1.0,
+    };
+    assert!(
+        coupling_only.validate_full_override(false, true).is_ok(),
+        "coupling:1.0 with coupling data must validate"
+    );
+    assert!(
+        coupling_only.validate_full_override(false, false).is_err(),
+        "coupling:1.0 with NO coupling data must still fail active-total"
+    );
+}

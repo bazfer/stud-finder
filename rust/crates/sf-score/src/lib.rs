@@ -105,18 +105,21 @@ impl RawWeights {
 
     /// Match Ruby `validate_weights!` (`lib/stud_finder/cli.rb:416`)
     /// — gated by `--weights`/`custom_weights`. Requires:
-    /// 1. Every weight finite (parse_weights rejects NaN earlier
-    ///    but a programmatic caller may still build one).
-    /// 2. Sum within 0.001 of 1.0.
-    /// 3. Zero coverage AND interaction weight when coverage is
-    ///    not available for the run.
-    /// 4. Active-weight total strictly > 0 (Ruby raises
-    ///    `active weights must be greater than 0.0.` from the
-    ///    scorer itself, folded in here so sf-cli errors before
-    ///    calling into sf-score).
+    /// 1. Every weight finite.
+    /// 2. Sum within 0.001 of 1.0. Error quotes the observed sum.
+    /// 3. Zero coverage weight without a coverage report (separate
+    ///    error from interaction).
+    /// 4. Zero interaction weight without a coverage report.
+    /// 5. Active-weight total strictly > 0 given the real signal set.
     ///
-    /// Caught as Ohm's P1 + P2 on PR #90.
-    pub fn validate_full_override(&self, has_coverage: bool) -> Result<(), String> {
+    /// `has_coupling` lets the check include coupling in the active
+    /// total when coupling data is available — a `coupling:1.0` vector
+    /// with real history is valid. Caught as Ohm's P2 on PR #90 r2.
+    pub fn validate_full_override(
+        &self,
+        has_coverage: bool,
+        has_coupling: bool,
+    ) -> Result<(), String> {
         if !self.fan_in.is_finite()
             || !self.fan_out.is_finite()
             || !self.complexity.is_finite()
@@ -127,30 +130,91 @@ impl RawWeights {
         {
             return Err("Error: weight values must be floats.".to_string());
         }
-        if (self.sum() - 1.0).abs() > 0.001 {
-            return Err("Error: weights must sum to 1.0.".to_string());
+        let s = self.sum();
+        if (s - 1.0).abs() > 0.001 {
+            return Err(format!("Error: weights must sum to 1.0 (got {s}).",));
         }
-        if !has_coverage && (self.coverage > 0.0 || self.interaction > 0.0) {
-            return Err(
-                "Error: coverage and interaction weights require a coverage report.".to_string(),
-            );
+        if !has_coverage && self.coverage > 0.0 {
+            return Err("Error: coverage weight requires a coverage report.".to_string());
         }
-        // Active-total: BASE_KEYS (always) + coverage+interaction (if
-        // coverage) + coupling (if coupling data present). We don't
-        // know coupling availability here; use the lower bound by
-        // assuming no coupling signal — a zero base + optional-only
-        // override would still raise.
-        let base_total = self.fan_in + self.fan_out + self.complexity + self.churn;
-        let with_cov = if has_coverage {
-            base_total + self.coverage + self.interaction
-        } else {
-            base_total
-        };
-        if with_cov <= 0.0 {
+        if !has_coverage && self.interaction > 0.0 {
+            return Err("Error: interaction weight requires a coverage report.".to_string());
+        }
+        let mut active = self.fan_in + self.fan_out + self.complexity + self.churn;
+        if has_coverage {
+            active += self.coverage + self.interaction;
+        }
+        if has_coupling {
+            active += self.coupling;
+        }
+        if active <= 0.0 {
             return Err("Error: active weights must be greater than 0.0.".to_string());
         }
         Ok(())
     }
+}
+
+/// Internal: compute (active_total, fan_in_w, fan_out_w, complexity_w,
+/// churn_w, coupling_w, coverage_w, interaction_w) with a safety
+/// fallback. If the input raw weights are non-finite OR the derived
+/// active total is <= 0, substitute `RawWeights::default()` so the
+/// composite math stays well-defined. Ruby raises before scoring; the
+/// sf-cli layer validates on the `--weights` path, but library
+/// consumers reaching Scorer / effective_weights_from directly must
+/// not produce NaN/Infinity rows. Caught as Ohm's P2 on PR #90 r2.
+fn safe_normalize(
+    raw: &RawWeights,
+    has_coupling: bool,
+    has_coverage: bool,
+) -> (f64, f64, f64, f64, f64, f64, f64) {
+    let all_finite = raw.fan_in.is_finite()
+        && raw.fan_out.is_finite()
+        && raw.complexity.is_finite()
+        && raw.churn.is_finite()
+        && raw.coverage.is_finite()
+        && raw.interaction.is_finite()
+        && raw.coupling.is_finite();
+    let mut candidate_total = raw.fan_in + raw.fan_out + raw.complexity + raw.churn;
+    if has_coupling {
+        candidate_total += raw.coupling;
+    }
+    if has_coverage {
+        candidate_total += raw.coverage + raw.interaction;
+    }
+    let safe_raw = if all_finite && candidate_total > 0.0 {
+        *raw
+    } else {
+        RawWeights::default()
+    };
+    let mut active_total =
+        safe_raw.fan_in + safe_raw.fan_out + safe_raw.complexity + safe_raw.churn;
+    if has_coupling {
+        active_total += safe_raw.coupling;
+    }
+    if has_coverage {
+        active_total += safe_raw.coverage + safe_raw.interaction;
+    }
+    (
+        safe_raw.fan_in / active_total,
+        safe_raw.fan_out / active_total,
+        safe_raw.complexity / active_total,
+        safe_raw.churn / active_total,
+        if has_coupling {
+            safe_raw.coupling / active_total
+        } else {
+            0.0
+        },
+        if has_coverage {
+            safe_raw.coverage / active_total
+        } else {
+            0.0
+        },
+        if has_coverage {
+            safe_raw.interaction / active_total
+        } else {
+            0.0
+        },
+    )
 }
 
 // Default base weights are kept as named constants so sf-score
@@ -457,21 +521,16 @@ pub fn effective_weights_from(
     has_coupling: bool,
     has_coverage: bool,
 ) -> EffectiveWeights {
-    let mut active_total = raw.fan_in + raw.fan_out + raw.complexity + raw.churn;
-    if has_coupling {
-        active_total += raw.coupling;
-    }
-    if has_coverage {
-        active_total += raw.coverage + raw.interaction;
-    }
+    let (w_fi, w_fo, w_cx, w_ch, w_cp, w_cov, w_int) =
+        safe_normalize(raw, has_coupling, has_coverage);
     EffectiveWeights {
-        fan_in: raw.fan_in / active_total,
-        fan_out: raw.fan_out / active_total,
-        complexity: raw.complexity / active_total,
-        churn: raw.churn / active_total,
-        coupling: has_coupling.then(|| raw.coupling / active_total),
-        coverage: has_coverage.then(|| raw.coverage / active_total),
-        interaction: has_coverage.then(|| raw.interaction / active_total),
+        fan_in: w_fi,
+        fan_out: w_fo,
+        complexity: w_cx,
+        churn: w_ch,
+        coupling: has_coupling.then_some(w_cp),
+        coverage: has_coverage.then_some(w_cov),
+        interaction: has_coverage.then_some(w_int),
     }
 }
 
@@ -729,33 +788,15 @@ impl Scorer {
         // else Ruby's `DEFAULT_WEIGHTS`. Slice #10f adds the custom-
         // weights path; the default path matches the slice #10d
         // Ruby-parity fix.
+        // Route the inline math through `safe_normalize` so NaN
+        // and zero-active-total raw inputs fall back to defaults
+        // before any division. The sf-cli validator catches these
+        // on the --weights path, but library callers using
+        // `Scorer::with_weights(...)` directly also must not
+        // produce NaN rows. Caught as Ohm's P2 on PR #90 r2.
         let raw = self.weights.unwrap_or_default();
-        let mut active_total = raw.fan_in + raw.fan_out + raw.complexity + raw.churn;
-        if has_coupling {
-            active_total += raw.coupling;
-        }
-        if has_coverage {
-            active_total += raw.coverage + raw.interaction;
-        }
-        let w_fi = raw.fan_in / active_total;
-        let w_fo = raw.fan_out / active_total;
-        let w_cx = raw.complexity / active_total;
-        let w_ch = raw.churn / active_total;
-        let w_cp = if has_coupling {
-            raw.coupling / active_total
-        } else {
-            0.0
-        };
-        let w_cov = if has_coverage {
-            raw.coverage / active_total
-        } else {
-            0.0
-        };
-        let w_int = if has_coverage {
-            raw.interaction / active_total
-        } else {
-            0.0
-        };
+        let (w_fi, w_fo, w_cx, w_ch, w_cp, w_cov, w_int) =
+            safe_normalize(&raw, has_coupling, has_coverage);
 
         // Composite includes the interaction cross-term `w_int *
         // fan_in_pct * coverage_pct` — Ruby `interaction_score` uses
