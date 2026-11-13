@@ -1,35 +1,50 @@
-//! Output format emitters for sf-cli: `table` (the default from the
-//! earlier slices), `json`, `csv`, `markdown`.
+//! Output format emitters for sf-cli.
 //!
-//! **IMPORTANT — these are sf-rust-native formats, NOT drop-in
-//! Ruby-compatible replacements.** Ohm's PR #82 review flagged that
-//! stud-finder Ruby's JSON contract includes `meta` + `warnings` +
-//! both section arrays (always present, never dropped) with row
-//! fields like `score` (not `composite`), `rank`, `language`,
-//! `newness`, `instability`, `loc`, `escalation`, and
-//! `coupling_partners` — none of which are implemented yet. Ruby
-//! CSV is a single stream with a `language` column and a
-//! RESULT_COLUMNS header, not two comment-separated sections.
+//! **PR #85 (sf-output-parity slice #10a):** JSON and CSV now match
+//! the Ruby CLI's output contract from `lib/stud_finder/cli.rb`:
 //!
-//! Treat these formats as a partial initial implementation. The
-//! parity surface is tracked as a compatibility backlog on the
-//! stud-finder Rust port (see PR #82 discussion + ATTRIBUTION.md).
+//! - **JSON** root is `{ meta, warnings, ruby: [...], javascript:
+//!   [...] }`. Both section arrays are ALWAYS present (empty arrays
+//!   when a language has no rows). Per-row fields are the Ruby
+//!   `json_file` shape — rank, language, path, score, evidence,
+//!   class, new_file, age_days, escalation, fan_in, fan_in_pct,
+//!   fan_out, fan_out_pct, instability, instability_pct, complexity,
+//!   complexity_pct, churn_commits, churn_lines, churn_pct, loc,
+//!   loc_pct, max_coupling, max_coupling_partner, coupling_partners,
+//!   coupling_pct, coverage. Field name is `score` (not
+//!   `composite`); class key is `class` (not `classification`).
+//! - **CSV** is a single combined stream with Ruby's `RESULT_COLUMNS`
+//!   header. Language column tags each row. Rows run
+//!   ruby-section-first then javascript-section.
 //!
-//! Current shape:
+//! `rank` and `language` are computed at emit time rather than
+//! stored on `ScoredFile` — rank is the 1-based position after the
+//! caller's sort within its section; language comes from the
+//! section the row was passed in.
 //!
-//! - JSON: `{ ruby: [...], javascript: [...] }`. Missing sections
-//!   drop out. Row fields = every ScoredFile field (raw signals +
-//!   `_pct` percentiles + composite + class + evidence + coupling
-//!   partner). No meta or warnings block yet.
-//! - CSV: `# Ruby` / `# JavaScript` comment headers separating two
-//!   independent sections with their own column headers.
-//! - Markdown: pipe-tables with headers + separator rows per section.
+//! **Still pending parity (follow-up slice #10b):**
 //!
-//! All emitters leave empty sections silent.
+//! - Markdown and table emit shapes stay on their sf-rust-native
+//!   form from PR #82. The Ruby markdown + table layouts include
+//!   section headers, formula descriptions, and the `MARKDOWN_COLUMNS`
+//!   subset — those land in slice #10b.
+//! - `meta.formula` (human-readable signal-inclusion label),
+//!   `meta.weights` (renormalized weight map from sf-score), and
+//!   `meta.files_skipped` (requires a skipped-files count through
+//!   from sf-cli's collector/parser pipeline).
+//! - Warning propagation: `sf-history`, `sf-newness`, and
+//!   `sf-coverage` warnings currently go to stderr only; they
+//!   need to flow into `Sections.warnings` so `meta.warnings` and
+//!   the root `warnings` array carry them. PR #85 (Ohm follow-up)
+//!   note.
 
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use sf_score::{Class, ScoredFile};
+
+/// Schema version baked into `meta.schema_version` — bumped when
+/// the JSON contract changes. Starts at 1 matching Ruby.
+pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -45,9 +60,46 @@ impl OutputFormat {
     }
 }
 
+/// Everything an emitter needs to produce one run's output. `ruby`
+/// and `js` are the pre-sorted rows per language section. `repo`
+/// is the scan root (as displayed to the user, verbatim). Warnings
+/// are already language-agnostic strings — sf-cli normalizes
+/// `HistoryWarning` / `NewnessWarning` / `CoverageWarning` into
+/// `{code, message}` payloads before passing them in.
 pub struct Sections<'a> {
     pub ruby: &'a [ScoredFile],
     pub js: &'a [ScoredFile],
+    pub repo: &'a str,
+    pub churn_days: u64,
+    pub analyzed_at: &'a str,
+    pub warnings: &'a [WarningPayload],
+    /// Total analyzed files (pre-filter). Reported as
+    /// `meta.file_count`, matching Ruby's `analysis.ruby.files.length
+    /// + analysis.javascript.files.length`. **Not** the post-filter
+    /// output row count — `--top` and `--diff-base` don't shrink
+    /// `file_count`.
+    pub file_count: usize,
+    /// `true` when a Ruby-coverage report was loaded for this
+    /// run. Gates the Ruby-section rows' coverage tri-state:
+    /// unavailable → JSON null + CSV empty cell; available but
+    /// not reported → em-dash; available + reported → number.
+    pub ruby_coverage_available: bool,
+    /// Same as `ruby_coverage_available` but for the JavaScript
+    /// section. A Ruby-only run must still emit `null` coverage
+    /// on every JS/TS row — coverage availability is PER SECTION,
+    /// not global, matching Ruby where `--ruby-coverage` and
+    /// `--js-coverage` are separate flags.
+    pub js_coverage_available: bool,
+}
+
+/// A warning payload shaped for the Ruby JSON contract. `code` is
+/// the stable machine identifier; `message` is human-readable text.
+/// Additional fields (count, etc.) go in `extra`.
+#[derive(Clone, Debug)]
+pub struct WarningPayload {
+    pub code: String,
+    pub message: String,
+    pub extra: Map<String, Value>,
 }
 
 pub fn emit(format: OutputFormat, sections: Sections<'_>) {
@@ -59,110 +111,247 @@ pub fn emit(format: OutputFormat, sections: Sections<'_>) {
     }
 }
 
-fn row_json(r: &ScoredFile) -> Value {
+fn row_json(section_language: &str, coverage_available: bool, r: &ScoredFile) -> Value {
     let mut m: Map<String, Value> = Map::new();
+    m.insert("rank".into(), json!(r.rank));
+    m.insert(
+        "language".into(),
+        json!(row_language(section_language, &r.path)),
+    );
     m.insert("path".into(), json!(r.path.display().to_string()));
+    m.insert("score".into(), json!(round4(r.composite)));
+    m.insert("evidence".into(), json!(round4(r.evidence)));
     m.insert("class".into(), json!(class_str(r.class)));
-    m.insert("composite".into(), json!(r.composite));
+    m.insert("new_file".into(), json!(r.new_file));
+    m.insert("age_days".into(), json!(r.age_days));
+    m.insert("escalation".into(), json!(r.escalation));
     m.insert("fan_in".into(), json!(r.fan_in));
+    m.insert("fan_in_pct".into(), json!(round4(r.fan_in_pct)));
     m.insert("fan_out".into(), json!(r.fan_out));
+    m.insert("fan_out_pct".into(), json!(round4(r.fan_out_pct)));
+    m.insert("instability".into(), json!(round4(r.instability)));
+    m.insert("instability_pct".into(), json!(round4(r.instability_pct)));
     m.insert("complexity".into(), json!(r.complexity));
+    m.insert("complexity_pct".into(), json!(round4(r.complexity_pct)));
     m.insert("churn_commits".into(), json!(r.churn_commits));
     m.insert("churn_lines".into(), json!(r.churn_lines));
-    m.insert("max_coupling".into(), json!(r.max_coupling));
+    m.insert("churn_pct".into(), json!(round4(r.churn_pct)));
+    m.insert("loc".into(), json!(r.loc));
+    m.insert("loc_pct".into(), json!(round4(r.loc_pct)));
+    m.insert("max_coupling".into(), json!(round4(r.max_coupling)));
     m.insert(
         "max_coupling_partner".into(),
         json!(r.max_coupling_partner.display().to_string()),
     );
-    m.insert("coverage".into(), json!(r.coverage));
-    m.insert("fan_in_pct".into(), json!(r.fan_in_pct));
-    m.insert("fan_out_pct".into(), json!(r.fan_out_pct));
-    m.insert("complexity_pct".into(), json!(r.complexity_pct));
-    m.insert("churn_pct".into(), json!(r.churn_pct));
-    m.insert("coupling_pct".into(), json!(r.coupling_pct));
-    m.insert("coverage_pct".into(), json!(r.coverage_pct));
-    m.insert("evidence".into(), json!(r.evidence));
+    m.insert("coupling_partners".into(), json!(r.coupling_partners));
+    m.insert("coupling_pct".into(), json!(round4(r.coupling_pct)));
+    // Tri-state coverage, matching Ruby:
+    //   - run-level unavailable → JSON `null`
+    //   - available but file not in report → JSON string `"—"` (em dash, Ruby placeholder)
+    //   - available + reported         → JSON number, round4
+    m.insert("coverage".into(), coverage_cell(coverage_available, r));
     Value::Object(m)
 }
 
+/// Ruby distinguishes `:javascript` (.js/.jsx) from `:typescript`
+/// (.ts/.tsx) via FileCollector::EXT_LANGUAGE. The Rust port's
+/// `Language::JavaScript` collapses both, so we recover the split
+/// at emit time by inspecting the path extension. Ruby rows stay
+/// `ruby` regardless.
+fn row_language(section_language: &str, path: &std::path::Path) -> &'static str {
+    match section_language {
+        "ruby" => "ruby",
+        _ => match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("ts") | Some("tsx") => "typescript",
+            _ => "javascript",
+        },
+    }
+}
+
+fn coverage_cell(coverage_available: bool, r: &ScoredFile) -> Value {
+    if !coverage_available {
+        Value::Null
+    } else if !r.coverage_reported {
+        json!("—")
+    } else {
+        json!(round4(r.coverage))
+    }
+}
+
+fn warnings_json(warnings: &[WarningPayload]) -> Vec<Value> {
+    warnings
+        .iter()
+        .map(|w| {
+            let mut m = w.extra.clone();
+            m.insert("code".into(), json!(w.code));
+            m.insert("message".into(), json!(w.message));
+            Value::Object(m)
+        })
+        .collect()
+}
+
 fn emit_json(sections: Sections<'_>) {
+    let mut meta = Map::new();
+    meta.insert("repo".into(), json!(sections.repo));
+    meta.insert("analyzed_at".into(), json!(sections.analyzed_at));
+    meta.insert("churn_days".into(), json!(sections.churn_days));
+    // `file_count` is the pre-filter analyzed count, matching
+    // Ruby `analysis.ruby.files.length +
+    // analysis.javascript.files.length`. `--top` and `--diff-base`
+    // shrink the emitted rows but NOT the analyzed count.
+    meta.insert("file_count".into(), json!(sections.file_count));
+    meta.insert("schema_version".into(), json!(SCHEMA_VERSION));
+    meta.insert(
+        "warnings".into(),
+        Value::Array(warnings_json(sections.warnings)),
+    );
+
+    // ALWAYS-present arrays — Ruby emits them empty rather than
+    // dropping the key. A downstream consumer can iterate both
+    // keys without checking existence.
+    let ruby_rows: Vec<Value> = sections
+        .ruby
+        .iter()
+        .map(|r| row_json("ruby", sections.ruby_coverage_available, r))
+        .collect();
+    let js_rows: Vec<Value> = sections
+        .js
+        .iter()
+        .map(|r| row_json("javascript", sections.js_coverage_available, r))
+        .collect();
+
     let mut root = Map::new();
-    if !sections.ruby.is_empty() {
-        let rows: Vec<Value> = sections.ruby.iter().map(row_json).collect();
-        root.insert("ruby".into(), Value::Array(rows));
-    }
-    if !sections.js.is_empty() {
-        let rows: Vec<Value> = sections.js.iter().map(row_json).collect();
-        root.insert("javascript".into(), Value::Array(rows));
-    }
+    root.insert("meta".into(), Value::Object(meta));
+    root.insert(
+        "warnings".into(),
+        Value::Array(warnings_json(sections.warnings)),
+    );
+    root.insert("ruby".into(), Value::Array(ruby_rows));
+    root.insert("javascript".into(), Value::Array(js_rows));
+
     let out = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_else(|_| "{}".into());
     println!("{out}");
 }
 
-fn emit_csv(sections: Sections<'_>) {
-    if !sections.ruby.is_empty() {
-        println!("# Ruby");
-        emit_csv_ruby(sections.ruby);
-    }
-    if !sections.js.is_empty() {
-        if !sections.ruby.is_empty() {
-            println!();
-        }
-        println!("# JavaScript");
-        emit_csv_js(sections.js);
-    }
-}
-
-const RUBY_HEADERS: &[&str] = &[
-    "class",
-    "score",
-    "fan_in",
-    "fan_out",
-    "complexity",
-    "churn",
-    "coupling",
-    "coverage",
+/// Ruby's `RESULT_COLUMNS`, verbatim. Column 2 is `language`,
+/// column 3 is `file` (the path). Matches `lib/stud_finder/cli.rb`
+/// on the stud-finder main branch.
+pub const RESULT_COLUMNS: &[&str] = &[
+    "rank",
+    "language",
     "file",
+    "score",
+    "evidence",
+    "class",
+    "new_file",
+    "age_days",
+    "escalation",
+    "fan_in",
+    "fan_in_pct",
+    "fan_out",
+    "fan_out_pct",
+    "instability",
+    "instability_pct",
+    "complexity",
+    "complexity_pct",
+    "churn_commits",
+    "churn_lines",
+    "churn_pct",
+    "loc",
+    "loc_pct",
+    "max_coupling",
+    "max_coupling_partner",
+    "coupling_partners",
+    "coupling_pct",
+    "coverage",
 ];
 
-const JS_HEADERS: &[&str] = &["class", "score", "fan_in", "fan_out", "complexity", "file"];
-
-fn emit_csv_ruby(rows: &[ScoredFile]) {
-    println!("{}", RUBY_HEADERS.join(","));
-    for r in rows {
+fn emit_csv(sections: Sections<'_>) {
+    println!("{}", RESULT_COLUMNS.join(","));
+    for r in sections.ruby.iter() {
+        println!("{}", csv_row("ruby", sections.ruby_coverage_available, r));
+    }
+    for r in sections.js.iter() {
         println!(
-            "{},{},{},{},{},{},{},{},{}",
-            class_str(r.class),
-            format_score(r.composite),
-            r.fan_in,
-            r.fan_out,
-            r.complexity,
-            r.churn_commits,
-            format_ratio(r.max_coupling),
-            format_ratio(r.coverage),
-            csv_escape(&r.path.display().to_string()),
+            "{}",
+            csv_row("javascript", sections.js_coverage_available, r)
         );
     }
 }
 
-fn emit_csv_js(rows: &[ScoredFile]) {
-    println!("{}", JS_HEADERS.join(","));
-    for r in rows {
-        println!(
-            "{},{},{},{},{},{}",
-            class_str(r.class),
-            format_score(r.composite),
-            r.fan_in,
-            r.fan_out,
-            r.complexity,
-            csv_escape(&r.path.display().to_string()),
-        );
+fn csv_row(section_language: &str, coverage_available: bool, r: &ScoredFile) -> String {
+    // CSV coverage cell matches Ruby `CSV.generate_line`:
+    //   - unavailable → Ruby `row[:coverage] || ''` produces an
+    //     EMPTY STRING that `CSV.generate_line` emits as quoted
+    //     `""` (verified in docker ruby:3.3.13-slim). Rust must
+    //     match — a bare empty cell would be `,,` which Ruby
+    //     emits only for `nil`, not for `''`.
+    //   - available + not reported → em-dash literal.
+    //   - available + reported → shortest-form float matching
+    //     Ruby `0.5.to_s = "0.5"` (not `"0.5000"`); integer-valued
+    //     floats keep the trailing `.0` (Ruby `0.0.to_s = "0.0"`).
+    let coverage_cell = if !coverage_available {
+        "\"\"".to_string() // emit quoted empty string verbatim
+    } else if !r.coverage_reported {
+        "—".to_string()
+    } else {
+        ruby_float_to_csv(round4(r.coverage))
+    };
+    let cells: Vec<String> = vec![
+        r.rank.to_string(),
+        csv_escape(row_language(section_language, &r.path)),
+        csv_escape(&r.path.display().to_string()),
+        format_score(r.composite),
+        format_score(r.evidence),
+        class_str(r.class).to_string(),
+        r.new_file.to_string(),
+        r.age_days.to_string(),
+        csv_escape(&r.escalation),
+        r.fan_in.to_string(),
+        format_score(r.fan_in_pct),
+        r.fan_out.to_string(),
+        format_score(r.fan_out_pct),
+        format_score(r.instability),
+        format_score(r.instability_pct),
+        r.complexity.to_string(),
+        format_score(r.complexity_pct),
+        r.churn_commits.to_string(),
+        r.churn_lines.to_string(),
+        format_score(r.churn_pct),
+        r.loc.to_string(),
+        format_score(r.loc_pct),
+        format_score(r.max_coupling),
+        csv_escape(&r.max_coupling_partner.display().to_string()),
+        r.coupling_partners.to_string(),
+        format_score(r.coupling_pct),
+        // coverage_cell is pre-escaped: `""` quoted-empty,
+        // em-dash literal, or a bare number. Never contains a
+        // comma / newline / unescaped quote, so pass through
+        // verbatim rather than running csv_escape (which would
+        // double-escape the quoted-empty form).
+        coverage_cell,
+    ];
+    cells.join(",")
+}
+
+/// Emit `x` the way Ruby `Float#to_s` would: shortest form, with
+/// a trailing `.0` preserved on integer-valued floats. Ruby's
+/// `CSV.generate_line` takes each cell's `to_s`, so a Rust-side
+/// `format!("{x}")` that drops `.0` on `0.0` → `"0"` diverges.
+fn ruby_float_to_csv(x: f64) -> String {
+    if x.is_finite() && x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x}")
     }
 }
 
 fn csv_escape(s: &str) -> String {
-    // Per RFC 4180 fields containing ',', '"', CR, or LF must be
-    // double-quoted and inner quotes doubled.
     if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         let escaped = s.replace('"', "\"\"");
         format!("\"{escaped}\"")
@@ -171,15 +360,11 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-/// Escape a cell value for a Markdown pipe-table row. Pipes are
-/// HTML-encoded as `&#124;` so the raw character never appears
-/// inside a cell — pipe-table renderers decode the entity to a
-/// literal `|`, but the raw source stays structurally parseable
-/// (a `\|` backslash escape renders correctly too but still writes
-/// a `|` byte, which confuses line-based pipe-counting). Newlines
-/// and carriage returns are HTML-encoded for the same reason.
-/// Ohm's non-blocking note on PR #82 flagged pipe/newline paths
-/// corrupting the table.
+// --- Markdown + table: unchanged from PR #82 / #83 (sf-rust-native). ---
+// Slice #10b will replace both with the Ruby markdown/table
+// contracts (section headers, formula description, MARKDOWN_COLUMNS
+// subset, filter note blockquote, footer).
+
 fn md_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -209,9 +394,22 @@ fn emit_markdown(sections: Sections<'_>) {
     }
 }
 
+const MD_RUBY_HEADERS: &[&str] = &[
+    "class",
+    "score",
+    "fan_in",
+    "fan_out",
+    "complexity",
+    "churn",
+    "coupling",
+    "coverage",
+    "file",
+];
+const MD_JS_HEADERS: &[&str] = &["class", "score", "fan_in", "fan_out", "complexity", "file"];
+
 fn emit_markdown_ruby(rows: &[ScoredFile]) {
-    println!("| {} |", RUBY_HEADERS.join(" | "));
-    println!("| {} |", vec!["---"; RUBY_HEADERS.len()].join(" | "));
+    println!("| {} |", MD_RUBY_HEADERS.join(" | "));
+    println!("| {} |", vec!["---"; MD_RUBY_HEADERS.len()].join(" | "));
     for r in rows {
         println!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -229,8 +427,8 @@ fn emit_markdown_ruby(rows: &[ScoredFile]) {
 }
 
 fn emit_markdown_js(rows: &[ScoredFile]) {
-    println!("| {} |", JS_HEADERS.join(" | "));
-    println!("| {} |", vec!["---"; JS_HEADERS.len()].join(" | "));
+    println!("| {} |", MD_JS_HEADERS.join(" | "));
+    println!("| {} |", vec!["---"; MD_JS_HEADERS.len()].join(" | "));
     for r in rows {
         println!(
             "| {} | {} | {} | {} | {} | {} |",
@@ -254,4 +452,301 @@ fn format_score(x: f64) -> String {
 
 fn format_ratio(x: f64) -> String {
     format!("{x:.2}")
+}
+
+/// Round to 4 decimals for JSON emit. Matches Ruby's
+/// `.round(4)` on percentile fields in `json_file`. Needed because
+/// sf-score's `percentile_rank_f64` keeps full f64 precision but
+/// Ruby consumers expect pre-rounded values.
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn mk_row(path: &str, composite: f64, class: Class) -> ScoredFile {
+        ScoredFile {
+            path: PathBuf::from(path),
+            fan_in: 0,
+            fan_out: 0,
+            complexity: 0,
+            churn_commits: 0,
+            churn_lines: 0,
+            loc: 0,
+            instability: 0.0,
+            max_coupling_partner: PathBuf::new(),
+            max_coupling: 0.0,
+            coupling_partners: 0,
+            coverage: 0.0,
+            fan_in_pct: 0.0,
+            fan_out_pct: 0.0,
+            complexity_pct: 0.0,
+            churn_pct: 0.0,
+            coupling_pct: 0.0,
+            coverage_pct: 0.0,
+            loc_pct: 0.0,
+            instability_pct: 0.0,
+            composite,
+            class,
+            escalation: String::new(),
+            evidence: 1.0,
+            new_file: false,
+            age_days: 0,
+            total_commits: 0,
+            newness_metadata_available: false,
+            coverage_reported: false,
+            rank: 0,
+        }
+    }
+
+    #[test]
+    fn result_columns_matches_ruby_order_exactly() {
+        // Verbatim against Ruby `lib/stud_finder/cli.rb` RESULT_COLUMNS
+        // on the stud-finder main branch. This is the CSV + meta
+        // parity contract — changing it breaks consumers.
+        assert_eq!(
+            RESULT_COLUMNS,
+            [
+                "rank",
+                "language",
+                "file",
+                "score",
+                "evidence",
+                "class",
+                "new_file",
+                "age_days",
+                "escalation",
+                "fan_in",
+                "fan_in_pct",
+                "fan_out",
+                "fan_out_pct",
+                "instability",
+                "instability_pct",
+                "complexity",
+                "complexity_pct",
+                "churn_commits",
+                "churn_lines",
+                "churn_pct",
+                "loc",
+                "loc_pct",
+                "max_coupling",
+                "max_coupling_partner",
+                "coupling_partners",
+                "coupling_pct",
+                "coverage",
+            ]
+        );
+    }
+
+    #[test]
+    fn row_json_emits_ruby_field_names() {
+        // The ScoredFile internal name is `composite`; the JSON key
+        // must be `score`. The internal enum is `Class`; the JSON
+        // key must be `class`. Any drift here breaks every
+        // downstream consumer that targets the Ruby contract.
+        let r = mk_row("app/order.rb", 0.73, Class::Branch);
+        let v = {
+            let mut r2 = r.clone();
+            r2.rank = 5;
+            row_json("ruby", true, &r2)
+        };
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("rank"), Some(&json!(5)));
+        assert_eq!(obj.get("language"), Some(&json!("ruby")));
+        assert_eq!(obj.get("path"), Some(&json!("app/order.rb")));
+        assert_eq!(obj.get("score"), Some(&json!(0.73)));
+        assert_eq!(obj.get("class"), Some(&json!("branch")));
+        // Forbid the pre-parity field names from leaking back.
+        assert!(obj.get("composite").is_none());
+        assert!(obj.get("classification").is_none());
+    }
+
+    #[test]
+    fn row_json_carries_every_result_column_field() {
+        // Walk the JSON blob and assert that every RESULT_COLUMNS
+        // entry has a corresponding JSON key (except `file` which
+        // Ruby maps to `path` in the JSON shape — documented in
+        // json_file). Catch a future ScoredFile field addition
+        // that forgets to update row_json or RESULT_COLUMNS.
+        let r = mk_row("x.rb", 0.0, Class::Leaf);
+        let v = row_json("ruby", true, &r);
+        let obj = v.as_object().unwrap();
+        for col in RESULT_COLUMNS {
+            let key = if *col == "file" { "path" } else { *col };
+            assert!(
+                obj.contains_key(key),
+                "JSON row missing key `{key}` for RESULT_COLUMN `{col}`"
+            );
+        }
+    }
+
+    #[test]
+    fn csv_row_cell_count_matches_result_columns() {
+        let r = mk_row("a.rb", 0.5, Class::Trunk);
+        let row = csv_row("ruby", true, &r);
+        let cells: Vec<&str> = row.split(',').collect();
+        assert_eq!(
+            cells.len(),
+            RESULT_COLUMNS.len(),
+            "CSV cell count must match RESULT_COLUMNS header length"
+        );
+    }
+
+    #[test]
+    fn csv_row_escapes_comma_in_path() {
+        let mut r = mk_row("weird,path.rb", 0.0, Class::Leaf);
+        r.escalation = "trunk_adjacent".to_string();
+        let row = csv_row("ruby", true, &r);
+        assert!(
+            row.contains("\"weird,path.rb\""),
+            "comma-containing path must be double-quoted: {row}"
+        );
+    }
+
+    // --- PR #85 re-review (Ohm) fixes ---
+
+    #[test]
+    fn coverage_json_is_null_when_run_level_unavailable() {
+        // When no --coverage was loaded, Ruby emits `coverage: nil`.
+        // Rust must emit JSON null, NOT the numeric 0.0.
+        let r = mk_row("a.rb", 0.0, Class::Leaf);
+        let v = row_json("ruby", false, &r);
+        assert_eq!(v.as_object().unwrap().get("coverage"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn coverage_json_is_em_dash_when_file_missing_from_report() {
+        // Run-level coverage loaded, but this file wasn't in the
+        // report. Ruby emits the em-dash placeholder "—"; Rust
+        // must match.
+        let r = mk_row("a.rb", 0.0, Class::Leaf);
+        // `coverage_reported` stays false (default from mk_row).
+        let v = row_json("ruby", true, &r);
+        assert_eq!(
+            v.as_object().unwrap().get("coverage"),
+            Some(&json!("—")),
+            "missing-from-report must emit em-dash, not 0.0"
+        );
+    }
+
+    #[test]
+    fn coverage_json_is_number_when_reported() {
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.coverage = 0.7334567;
+        r.coverage_reported = true;
+        let v = row_json("ruby", true, &r);
+        let v = v.as_object().unwrap().get("coverage").unwrap();
+        // round4 applied at emit.
+        assert_eq!(v, &json!(0.7335));
+    }
+
+    #[test]
+    fn typescript_extension_emits_typescript_language() {
+        let r_ts = mk_row("app/foo.ts", 0.0, Class::Leaf);
+        let r_tsx = mk_row("app/foo.tsx", 0.0, Class::Leaf);
+        let r_js = mk_row("app/foo.js", 0.0, Class::Leaf);
+        let v_ts = row_json("javascript", false, &r_ts);
+        let v_tsx = row_json("javascript", false, &r_tsx);
+        let v_js = row_json("javascript", false, &r_js);
+        assert_eq!(v_ts["language"], json!("typescript"));
+        assert_eq!(v_tsx["language"], json!("typescript"));
+        assert_eq!(v_js["language"], json!("javascript"));
+        // Ruby section stays "ruby" regardless of extension.
+        let r_rb = mk_row("app/foo.rb", 0.0, Class::Leaf);
+        let v_rb = row_json("ruby", false, &r_rb);
+        assert_eq!(v_rb["language"], json!("ruby"));
+    }
+
+    #[test]
+    fn row_rank_comes_from_scored_file_not_enumerate() {
+        // Ranks are assigned pre-filter in sf-cli and carried on
+        // ScoredFile. A filtered output must still emit the
+        // original rank — not renumber 1, 2, 3...
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.rank = 42;
+        let v = row_json("ruby", false, &r);
+        assert_eq!(v["rank"], json!(42));
+    }
+
+    #[test]
+    fn coverage_availability_is_per_section_not_global() {
+        // Ohm's PR #85 re-review follow-up: a Ruby-only coverage
+        // run must emit `coverage: null` on JS/TS rows, NOT the
+        // em-dash. `coverage_available` lives on each section
+        // independently.
+        let r_ruby = mk_row("a.rb", 0.0, Class::Leaf);
+        let r_js = mk_row("app/foo.js", 0.0, Class::Leaf);
+        // Ruby loaded with no entries → em-dash for Ruby row
+        // (its availability is true).
+        let v_ruby = row_json("ruby", true, &r_ruby);
+        assert_eq!(v_ruby["coverage"], json!("—"));
+        // JS lane has availability=false → null even though the
+        // run loaded Ruby coverage.
+        let v_js = row_json("javascript", false, &r_js);
+        assert_eq!(v_js["coverage"], Value::Null);
+    }
+
+    #[test]
+    fn csv_coverage_reported_is_shortest_float_form() {
+        // Ruby's `row[:coverage]` lands verbatim in
+        // CSV.generate_line as a Float, which `to_s` serializes
+        // to the shortest form — `0.5`, not `0.5000`. And
+        // integer-valued floats keep `.0` — `0.0.to_s == "0.0"`.
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.coverage = 0.5;
+        r.coverage_reported = true;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.5", "CSV coverage must be `0.5` not `0.5000`: {row}");
+
+        r.coverage = 0.0;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.0", "integer-valued floats keep `.0`: {row}");
+
+        r.coverage = 0.3333;
+        let row = csv_row("ruby", true, &r);
+        let cov = row.split(',').next_back().unwrap();
+        assert_eq!(cov, "0.3333", "fractional emits unchanged: {row}");
+    }
+
+    #[test]
+    fn csv_coverage_unavailable_is_quoted_empty_string() {
+        // Ruby `row[:coverage] || ''` yields `""` which
+        // CSV.generate_line emits as quoted `""` (verified in
+        // ruby:3.3.13-slim). A bare empty cell `,,` is Ruby's
+        // `nil` encoding, not what we want here.
+        let r = mk_row("a.rb", 0.0, Class::Leaf);
+        let row = csv_row("ruby", false, &r);
+        assert!(
+            row.ends_with(",\"\""),
+            "unavailable coverage must be quoted empty: {row}"
+        );
+    }
+
+    #[test]
+    fn csv_coverage_unreported_is_em_dash_literal() {
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.coverage_reported = false;
+        let row = csv_row("ruby", true, &r);
+        assert!(
+            row.ends_with(",—"),
+            "unreported coverage must be em-dash literal: {row}"
+        );
+    }
+
+    #[test]
+    fn json_percentile_fields_are_round4() {
+        // Ruby `json_file` applies `.round(4)` to every percentile.
+        // Make sure the emit layer rounds before serializing.
+        let mut r = mk_row("a.rb", 0.0, Class::Leaf);
+        r.fan_in_pct = 0.123456789;
+        r.churn_pct = 0.999999999;
+        let v = row_json("ruby", false, &r);
+        assert_eq!(v["fan_in_pct"], json!(0.1235));
+        assert_eq!(v["churn_pct"], json!(1.0));
+    }
 }

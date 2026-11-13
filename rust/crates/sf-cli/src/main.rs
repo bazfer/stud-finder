@@ -137,6 +137,7 @@ fn main() -> Result<()> {
         loc,
     };
     let coverage_for_newness = signals.coverage.clone();
+    let coverage_available = signals.coverage.is_some();
     let scored = Scorer::new().score_with_signals(signals);
     let mut ruby_rows = scored;
 
@@ -170,6 +171,13 @@ fn main() -> Result<()> {
             .unwrap_or(false)
     });
     sort_rows(&mut ruby_rows);
+    // Assign ranks AFTER the primary sort but BEFORE any filters
+    // (`--top`, `--diff-base`). Preserving pre-filter ranks is the
+    // Ruby contract: a `--diff-base`-filtered output can legitimately
+    // land ranks like 1, 7, 23 rather than being renumbered. Caught
+    // as Ohm's P1 on PR #85.
+    assign_ranks(&mut ruby_rows);
+    let ruby_total_analyzed = ruby_rows.len();
 
     // Build the JavaScript section on its own graph + complexity so
     // JS files don't pool into the Ruby percentile distribution.
@@ -195,10 +203,12 @@ fn main() -> Result<()> {
             sf_newness::analyze(&cli.path, &js_refs, sf_newness::NewnessConfig::default());
         sf_score::apply_newness(&mut rows, &js_newness.metadata, &js_graph, |_| false);
         sort_rows(&mut rows);
+        assign_ranks(&mut rows);
         rows
     } else {
         Vec::new()
     };
+    let js_total_analyzed = js_rows.len();
 
     // --- Diff-base filter (applied BEFORE --top) ---
     // An explicitly-requested --diff-base that CAN'T be satisfied
@@ -240,16 +250,81 @@ fn main() -> Result<()> {
             print_js_table(&js_rows);
         }
     } else {
+        // Build the warnings vector for the meta block from the
+        // signal subsystems that already ran. Currently sf-cli
+        // doesn't thread the live warning streams back here; a
+        // follow-up slice will. For now the vector is empty, which
+        // matches Ruby `Warnings.normalize([])`.
+        let warnings: Vec<output::WarningPayload> = Vec::new();
+        let analyzed_at = current_iso8601_utc();
         output::emit(
             cli.output,
             Sections {
                 ruby: &ruby_rows,
                 js: &js_rows,
+                repo: &cli.path.display().to_string(),
+                churn_days: DEFAULT_WINDOW_DAYS,
+                analyzed_at: &analyzed_at,
+                warnings: &warnings,
+                file_count: ruby_total_analyzed + js_total_analyzed,
+                // Coverage is loaded per section in Ruby (--ruby-coverage,
+                // --js-coverage). We currently only wire a single
+                // `--coverage` flag that loads for the Ruby section;
+                // JS stays unavailable. When the JS-coverage flag
+                // lands in a later slice, this gains a second
+                // boolean. Caught as Ohm's P1 on PR #85.
+                ruby_coverage_available: coverage_available,
+                js_coverage_available: false,
             },
         );
     }
 
     Ok(())
+}
+
+/// Walk the sorted rows and assign 1-based ranks. Must be called
+/// AFTER the primary sort and BEFORE any filters so filtered
+/// output preserves the Ruby-contract rank values.
+fn assign_ranks(rows: &mut [ScoredFile]) {
+    for (i, r) in rows.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
+}
+
+/// Minimal RFC3339-shaped UTC timestamp for `meta.analyzed_at`.
+/// Matches Ruby `Time.now.utc.iso8601` for the dotless-second form
+/// (2026-11-13T03:14:05Z). Not a dependency on chrono — this is one
+/// field used in one place.
+fn current_iso8601_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, hour, minute, second) = unix_epoch_to_utc_components(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Convert Unix epoch seconds to UTC (year, month, day, hour, minute, second).
+/// Standard civil-from-days algorithm — valid for epochs well beyond 2100.
+fn unix_epoch_to_utc_components(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let time_of_day = secs % 86_400;
+    let hour = (time_of_day / 3600) as u32;
+    let minute = ((time_of_day % 3600) / 60) as u32;
+    let second = (time_of_day % 60) as u32;
+
+    // Howard Hinnant's civil_from_days, shifted to a 0000-03-01 era.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = (if m <= 2 { y + 1 } else { y }) as i32;
+    (year, m, d, hour, minute, second)
 }
 
 fn parse_positive_top(s: &str) -> Result<usize, String> {

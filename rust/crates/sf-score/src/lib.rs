@@ -179,6 +179,22 @@ pub struct ScoredFile {
     /// the newness signal was disabled, the repo was shallow, or
     /// the run failed. Mirrors Ruby's `metadata_available`.
     pub newness_metadata_available: bool,
+    /// `true` when the file had an explicit entry in the loaded
+    /// coverage report. Distinguishes "coverage is 0.0 because the
+    /// file genuinely has 0% coverage" from "coverage is 0.0
+    /// because the file was missing from the report, Ruby would
+    /// emit em-dash". `false` when the coverage signal isn't
+    /// loaded at all OR when the file is missing from the report.
+    /// Pair with a run-level `coverage_available` to tell the two
+    /// apart at emit time.
+    pub coverage_reported: bool,
+    /// 1-based rank within this file's language section, assigned
+    /// AFTER the primary sort but BEFORE any filters (`--top`,
+    /// `--diff-base`). Zero when unassigned (callers that skip
+    /// ranking). Preserving pre-filter ranks is the Ruby contract
+    /// — a filtered output can land ranks 1, 7, 23, 98 rather
+    /// than being renumbered.
+    pub rank: usize,
 }
 
 /// Per-file coupling info the scorer takes in — `partner` is the
@@ -628,6 +644,12 @@ impl Scorer {
                     age_days: 0,
                     total_commits: 0,
                     newness_metadata_available: false,
+                    coverage_reported: signals
+                        .coverage
+                        .as_ref()
+                        .map(|m| m.contains_key(*path))
+                        .unwrap_or(false),
+                    rank: 0,
                 }
             })
             .collect()
