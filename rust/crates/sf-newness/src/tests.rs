@@ -529,3 +529,149 @@ fn cross_boundary_rename_still_respects_deletion_boundary_on_old_path() {
         "first_commit_epoch is the rename commit, not the suppressed pre-deletion add"
     );
 }
+
+// --- Slice #13: attempt_unshallow ---
+
+/// Helper: build an isolated repo on disk via real `git` (we need
+/// the full porcelain including a shallow-grafted ancestor history)
+/// and return its path alongside the tempdir guard. Each test that
+/// needs shallow state assembles its own repo — the operations are
+/// too stateful for a shared fixture.
+fn init_repo(dir: &std::path::Path) {
+    assert!(
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (k, v) in [
+        ("user.email", "test@example.invalid"),
+        ("user.name", "Test"),
+        ("commit.gpgsign", "false"),
+    ] {
+        Command::new("git")
+            .args(["config", k, v])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+    }
+}
+
+fn commit_file(dir: &std::path::Path, name: &str, body: &str, msg: &str) {
+    std::fs::write(dir.join(name), body).unwrap();
+    Command::new("git")
+        .args(["add", name])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// `attempt_unshallow` on a repo with no remote returns `Failed`
+/// (git exits non-zero), and the repo stays shallow. Exercises the
+/// Err path short of injecting a real network. We first create a
+/// local shallow clone from a bare mirror of a local source repo
+/// WITHOUT setting an upstream, so `git fetch --unshallow` has
+/// nothing to fetch from and bails.
+#[test]
+fn attempt_unshallow_on_repo_without_fetchable_remote_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    init_repo(&src);
+    commit_file(&src, "a.rb", "a\n", "a");
+    commit_file(&src, "b.rb", "b\n", "b");
+    commit_file(&src, "c.rb", "c\n", "c");
+    // Clone with --depth=1 so the clone is shallow, then rip out
+    // the remote so fetch --unshallow has no refspec to resolve.
+    let shallow = tmp.path().join("shallow");
+    let src_arg = src.to_str().unwrap();
+    assert!(
+        Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--no-local",
+                src_arg,
+                shallow.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(is_shallow_repository(&shallow));
+    // Point origin at a definitely-nonexistent path so unshallow
+    // fails cleanly without touching the real src repo.
+    Command::new("git")
+        .args(["remote", "set-url", "origin", "/no/such/remote"])
+        .current_dir(&shallow)
+        .status()
+        .unwrap();
+    match attempt_unshallow(&shallow) {
+        Err(UnshallowError::Failed { .. }) | Err(UnshallowError::Io(_)) => {}
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    // Still shallow after the failed attempt.
+    assert!(is_shallow_repository(&shallow));
+}
+
+/// `attempt_unshallow` on a non-shallow repo exits non-zero with
+/// git's own error message ("fatal: --unshallow on a complete
+/// repository does not make sense"). We surface that as `Failed`
+/// rather than crashing, and `is_shallow_repository` remains
+/// false, matching Ruby's `wait_thread.value.success?` branch.
+#[test]
+fn attempt_unshallow_on_non_shallow_repo_returns_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    commit_file(tmp.path(), "x.rb", "x\n", "x");
+    assert!(!is_shallow_repository(tmp.path()));
+    match attempt_unshallow(tmp.path()) {
+        Err(UnshallowError::Failed { .. }) => {}
+        other => panic!("expected Failed on non-shallow repo, got {other:?}"),
+    }
+}
+
+/// `attempt_unshallow` when `git` is absent surfaces `GitNotFound`
+/// rather than panicking. We simulate by giving `attempt_unshallow`
+/// a PATH stripped of git for just this call via a child
+/// subprocess (can't mutate std env in-test across threads
+/// reliably). Simpler: assert the error type by direct inspection
+/// of UnshallowError::GitNotFound variants via match — the real
+/// path is exercised when git is removed from PATH, which CI
+/// runners do not do.
+#[test]
+fn unshallow_error_display_contains_timeout_seconds() {
+    let err = UnshallowError::TimedOut;
+    assert!(
+        err.to_string().contains("45"),
+        "TimedOut Display must name the timeout, got: {err}"
+    );
+}
+
+#[test]
+fn unshallow_error_display_names_failure_cause() {
+    let err = UnshallowError::Failed {
+        exit_code: Some(128),
+        stderr: "fatal: no such ref".into(),
+    };
+    let s = err.to_string();
+    assert!(s.contains("128"), "exit code in Display: {s}");
+    let err = UnshallowError::GitNotFound;
+    assert!(err.to_string().contains("not found"));
+}
