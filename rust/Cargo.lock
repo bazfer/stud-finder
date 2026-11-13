@@ -735,6 +735,7 @@ dependencies = [
  "serde_json",
  "sf-core",
  "sf-coverage",
+ "sf-gate",
  "sf-history",
  "sf-js",
  "sf-newness",
@@ -755,6 +756,13 @@ dependencies = [
  "roxmltree",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "sf-gate"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 walkdir.workspace = true
 sf-core.workspace = true
 sf-coverage.workspace = true
+sf-gate.workspace = true
 sf-history.workspace = true
 sf-js.workspace = true
 sf-newness.workspace = true
