@@ -700,6 +700,7 @@ dependencies = [
  "sf-coverage",
  "sf-history",
  "sf-js",
+ "sf-newness",
  "sf-ruby",
  "sf-score",
  "tempfile",
@@ -738,6 +739,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sf-newness"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "sf-ruby"
 version = "0.0.0"
 dependencies = [
@@ -750,6 +758,7 @@ name = "sf-score"
 version = "0.0.0"
 dependencies = [
  "sf-core",
+ "sf-newness",
 ]
 
 [[package]]

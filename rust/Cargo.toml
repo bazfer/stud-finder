@@ -18,6 +18,7 @@ sf-core = { path = "crates/sf-core" }
 sf-coverage = { path = "crates/sf-coverage" }
 sf-history = { path = "crates/sf-history" }
 sf-js = { path = "crates/sf-js" }
+sf-newness = { path = "crates/sf-newness" }
 
 [profile.release]
 opt-level = 3

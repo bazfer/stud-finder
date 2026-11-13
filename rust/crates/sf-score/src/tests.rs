@@ -1171,3 +1171,347 @@ fn coupling_partners_count_forwards_from_signal() {
     assert_eq!(row(&rows, "c.rb").coupling_partners, 0);
     assert_eq!(row(&rows, "d.rb").coupling_partners, 0);
 }
+
+// --- sf-newness apply_newness (PR #84) ---
+
+use sf_newness::FileNewness;
+
+fn mk_metadata(entries: &[(&str, FileNewness)]) -> HashMap<PathBuf, FileNewness> {
+    entries
+        .iter()
+        .map(|(p, m)| (PathBuf::from(*p), m.clone()))
+        .collect()
+}
+
+#[test]
+fn apply_newness_promotes_new_leaf_to_branch_with_recency_floor() {
+    // A Leaf by composite + new_file → Branch with escalation=recency_floor.
+    let g = tiny_graph();
+    let mut rows = Scorer::new().score(&g);
+    // Find a file whose class is Leaf under default scoring.
+    let noop = row(&rows, "app/services/noop.rb").clone();
+    assert_eq!(noop.class, Class::Leaf, "setup: noop.rb is Leaf");
+    let metadata = mk_metadata(&[(
+        "app/services/noop.rb",
+        FileNewness {
+            new_file: true,
+            age_days: 2,
+            total_commits: 1,
+            metadata_available: true,
+        },
+    )]);
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    let after = row(&rows, "app/services/noop.rb");
+    assert_eq!(after.class, Class::Branch, "new_file Leaf must be promoted");
+    assert_eq!(after.escalation, "recency_floor");
+    assert!(after.new_file);
+    assert_eq!(after.age_days, 2);
+    assert_eq!(after.total_commits, 1);
+    assert!(after.newness_metadata_available);
+}
+
+#[test]
+fn apply_newness_promotes_new_file_with_trunk_dependency_to_trunk_adjacent() {
+    // Build a graph where `new.rb` depends on `hot.rb` (a Trunk).
+    let mut g = DependencyGraph::new();
+    // Use the floor-test-graph setup for hot.rb to earn Trunk by composite.
+    let peer_count = 100usize;
+    for i in 0..peer_count {
+        g.register_file(format!("peer_{i}.rb"));
+    }
+    for i in 0..peer_count {
+        for offset in 1..=50 {
+            let target_class = format!("Peer{}", (i + offset) % peer_count);
+            g.add_reference(format!("peer_{i}.rb"), target_class);
+        }
+    }
+    g.register_file("hot.rb");
+    for i in 0..30 {
+        g.add_reference(format!("peer_{i}.rb"), "Hot");
+    }
+    // Hot's score needs a boost into Trunk — feed it churn.
+    g.register_file("new.rb");
+    g.add_reference("new.rb", "Hot"); // new.rb depends on hot.rb
+    let mut churn_commits = HashMap::new();
+    let mut churn_lines = HashMap::new();
+    churn_commits.insert(PathBuf::from("hot.rb"), 100);
+    churn_lines.insert(PathBuf::from("hot.rb"), 1000);
+    let signals = Signals {
+        graph: &g,
+        complexity: HashMap::new(),
+        churn_commits,
+        churn_lines,
+        coupling: HashMap::new(),
+        coverage: None,
+        loc: HashMap::new(),
+    };
+    let mut rows = Scorer::new().score_with_signals(signals);
+    // Verify hot.rb is Trunk
+    let hot = row(&rows, "hot.rb");
+    assert_eq!(hot.class, Class::Trunk, "setup: hot.rb classifies Trunk");
+
+    let metadata = mk_metadata(&[(
+        "new.rb",
+        FileNewness {
+            new_file: true,
+            age_days: 1,
+            total_commits: 1,
+            metadata_available: true,
+        },
+    )]);
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    let new_row = row(&rows, "new.rb");
+    assert_eq!(new_row.class, Class::Trunk);
+    assert_eq!(new_row.escalation, "trunk_adjacent");
+}
+
+#[test]
+fn apply_newness_leaves_mature_files_alone() {
+    let g = tiny_graph();
+    let mut rows = Scorer::new().score(&g);
+    let before: Vec<(PathBuf, Class, String)> = rows
+        .iter()
+        .map(|r| (r.path.clone(), r.class, r.escalation.clone()))
+        .collect();
+    let metadata: HashMap<PathBuf, FileNewness> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.path.clone(),
+                FileNewness {
+                    new_file: false, // all mature
+                    age_days: 365,
+                    total_commits: 100,
+                    metadata_available: true,
+                },
+            )
+        })
+        .collect();
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.class, before[i].1, "mature file class must not change");
+        assert_eq!(
+            r.escalation, before[i].2,
+            "mature file escalation must not change"
+        );
+        assert!(!r.new_file);
+        assert_eq!(r.age_days, 365);
+        assert_eq!(r.total_commits, 100);
+    }
+}
+
+#[test]
+fn apply_newness_preserves_floor_escalation_on_mature_files() {
+    // Even if a file's metadata is available, if it isn't new_file,
+    // the preexisting escalation (complexity_floor / fan_in_floor)
+    // must survive the merge — Ruby `Newness.apply` keeps it.
+    let g = floor_test_graph();
+    let mut complexity = HashMap::new();
+    for i in 0..100 {
+        complexity.insert(PathBuf::from(format!("peer_{i}.rb")), 50);
+    }
+    complexity.insert(PathBuf::from("hot.rb"), COMPLEXITY_FLOOR);
+    let signals = Signals {
+        graph: &g,
+        complexity,
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling: HashMap::new(),
+        coverage: None,
+        loc: HashMap::new(),
+    };
+    let mut rows = Scorer::new().score_with_signals(signals);
+    let hot_before = row(&rows, "hot.rb").clone();
+    assert_eq!(hot_before.escalation, "complexity_floor");
+
+    // Mature metadata: new_file = false.
+    let metadata = mk_metadata(&[(
+        "hot.rb",
+        FileNewness {
+            new_file: false,
+            age_days: 200,
+            total_commits: 50,
+            metadata_available: true,
+        },
+    )]);
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    let hot_after = row(&rows, "hot.rb");
+    assert_eq!(
+        hot_after.escalation, "complexity_floor",
+        "mature + preexisting-floor must keep its escalation tag"
+    );
+    assert_eq!(hot_after.class, Class::Branch);
+}
+
+#[test]
+fn apply_newness_new_file_with_floor_escalation_recency_floor_wins() {
+    // A new_file that was already Branch via complexity_floor →
+    // Ruby reclassifies to Branch/recency_floor (recency_floor
+    // overrides the floor tag). Same end class, different tag.
+    let g = floor_test_graph();
+    let mut complexity = HashMap::new();
+    for i in 0..100 {
+        complexity.insert(PathBuf::from(format!("peer_{i}.rb")), 50);
+    }
+    complexity.insert(PathBuf::from("hot.rb"), COMPLEXITY_FLOOR);
+    let signals = Signals {
+        graph: &g,
+        complexity,
+        churn_commits: HashMap::new(),
+        churn_lines: HashMap::new(),
+        coupling: HashMap::new(),
+        coverage: None,
+        loc: HashMap::new(),
+    };
+    let mut rows = Scorer::new().score_with_signals(signals);
+    assert_eq!(row(&rows, "hot.rb").escalation, "complexity_floor");
+
+    let metadata = mk_metadata(&[(
+        "hot.rb",
+        FileNewness {
+            new_file: true,
+            age_days: 1,
+            total_commits: 1,
+            metadata_available: true,
+        },
+    )]);
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    let hot_after = row(&rows, "hot.rb");
+    assert_eq!(hot_after.class, Class::Branch);
+    assert_eq!(
+        hot_after.escalation, "recency_floor",
+        "recency_floor overrides a preexisting complexity_floor on a new file"
+    );
+}
+
+#[test]
+fn apply_newness_evidence_matches_ruby_formula_with_and_without_coverage() {
+    let g = tiny_graph();
+    let mut rows = Scorer::new().score(&g);
+    // All rows start with evidence = 1.0 (placeholder).
+    assert!(rows.iter().all(|r| (r.evidence - 1.0).abs() < 1e-9));
+
+    let metadata = mk_metadata(&[
+        (
+            "app/models/order.rb",
+            FileNewness {
+                new_file: false,
+                age_days: 15,     // age_component = 0.5
+                total_commits: 0, // commits_component = 0
+                metadata_available: true,
+            },
+        ),
+        (
+            "app/services/noop.rb",
+            FileNewness {
+                new_file: true,
+                age_days: 0,
+                total_commits: 0,
+                metadata_available: true,
+            },
+        ),
+    ]);
+    // order.rb HAS coverage; noop.rb does NOT.
+    let has_cov = |p: &Path| p == Path::new("app/models/order.rb");
+    apply_newness(&mut rows, &metadata, &g, has_cov);
+    let order = row(&rows, "app/models/order.rb");
+    // history_only = (0.5 + 0)/2 = 0.25
+    // with_coverage = (0.5 + 0 + 1)/3 = 0.5
+    // max = 0.5
+    assert!(
+        (order.evidence - 0.5).abs() < 1e-4,
+        "order.rb with coverage → evidence 0.5, got {}",
+        order.evidence
+    );
+    let noop = row(&rows, "app/services/noop.rb");
+    // history_only = (0 + 0)/2 = 0; no coverage → 0.
+    assert!(
+        (noop.evidence - 0.0).abs() < 1e-4,
+        "noop.rb evidence was {}",
+        noop.evidence
+    );
+
+    // A file NOT in metadata uses the disabled placeholder →
+    // evidence stays at the placeholder 1.0.
+    let user = row(&rows, "app/models/user.rb");
+    assert!(
+        (user.evidence - 1.0).abs() < 1e-9,
+        "user.rb not in metadata → evidence preserved at 1.0, got {}",
+        user.evidence
+    );
+}
+
+#[test]
+fn apply_newness_does_not_cascade_trunk_promotions() {
+    // Trunk status is frozen BEFORE pass 2, so a new file promoted
+    // to Trunk by trunk-adjacent does NOT then promote another
+    // new file whose dependency is that newly-trunk file. Matches
+    // Ruby, which snapshots `trunk_paths` once before the loop.
+    let mut g = DependencyGraph::new();
+    // Three-chain: c.rb → b.rb → a.rb (a is pre-existing Trunk).
+    for p in ["a.rb", "b.rb", "c.rb"] {
+        g.register_file(p);
+    }
+    // a.rb earns Trunk via lots of fan_in. We'll fake Trunk below
+    // by directly injecting class state after scoring — simpler.
+    g.add_reference("b.rb", "A");
+    g.add_reference("c.rb", "B");
+    let mut rows = Scorer::new().score(&g);
+    // Freeze the pre-apply_newness class map: only a.rb starts as
+    // Trunk; b.rb and c.rb start as Leaf. This is the state that
+    // would exist if a.rb were top-of-composite on a much larger
+    // graph — the test must gate the NO-CASCADE property, not the
+    // scorer's own classification logic on a 3-file toy graph.
+    for r in rows.iter_mut() {
+        r.class = match r.path.to_str().unwrap_or("") {
+            "a.rb" => Class::Trunk,
+            _ => Class::Leaf,
+        };
+        r.escalation = String::new();
+    }
+    // Sort so b.rb processes BEFORE c.rb in apply_newness's pass 2.
+    // This is the order that WOULD catch a cascade bug: if a bad
+    // implementation reads trunk_paths from the mutating rows
+    // instead of a snapshot, b.rb → Trunk mid-pass would let
+    // c.rb's trunk-adjacent check see b.rb as Trunk. With the
+    // correct implementation, trunk_paths is frozen before pass
+    // 2 so c.rb still doesn't cascade. Without the sort, HashSet
+    // iteration order could put c.rb before b.rb and the cascade
+    // bug would pass this test by luck. Caught as Ohm's P2 on
+    // PR #84.
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    let metadata = mk_metadata(&[
+        (
+            "b.rb",
+            FileNewness {
+                new_file: true,
+                age_days: 1,
+                total_commits: 1,
+                metadata_available: true,
+            },
+        ),
+        (
+            "c.rb",
+            FileNewness {
+                new_file: true,
+                age_days: 1,
+                total_commits: 1,
+                metadata_available: true,
+            },
+        ),
+    ]);
+    apply_newness(&mut rows, &metadata, &g, |_| false);
+    // b.rb should promote to Trunk (depends on Trunk a.rb).
+    assert_eq!(row(&rows, "b.rb").class, Class::Trunk);
+    assert_eq!(row(&rows, "b.rb").escalation, "trunk_adjacent");
+    // c.rb should NOT promote to Trunk even though its dependency b.rb
+    // JUST became Trunk — the trunk-set is frozen before pass 2.
+    // It should land Branch/recency_floor instead.
+    let c = row(&rows, "c.rb");
+    assert_ne!(
+        c.class,
+        Class::Trunk,
+        "cascading trunk promotion is NOT allowed — Ruby freezes trunk_paths before pass 2"
+    );
+    assert_eq!(c.escalation, "recency_floor");
+}
