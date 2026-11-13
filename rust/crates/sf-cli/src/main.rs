@@ -64,8 +64,9 @@ struct Cli {
     #[arg(long)]
     diff_base: Option<String>,
     /// Commit lookback window in days for churn + coupling signals
-    /// (Ruby default: 180).
-    #[arg(long, default_value_t = DEFAULT_WINDOW_DAYS)]
+    /// (Ruby default: 180). Rejects zero (`--churn-days must be
+    /// positive`) matching Ruby `validate_threshold!`.
+    #[arg(long, default_value_t = DEFAULT_WINDOW_DAYS, value_parser = parse_positive_churn_days)]
     churn_days: u64,
     /// Glob exclude pattern, repeatable. Applied AFTER the
     /// built-in default-rule globs (vendor/, node_modules/, etc.).
@@ -94,20 +95,32 @@ fn main() -> Result<()> {
     // Collected warning payloads flow to stderr AND Sections.warnings.
     let mut warnings: Vec<WarningPayload> = Vec::new();
 
-    // Resolve coverage path: `--ruby-coverage` wins; `--coverage` is
-    // the deprecated alias and emits a warning when used.
+    // Coverage flag resolution:
+    //  - `--coverage` used: ALWAYS emit the `coverage_flag_deprecated`
+    //    warning (Ruby emits it each time the option is parsed,
+    //    regardless of whether a later `--ruby-coverage` wins).
+    //  - `--coverage` AND `--ruby-coverage` together: reject hard.
+    //    Ruby takes last-option-wins; without ARGV order tracking
+    //    we match Ruby's SPIRIT (don't silently pick the wrong
+    //    path) by refusing the ambiguity.
+    // Caught as Ohm's P2 on PR #87.
+    if cli.coverage.is_some() {
+        eprintln!(
+            "Warning: coverage_flag_deprecated: --coverage is deprecated; use --ruby-coverage."
+        );
+        warnings.push(WarningPayload {
+            code: "coverage_flag_deprecated".into(),
+            message: "--coverage is deprecated; use --ruby-coverage instead".into(),
+        });
+    }
     let coverage_path: Option<PathBuf> = match (cli.ruby_coverage.as_ref(), cli.coverage.as_ref()) {
-        (Some(p), _) => Some(p.clone()),
-        (None, Some(p)) => {
+        (Some(_), Some(_)) => {
             eprintln!(
-                "Warning: coverage_flag_deprecated: --coverage is deprecated; use --ruby-coverage."
+                "Error: --ruby-coverage and --coverage are mutually exclusive; pass only one."
             );
-            warnings.push(WarningPayload {
-                code: "coverage_flag_deprecated".into(),
-                message: "--coverage is deprecated; use --ruby-coverage instead".into(),
-            });
-            Some(p.clone())
+            std::process::exit(2);
         }
+        (Some(p), None) | (None, Some(p)) => Some(p.clone()),
         (None, None) => None,
     };
 
@@ -115,18 +128,31 @@ fn main() -> Result<()> {
     let files = collect_result.files;
     let default_excluded_count = collect_result.default_excluded;
 
-    // Parse `--only` into a list once. Ruby splits on comma and
-    // strips each entry; empty entries are rejected.
-    let only_paths: Option<Vec<String>> = match cli.only.as_deref() {
-        Some(s) => {
-            let parts = parse_only_paths(s).unwrap_or_else(|err| {
-                eprintln!("stud-finder: {err}");
-                std::process::exit(2);
-            });
-            Some(parts)
-        }
-        None => None,
-    };
+    // Ruby `validate_filter_options!` rejects --diff-base combined
+    // with --only (cli.rb:395-396). Match the same hard error so
+    // automation that passes both by mistake fails loudly rather
+    // than getting a logical-AND surprise. Caught as Ohm's P2 on
+    // PR #87.
+    if cli.diff_base.is_some() && cli.only.is_some() {
+        eprintln!("Error: --diff-base and --only are mutually exclusive.");
+        std::process::exit(2);
+    }
+
+    // Parse `--only` into a list once. Ruby `value.split(',').map(&:strip)
+    // .reject(&:empty?)` returns an empty array when the user passes
+    // `--only ""` or `--only ","`; we match that (empty filter → emit
+    // nothing + diff_filter_empty warning path downstream) rather
+    // than rejecting at parse time.
+    let only_paths_raw: Option<Vec<String>> = cli.only.as_deref().map(parse_only_paths);
+    // Rebase repo-root-relative --only paths to the analysis root
+    // when the scan root is a subdirectory, matching Ruby
+    // `resolve_filter_set` → `rebase_to_analysis_root`. A scan of
+    // REPO/lib with `--only lib/foo.rb` must compare against
+    // `foo.rb` (the scan-root-relative row key), not `lib/foo.rb`.
+    // Caught as Ohm's P2 on PR #87.
+    let only_paths: Option<Vec<String>> = only_paths_raw
+        .as_ref()
+        .map(|paths| rebase_filter_paths(paths, &path));
     // Score the Ruby graph on its own — JS/TS files are unprocessed in
     // this slice and must NOT participate in the percentile calculation
     // (they would otherwise pin a fan_in=0/fan_out=0 row into the
@@ -326,30 +352,40 @@ fn main() -> Result<()> {
     };
     let js_total_analyzed = js_rows.len();
 
-    // --- `--only` filter (applied BEFORE `--diff-base` so the two
-    //     stack: `--only` narrows the emitted set; `--diff-base`
-    //     narrows further to changed files). Ruby applies `--only`
-    //     and `--diff-base` mutually, picking whichever was provided;
-    //     when both appear together we honor the logical AND. Rust
-    //     only_paths are repo-root-relative strings; a future slice
-    //     will rebase to analysis root like `rebase_to_analysis_root`
-    //     does for `--diff-base`.
+    // --- `--only` filter. Ruby and this port both reject combining
+    //     with --diff-base, so --only is always applied standalone
+    //     (gated by the mutual-exclusion check above). Paths were
+    //     already rebased from repo-root to scan-root earlier.
     if let Some(only) = only_paths.as_ref() {
         use std::collections::HashSet;
-        let keep: HashSet<PathBuf> = only.iter().map(PathBuf::from).collect();
-        let before_ruby = ruby_rows.len();
-        let before_js = js_rows.len();
-        ruby_rows.retain(|r| keep.contains(&r.path));
-        js_rows.retain(|r| keep.contains(&r.path));
-        if ruby_rows.is_empty() && js_rows.is_empty() && (before_ruby + before_js) > 0 {
-            eprintln!(
-                "Note: --only matched no scored files. The listed paths may be unscorable (docs, config, migrations) or outside this scan root."
-            );
+        // Empty --only list (user passed `--only ""` or `","`) is a
+        // valid filter meaning "match nothing" — Ruby emits zero rows
+        // with a `diff_filter_empty` warning. Emit the warning and
+        // clear both section row vectors.
+        if only.is_empty() {
+            eprintln!("Note: --only was empty; nothing to filter on.");
             warnings.push(WarningPayload {
-                code: "diff_no_scored_files".into(),
-                message: "diff matched no scored files; the PR may only touch unscorable files"
-                    .into(),
+                code: "diff_filter_empty".into(),
+                message: "diff filter matched no changed files; output rows are empty".into(),
             });
+            ruby_rows.clear();
+            js_rows.clear();
+        } else {
+            let keep: HashSet<PathBuf> = only.iter().map(PathBuf::from).collect();
+            let before_ruby = ruby_rows.len();
+            let before_js = js_rows.len();
+            ruby_rows.retain(|r| keep.contains(&r.path));
+            js_rows.retain(|r| keep.contains(&r.path));
+            if ruby_rows.is_empty() && js_rows.is_empty() && (before_ruby + before_js) > 0 {
+                eprintln!(
+                    "Note: --only matched no scored files. The listed paths may be unscorable (docs, config, migrations) or outside this scan root."
+                );
+                warnings.push(WarningPayload {
+                    code: "diff_no_scored_files".into(),
+                    message: "diff matched no scored files; the PR may only touch unscorable files"
+                        .into(),
+                });
+            }
         }
     }
 
@@ -502,18 +538,77 @@ fn unix_epoch_to_utc_components(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 
 /// Parse Ruby's `--only PATHS` comma-separated list, matching
 /// `value.split(',').map(&:strip).reject(&:empty?)` from
-/// `lib/stud_finder/cli.rb`. Returns `Err` only for pathological
-/// whitespace-only input so clap surfaces a clear error.
-fn parse_only_paths(s: &str) -> Result<Vec<String>, String> {
-    let out: Vec<String> = s
-        .split(',')
+/// `lib/stud_finder/cli.rb`. An all-empty input (`""` or `","`)
+/// returns `Vec::new()` — Ruby accepts the empty list and the
+/// downstream filter emits zero rows with a `diff_filter_empty`
+/// warning. Caught as Ohm non-blocking on PR #87 (parse_only_paths
+/// contract divergence).
+fn parse_only_paths(s: &str) -> Vec<String> {
+    s.split(',')
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
-        .collect();
-    if out.is_empty() {
-        return Err("--only must list at least one non-empty path".to_string());
+        .collect()
+}
+
+/// Rebase repo-root-relative filter paths to the analysis root,
+/// matching Ruby `rebase_to_analysis_root` in cli.rb. When the scan
+/// root is a subdirectory of the git repo, the prefix is stripped
+/// so filter paths compare equal to the scan-root-relative row
+/// keys. A scan rooted at the repo root (or non-git) returns paths
+/// unchanged.
+fn rebase_filter_paths(paths: &[String], scan_root: &Path) -> Vec<String> {
+    let toplevel = match git_toplevel(scan_root) {
+        Some(t) => t,
+        None => return paths.to_vec(),
+    };
+    let scan_abs = match std::fs::canonicalize(scan_root) {
+        Ok(p) => p,
+        Err(_) => return paths.to_vec(),
+    };
+    if scan_abs == toplevel {
+        return paths.to_vec();
     }
-    Ok(out)
+    let Ok(prefix_path) = scan_abs.strip_prefix(&toplevel) else {
+        return paths.to_vec();
+    };
+    let prefix = format!("{}/", prefix_path.display());
+    if prefix == "./" || prefix.is_empty() {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|p| p.starts_with(&prefix))
+        .map(|p| p.trim_start_matches(&prefix).to_string())
+        .collect()
+}
+
+fn git_toplevel(scan_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(scan_root)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&output.stdout).ok()?.trim();
+    std::fs::canonicalize(s).ok()
+}
+
+/// Parser for `--churn-days`: rejects zero to match Ruby
+/// `validate_threshold!` which raises `--churn-days must be
+/// positive` on <= 0. Caught as Ohm's P2 on PR #87.
+fn parse_positive_churn_days(s: &str) -> Result<u64, String> {
+    let n: u64 = s
+        .parse()
+        .map_err(|_| "--churn-days must be a positive integer".to_string())?;
+    if n == 0 {
+        return Err("--churn-days must be positive".to_string());
+    }
+    Ok(n)
 }
 
 fn parse_positive_top(s: &str) -> Result<usize, String> {
@@ -804,20 +899,28 @@ fn excluded_by_patterns(relative: &str, patterns: &[&str]) -> bool {
 /// plus Ruby's `globstar_directory_match?` and the suffix-`/**`
 /// prefix fallback from `FileCollector#glob_match?`.
 ///
-/// We use the `glob::Pattern` crate's matcher for the primary
-/// fnmatch call (PATHNAME semantics: `*` doesn't cross `/`). The
-/// two Ruby-specific extensions handle:
+/// Uses `glob::Pattern::matches_with` with
+/// `require_literal_separator = true` so `*` does NOT cross `/` —
+/// Ruby's `FNM_PATHNAME` semantics. Prior revision used
+/// `MatchOptions::new()` whose default `require_literal_separator`
+/// is false, so `lib/*.rb` matched `lib/deep/keep.rb`. Caught as
+/// Ohm's P1 on PR #87.
+///
+/// Two Ruby-specific extensions handle:
 ///   - `**/foo/**` → match when `relative` is `foo/...` or
 ///     `.../foo/...`
 ///   - `foo/**` → match when `relative` starts with `foo/`
 fn glob_match(pattern: &str, relative: &str) -> bool {
-    // Primary fnmatch with PATHNAME semantics.
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
     if let Ok(p) = glob::Pattern::new(pattern) {
-        if p.matches(relative) {
+        if p.matches_with(relative, options) {
             return true;
         }
     }
-    // Globstar directory match: `**/DIR/**`
     if let Some(dir) = pattern
         .strip_prefix("**/")
         .and_then(|s| s.strip_suffix("/**"))
@@ -826,7 +929,6 @@ fn glob_match(pattern: &str, relative: &str) -> bool {
             return true;
         }
     }
-    // Suffix /** prefix fallback.
     if let Some(prefix) = pattern.strip_suffix("/**") {
         if relative.starts_with(&format!("{prefix}/")) {
             return true;
@@ -835,9 +937,12 @@ fn glob_match(pattern: &str, relative: &str) -> bool {
     false
 }
 
-/// Ruby `auto_generated?` — scan the first non-blank line for the
-/// `# This file is auto-generated` sentinel. Encoding errors + I/O
-/// errors return `false` (Ruby rescues the same cases).
+/// Ruby `auto_generated?` — scan the first non-blank line and
+/// check for the regex `/\A\s*#\s*This file is auto-generated/i`.
+/// Prior revision tested a literal `# this file is auto-generated`
+/// prefix, so `#This ...` (no space) and `#   This ...` (multiple
+/// spaces) slipped through. Ruby's `\s*` matches zero or more
+/// whitespace after the `#`. Caught as Ohm's P2 on PR #87.
 fn is_auto_generated(abs: &Path) -> bool {
     let Ok(contents) = std::fs::read(abs) else {
         return false;
@@ -845,15 +950,18 @@ fn is_auto_generated(abs: &Path) -> bool {
     let Ok(text) = std::str::from_utf8(&contents) else {
         return false;
     };
+    const SENTINEL: &str = "this file is auto-generated";
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let t = line.trim_start();
-        // Case-insensitive match on the sentinel.
-        return t
-            .to_ascii_lowercase()
-            .starts_with("# this file is auto-generated");
+        let mut rest = line.trim_start();
+        let Some(after_hash) = rest.strip_prefix('#') else {
+            return false;
+        };
+        rest = after_hash.trim_start();
+        return rest.len() >= SENTINEL.len()
+            && rest[..SENTINEL.len()].eq_ignore_ascii_case(SENTINEL);
     }
     false
 }

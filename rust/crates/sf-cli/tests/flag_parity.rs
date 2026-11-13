@@ -777,6 +777,263 @@ fn only_flag_narrows_to_matching_paths_and_sets_meta() {
 }
 
 #[test]
+fn exclude_single_star_does_not_cross_directory_separator() {
+    // Ohm P1 on PR #87: Ruby `File.fnmatch` with FNM_PATHNAME treats
+    // `*` as "match anything but /". A pattern like `lib/*.rb` must
+    // NOT match `lib/deep/keep.rb`. Prior revision used
+    // MatchOptions::new() (literal_separator=false) and silently
+    // removed nested production files.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("lib/deep")).unwrap();
+    std::fs::write(tmp.path().join("lib/top.rb"), "class Top\nend\n").unwrap();
+    std::fs::write(
+        tmp.path().join("lib/deep/keep.rb"),
+        "class Keep\n  def run; end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("app.rb"), "class App\nend\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--exclude")
+        .arg("lib/*.rb")
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("lib/top.rb"),
+        "lib/top.rb must be excluded by lib/*.rb: {stdout}"
+    );
+    assert!(
+        stdout.contains("lib/deep/keep.rb"),
+        "lib/deep/keep.rb must NOT be matched by lib/*.rb (FNM_PATHNAME): {stdout}"
+    );
+}
+
+#[test]
+fn diff_base_and_only_are_mutually_exclusive() {
+    // Ohm P2 on PR #87: Ruby `validate_filter_options!` rejects
+    // --diff-base combined with --only. Rust must do the same.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--diff-base")
+        .arg("main")
+        .arg("--only")
+        .arg("order.rb")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "combined --diff-base + --only must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "expected mutually-exclusive error on stderr: {stderr}"
+    );
+}
+
+#[test]
+fn churn_days_zero_is_rejected() {
+    // Ohm P2 on PR #87: Ruby raises `--churn-days must be positive`
+    // on `<= 0`. Rust must match.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--churn-days")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "--churn-days 0 must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--churn-days must be positive"),
+        "expected positive-required error on stderr: {stderr}"
+    );
+}
+
+#[test]
+fn coverage_flag_deprecated_warning_always_emits_when_coverage_passed() {
+    // Ohm P2 on PR #87: Ruby emits `coverage_flag_deprecated` every
+    // time `--coverage` is parsed. When BOTH --coverage and
+    // --ruby-coverage are given we reject with exit 2 (Rust can't
+    // observe argv order, so refusing the ambiguity is safer than
+    // silently picking the wrong path).
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let cov = tmp.path().join("cov.json");
+    std::fs::write(&cov, r#"{"X": {"coverage": {}}}"#).unwrap();
+
+    // Standalone --coverage: warning + success.
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coverage")
+        .arg(&cov)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "standalone --coverage must succeed");
+    assert!(stderr.contains("coverage_flag_deprecated"));
+
+    // Both --ruby-coverage AND --coverage: hard reject.
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--ruby-coverage")
+        .arg(&cov)
+        .arg("--coverage")
+        .arg(&cov)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "combined --ruby-coverage + --coverage must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("coverage_flag_deprecated"),
+        "deprecated warning must still emit when both are given: {stderr}"
+    );
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "expected mutually-exclusive error on stderr: {stderr}"
+    );
+}
+
+#[test]
+fn auto_generated_sentinel_matches_ruby_regex() {
+    // Ohm P2 on PR #87: Ruby's regex is `/\A\s*#\s*This file is
+    // auto-generated/i` — zero-or-more whitespace after `#`,
+    // case-insensitive. All of these should land in
+    // default_excluded_count (not emitted).
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("no_space.rb"),
+        "#This file is auto-generated\nclass X\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("many_spaces.rb"),
+        "#   This file is auto-generated\nclass Y\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("case.rb"),
+        "# THIS FILE IS AUTO-GENERATED\nclass Z\nend\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("keep.rb"), "class Keep\nend\n").unwrap();
+    std::fs::write(tmp.path().join("another.rb"), "class Another\nend\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for excluded in ["no_space.rb", "many_spaces.rb", "case.rb"] {
+        assert!(
+            !stdout.contains(excluded),
+            "{excluded} should be auto-generated-excluded: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("keep.rb"),
+        "non-sentinel file must survive: {stdout}"
+    );
+}
+
+#[test]
+fn only_paths_rebase_to_scan_root_in_nested_scan() {
+    // Ohm P2 on PR #87: a scan of REPO/lib with `--only lib/foo.rb`
+    // (repo-root-relative) must rebase so the filter compares
+    // against the row's scan-root-relative path `foo.rb`. Ruby does
+    // this via `rebase_to_analysis_root`.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir_all(repo.join("lib/app")).unwrap();
+    write_ruby_mini_repo(&repo.join("lib/app"));
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "base"]);
+
+    // Scan lib/app, pass repo-root-relative `lib/app/order.rb` —
+    // rebase should strip `lib/app/` and compare against `order.rb`.
+    let out = Command::new(stud_finder_bin())
+        .arg(repo.join("lib/app"))
+        .arg("--only")
+        .arg("lib/app/order.rb")
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "nested-scan --only must rebase and emit 1 row: {stdout}"
+    );
+    assert!(rows[0].contains("order.rb"));
+}
+
+#[test]
+fn only_empty_list_emits_zero_rows_with_diff_filter_empty_warning() {
+    // Ohm non-blocking on PR #87: Ruby accepts `--only ""` as an
+    // empty filter and emits zero rows with `diff_filter_empty`.
+    // Match that rather than rejecting at parse time.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--only")
+        .arg("")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "empty --only must succeed (not reject): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["ruby"].as_array().unwrap().len(), 0);
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("diff_filter_empty"))),
+        "empty --only must emit diff_filter_empty warning: {warnings:?}"
+    );
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)
