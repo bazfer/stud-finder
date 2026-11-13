@@ -32,7 +32,7 @@
 //! per-file provenance record.
 
 use sf_core::DependencyGraph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Default percentile cutoff for `Trunk` classification: top 15% by
@@ -148,12 +148,37 @@ pub struct ScoredFile {
     /// percentile band, as a short tag (empty when not escalated).
     /// Current tags: `"complexity_floor"` (Leaf→Branch because raw
     /// complexity ≥ COMPLEXITY_FLOOR), `"fan_in_floor"` (Leaf→Branch
-    /// because raw fan_in ≥ FAN_IN_FLOOR). Matches Ruby
-    /// `Scorer#floored_classification`'s second return value.
-    /// Future newness slice adds `"trunk_adjacent"` and
-    /// `"recency_floor"`.
+    /// because raw fan_in ≥ FAN_IN_FLOOR), `"trunk_adjacent"`
+    /// (newness: new_file with a trunk dependency — promoted all
+    /// the way to Trunk), `"recency_floor"` (newness: new_file
+    /// that would have been Leaf or floor-escalated → promoted to
+    /// Branch). Matches Ruby `Scorer#floored_classification` +
+    /// `Newness.apply`.
     pub escalation: String,
+    /// Evidence confidence in `[0.0, 1.0]`. Starts at `1.0` from
+    /// `score_with_signals` (placeholder) and is replaced by
+    /// `apply_newness` using the Ruby formula over `age_days`,
+    /// `total_commits`, and whether the file has an explicit
+    /// coverage entry. See `sf_newness::evidence_for`.
     pub evidence: f64,
+    /// `true` when the file is within the recency window, below
+    /// the min-commits threshold, or has unknown lineage. `false`
+    /// when both thresholds are met OR when newness metadata is
+    /// unavailable (shallow repo / disabled / failed). Only
+    /// populated after `apply_newness`; defaults to `false`.
+    pub new_file: bool,
+    /// Days since the file's first commit by COMMITTER time. `0`
+    /// when the file has no history (or metadata unavailable).
+    pub age_days: u64,
+    /// Non-merge commits touching this file after rename
+    /// canonicalization and deletion boundaries. `0` when newness
+    /// is unavailable.
+    pub total_commits: usize,
+    /// `true` when the newness run produced a real record for this
+    /// file (even if that record has zero commits). `false` when
+    /// the newness signal was disabled, the repo was shallow, or
+    /// the run failed. Mirrors Ruby's `metadata_available`.
+    pub newness_metadata_available: bool,
 }
 
 /// Per-file coupling info the scorer takes in — `partner` is the
@@ -599,9 +624,81 @@ impl Scorer {
                     class,
                     escalation,
                     evidence: 1.0,
+                    new_file: false,
+                    age_days: 0,
+                    total_commits: 0,
+                    newness_metadata_available: false,
                 }
             })
             .collect()
+    }
+}
+
+/// Newness-aware reclassification + evidence replacement, matching
+/// Ruby `Newness.apply` on `lib/stud_finder/newness.rb`.
+///
+/// Two-pass walk:
+///
+/// 1. Merge newness metadata into each row and compute `evidence`
+///    via `sf_newness::evidence_for`. `escalation` is preserved
+///    from the scorer (complexity_floor / fan_in_floor) — newness
+///    rules in pass 2 may override.
+/// 2. For each row with `new_file: true`:
+///    - If any dependency is a Trunk → class = Trunk,
+///      escalation = `"trunk_adjacent"`.
+///    - Else if class == Leaf OR escalation is a floor tag →
+///      class = Branch, escalation = `"recency_floor"`.
+///    - Else: preserved.
+///
+/// `has_coverage_for(path)` names whether the file has an
+/// explicit coverage entry (Ruby `coverage&.key?(row[:path])`).
+/// Pass `|_| false` when no coverage was loaded.
+pub fn apply_newness<F>(
+    rows: &mut [ScoredFile],
+    newness: &HashMap<PathBuf, sf_newness::FileNewness>,
+    graph: &DependencyGraph,
+    has_coverage_for: F,
+) where
+    F: Fn(&Path) -> bool,
+{
+    // Pass 1: merge newness + recompute evidence.
+    for row in rows.iter_mut() {
+        let placeholder = sf_newness::FileNewness::disabled();
+        let meta = newness.get(&row.path).unwrap_or(&placeholder);
+        row.new_file = meta.new_file;
+        row.age_days = meta.age_days;
+        row.total_commits = meta.total_commits;
+        row.newness_metadata_available = meta.metadata_available;
+        if let Some(e) = sf_newness::evidence_for(meta, has_coverage_for(row.path.as_path())) {
+            row.evidence = e;
+        }
+        // escalation preserved from the scorer — pass 2 overrides.
+    }
+
+    // Snapshot of which paths are Trunk BEFORE pass 2 so trunk
+    // promotions in pass 2 don't cascade — matches Ruby, which
+    // computes `trunk_paths` once from the pre-pass rows.
+    let trunk_paths: HashSet<PathBuf> = rows
+        .iter()
+        .filter(|r| r.class == Class::Trunk)
+        .map(|r| r.path.clone())
+        .collect();
+
+    for row in rows.iter_mut() {
+        if !row.new_file {
+            continue;
+        }
+        let deps = graph.dependencies_of(row.path.as_path());
+        if deps.iter().any(|d| trunk_paths.contains(d)) {
+            row.class = Class::Trunk;
+            row.escalation = "trunk_adjacent".to_string();
+        } else if row.class == Class::Leaf
+            || row.escalation == "complexity_floor"
+            || row.escalation == "fan_in_floor"
+        {
+            row.class = Class::Branch;
+            row.escalation = "recency_floor".to_string();
+        }
     }
 }
 

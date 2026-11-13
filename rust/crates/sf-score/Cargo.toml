@@ -9,3 +9,4 @@ repository.workspace = true
 
 [dependencies]
 sf-core.workspace = true
+sf-newness.workspace = true

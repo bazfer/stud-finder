@@ -136,8 +136,39 @@ fn main() -> Result<()> {
         coverage,
         loc,
     };
+    let coverage_for_newness = signals.coverage.clone();
     let scored = Scorer::new().score_with_signals(signals);
     let mut ruby_rows = scored;
+
+    // Newness: pull per-file newness metadata + apply the
+    // reclassification + real evidence formula. Matches Ruby
+    // `apply_newness` + `Newness.apply`. Warnings go to stderr so
+    // the run still completes even on a shallow / non-repo /
+    // git-less host.
+    let newness_report =
+        sf_newness::analyze(&cli.path, &ruby_refs, sf_newness::NewnessConfig::default());
+    for warning in &newness_report.warnings {
+        match warning {
+            sf_newness::NewnessWarning::ShallowClone => eprintln!(
+                "stud-finder: shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI)"
+            ),
+            sf_newness::NewnessWarning::NotAGitRepo => {
+                eprintln!("stud-finder: not a git repository; newness signals skipped")
+            }
+            sf_newness::NewnessWarning::GitNotFound => {
+                eprintln!("stud-finder: `git` not found in PATH; newness signals skipped")
+            }
+            sf_newness::NewnessWarning::GitFailed(msg) => {
+                eprintln!("stud-finder: git log failed during newness: {msg}")
+            }
+        }
+    }
+    sf_score::apply_newness(&mut ruby_rows, &newness_report.metadata, &graph, |p| {
+        coverage_for_newness
+            .as_ref()
+            .map(|m| m.contains_key(p))
+            .unwrap_or(false)
+    });
     sort_rows(&mut ruby_rows);
 
     // Build the JavaScript section on its own graph + complexity so
@@ -157,6 +188,12 @@ fn main() -> Result<()> {
             loc: js_loc,
         };
         let mut rows = Scorer::new().score_with_signals(js_signals);
+        // Reuse the Ruby-section newness report's git run (same repo,
+        // supersets fine) rather than re-invoking git for JS. Only
+        // JS paths appear in the metadata lookup.
+        let js_newness =
+            sf_newness::analyze(&cli.path, &js_refs, sf_newness::NewnessConfig::default());
+        sf_score::apply_newness(&mut rows, &js_newness.metadata, &js_graph, |_| false);
         sort_rows(&mut rows);
         rows
     } else {

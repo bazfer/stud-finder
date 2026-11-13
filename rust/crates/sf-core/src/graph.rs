@@ -147,6 +147,38 @@ impl DependencyGraph {
     pub fn files(&self) -> impl Iterator<Item = &Path> {
         self.registered.iter().map(PathBuf::as_path)
     }
+
+    /// Set of registered FILES this file depends on, after resolving
+    /// class-name references to their defining file(s) and folding
+    /// in path-exact edges. Self-references are excluded. Matches
+    /// Ruby `Edges`'s per-file `dependencies` list used by newness'
+    /// `trunk_adjacent` rule. Unregistered or unknown paths return
+    /// an empty set.
+    pub fn dependencies_of(&self, path: &Path) -> HashSet<PathBuf> {
+        let mut out: HashSet<PathBuf> = HashSet::new();
+        if !self.registered.contains(path) {
+            return out;
+        }
+        if let Some(refs) = self.outgoing.get(path) {
+            for class in refs {
+                if let Some(defining) = self.defined_by.get(class) {
+                    for file in defining {
+                        if file.as_path() != path {
+                            out.insert(file.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(targets) = self.path_outgoing.get(path) {
+            for target in targets {
+                if target.as_path() != path {
+                    out.insert(target.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Derive a primary class name from a file path using the Zeitwerk
@@ -322,5 +354,42 @@ mod tests {
         let mut files: Vec<_> = g.files().map(|p| p.to_string_lossy().to_string()).collect();
         files.sort();
         assert_eq!(files, vec!["a.rb", "b.rb", "nested/c.rb"]);
+    }
+
+    #[test]
+    fn dependencies_of_resolves_class_refs_through_defined_by() {
+        let mut g = DependencyGraph::new();
+        g.register_file("a.rb");
+        g.register_file("b.rb");
+        g.register_file("c.rb");
+        // c.rb depends on A (-> a.rb) and B (-> b.rb)
+        g.add_reference("c.rb", "A");
+        g.add_reference("c.rb", "B");
+        let deps = g.dependencies_of(Path::new("c.rb"));
+        let names: Vec<String> = deps
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a.rb".to_string(), "b.rb".to_string()]);
+    }
+
+    #[test]
+    fn dependencies_of_folds_path_exact_edges_and_skips_self() {
+        let mut g = DependencyGraph::new();
+        g.register_file("a.rb");
+        g.register_file("b.rb");
+        g.add_path_edge("a.rb", "b.rb");
+        g.add_path_edge("a.rb", "a.rb"); // self — must drop
+        let deps = g.dependencies_of(Path::new("a.rb"));
+        assert_eq!(deps.len(), 1);
+        assert!(deps.contains(Path::new("b.rb")));
+    }
+
+    #[test]
+    fn dependencies_of_returns_empty_for_unregistered_path() {
+        let g = DependencyGraph::new();
+        assert!(g.dependencies_of(Path::new("ghost.rb")).is_empty());
     }
 }

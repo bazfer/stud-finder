@@ -1,0 +1,14 @@
+[package]
+name = "sf-newness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Per-file newness signals (age_days, total_commits, is_new) for stud-finder, from the committer-time git log."
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
