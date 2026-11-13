@@ -24,12 +24,16 @@
 use serde_json::Value;
 
 /// Score threshold for `low_evidence_high_score` — matches Ruby
-/// `HIGH_SCORE_THRESHOLD = 0.75`.
+/// `HIGH_SCORE_THRESHOLD = 0.75`. The check fires when
+/// `score >= HIGH_SCORE_THRESHOLD`.
 pub const HIGH_SCORE_THRESHOLD: f64 = 0.75;
 
 /// Evidence threshold for `low_evidence_high_score` — matches Ruby
-/// `LOW_EVIDENCE_THRESHOLD = 0.50`. Missing/null evidence counts
-/// as low.
+/// `LOW_EVIDENCE_THRESHOLD = 0.50`. The check fires when evidence
+/// is strictly less than this value (Ruby `value.to_f <
+/// LOW_EVIDENCE_THRESHOLD`) OR is missing/null. Ohm noted the
+/// prior docstring said "<=" — the code was correct, the doc was
+/// wrong.
 pub const LOW_EVIDENCE_THRESHOLD: f64 = 0.50;
 
 /// Ordered list of check names. Matches Ruby `CHECKS` verbatim so
@@ -85,12 +89,16 @@ impl GateResult {
 #[derive(Debug)]
 pub enum Error {
     InvalidJson(String),
+    InvalidReport(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::InvalidJson(msg) => write!(f, "Error: invalid JSON input: {msg}"),
+            Error::InvalidReport(msg) => {
+                write!(f, "Error: malformed stud-finder report: {msg}")
+            }
         }
     }
 }
@@ -105,10 +113,33 @@ impl std::error::Error for Error {}
 pub fn run(raw: &str) -> Result<GateResult, Error> {
     let payload: Value =
         serde_json::from_str(raw).map_err(|e| Error::InvalidJson(e.to_string()))?;
+    // Shape validation (Ohm's P1 on PR #91). Prior revision used
+    // `payload.get(key).and_then(as_array)` which silently returned
+    // None for scalar roots or non-array sections — a malformed
+    // report then became a passing gate under --enforce. Require
+    // the shape explicitly; errors surface as `Error::InvalidReport`.
+    let root_obj = payload.as_object().ok_or_else(|| {
+        Error::InvalidReport("root of stud-finder report must be a JSON object".to_string())
+    })?;
     let mut rows: Vec<&Value> = Vec::new();
     for key in ["ruby", "javascript"] {
-        if let Some(arr) = payload.get(key).and_then(|v| v.as_array()) {
-            rows.extend(arr.iter());
+        let Some(section) = root_obj.get(key) else {
+            continue;
+        };
+        if section.is_null() {
+            // Ruby `Array(nil) == []` — treat null as missing.
+            continue;
+        }
+        let arr = section.as_array().ok_or_else(|| {
+            Error::InvalidReport(format!("`{key}` section must be an array of row objects"))
+        })?;
+        for (idx, row) in arr.iter().enumerate() {
+            if !row.is_object() {
+                return Err(Error::InvalidReport(format!(
+                    "`{key}[{idx}]` must be a row object"
+                )));
+            }
+            rows.push(row);
         }
     }
 
@@ -160,12 +191,32 @@ fn row_class(row: &Value) -> Option<String> {
     row.get("class").and_then(Value::as_str).map(str::to_string)
 }
 
+/// Ruby-compatible numeric coercion: `nil → None`, number → number,
+/// string → `str.to_f` (0.0 on garbage), anything else → `None`.
+/// Caught as Ohm's P2 on PR #91 — prior revision used `as_f64()`
+/// which returned None for `"0.9"`, letting a numeric-string score
+/// skip the `low_evidence_high_score` check.
+fn coerce_f64(v: Option<&Value>) -> Option<f64> {
+    match v {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => {
+            // Ruby `"0.9".to_f == 0.9`, `"garbage".to_f == 0.0`.
+            // Rust `str::parse::<f64>()` returns Err on garbage;
+            // match Ruby by substituting 0.0.
+            Some(s.trim().parse::<f64>().unwrap_or(0.0))
+        }
+        // Bools/arrays/objects do NOT support `.to_f` in Ruby either.
+        _ => None,
+    }
+}
+
 fn row_score(row: &Value) -> Option<f64> {
-    row.get("score").and_then(Value::as_f64)
+    coerce_f64(row.get("score"))
 }
 
 fn row_evidence(row: &Value) -> Option<f64> {
-    row.get("evidence").and_then(Value::as_f64)
+    coerce_f64(row.get("evidence"))
 }
 
 fn build_finding(row: &Value, reason: &str) -> Finding {
@@ -370,5 +421,89 @@ mod tests {
     fn missing_sections_empty_input_yields_zero_findings() {
         let r = run("{}").expect("empty object is valid JSON");
         assert_eq!(r.finding_count(), 0);
+    }
+
+    // --- PR #91 Ohm P1 + P2 regressions ---
+
+    #[test]
+    fn array_root_is_rejected_as_malformed() {
+        let err = run("[]").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("malformed stud-finder report") && msg.contains("root"),
+            "expected malformed-root error: {msg}"
+        );
+    }
+
+    #[test]
+    fn scalar_root_is_rejected_as_malformed() {
+        let err = run("42").unwrap_err();
+        assert!(err.to_string().contains("malformed stud-finder report"));
+    }
+
+    #[test]
+    fn non_array_section_is_rejected_as_malformed() {
+        let err = run(r#"{"ruby": {"path": "a.rb", "class": "trunk"}}"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`ruby` section must be an array"),
+            "expected non-array section error: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_object_row_is_rejected_as_malformed() {
+        let err = run(r#"{"ruby": ["not-an-object"], "javascript": []}"#).unwrap_err();
+        assert!(err.to_string().contains("must be a row object"));
+    }
+
+    #[test]
+    fn null_section_counts_as_empty() {
+        // Ruby `Array(nil) == []`. Explicit null = zero rows, no
+        // error.
+        let r = run(r#"{"ruby": null, "javascript": null}"#).expect("null = empty");
+        assert_eq!(r.finding_count(), 0);
+    }
+
+    #[test]
+    fn numeric_string_score_triggers_high_score_check() {
+        // Ohm P2: "0.9" must coerce the same way Ruby `"0.9".to_f`
+        // does. Prior revision (`as_f64()`) treated it as missing
+        // and skipped the finding.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":"0.9","evidence":0.1}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            1,
+            "numeric-string score must coerce and trigger finding"
+        );
+    }
+
+    #[test]
+    fn numeric_string_evidence_coerces_to_high() {
+        // Conversely, `"0.8"` evidence string must coerce to 0.8 →
+        // above the LOW_EVIDENCE threshold → the row does NOT
+        // qualify for low_evidence_high_score even with a high
+        // score.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":"0.8"}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            0,
+            "numeric-string evidence must coerce and not trigger finding"
+        );
+    }
+
+    #[test]
+    fn garbage_string_evidence_coerces_to_zero_matching_ruby() {
+        // Ruby `"garbage".to_f == 0.0` → treated as low.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":"garbage"}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            1,
+            "garbage-string evidence must coerce to 0.0 (low): {:?}",
+            r.low_evidence_high_score
+        );
     }
 }
