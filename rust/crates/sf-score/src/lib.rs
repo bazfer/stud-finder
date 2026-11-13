@@ -302,66 +302,46 @@ pub struct EffectiveWeights {
     pub interaction: Option<f64>,
 }
 
-/// Compute the active-weight renormalization for a given signal set.
-/// Mirrors the inline active-weight math in `Scorer::score_with_signals`
-/// so sf-cli can report `meta.weights` without rerunning the scorer.
+/// Compute the active-weight renormalization for a given signal set,
+/// matching Ruby `Scorer#normalize_weights`.
 ///
-/// **Divergence from Ruby `Scorer#normalize_weights`:** Ruby always
-/// keeps all four `BASE_WEIGHT_KEYS` active (fan_in, fan_out,
-/// complexity, churn) regardless of whether the backing signal is
-/// present — a missing signal still occupies its share of the
-/// composite but contributes 0 to the per-file total. The Rust
-/// scorer drops absent signals from the active-weight sum, so this
-/// helper mirrors the Rust scorer rather than Ruby. The resulting
-/// weights match the composite the Rust scorer actually computed,
-/// so `meta.weights` stays truthful for THIS implementation, but
-/// byte-level diff against a Ruby run with the same signal set
-/// absent would differ on inactive-signal rows. Tracking this
-/// divergence (Ohm non-blocking on PR #86) in a follow-up so the
-/// scorer and this helper swap to Ruby's always-active behavior
-/// together.
+/// Ruby keeps all four `BASE_WEIGHT_KEYS` (fan_in, fan_out,
+/// complexity, churn) active for the renormalization denominator
+/// EVERY RUN, regardless of whether each signal is populated.
+/// Absent signals contribute 0.0 to the per-file score but still
+/// occupy their share of the weight ratio — so remaining signals
+/// do NOT grow to fill the gap. `coverage` + `interaction` add to
+/// active_total only when coverage is loaded; `coupling` only when
+/// coupling data is available.
+///
+/// Prior revision dropped absent BASE signals from the denominator
+/// (Ohm non-blocking on PR #86); the scorer and this helper swap
+/// together to the Ruby behavior in slice #10d. For a Ruby-only
+/// 4-factor run with all signals present, the numbers don't
+/// change; divergence only surfaced on runs with an absent base
+/// signal (e.g. empty complexity map).
 pub fn effective_weights(
-    has_complexity: bool,
-    has_churn: bool,
+    _has_complexity: bool,
+    _has_churn: bool,
     has_coupling: bool,
     has_coverage: bool,
 ) -> EffectiveWeights {
-    let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
-    if has_complexity {
-        active_total += BASE_WEIGHT_COMPLEXITY;
-    }
-    if has_churn {
-        active_total += BASE_WEIGHT_CHURN;
-    }
+    let mut active_total =
+        BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
     if has_coupling {
         active_total += EXTRA_WEIGHT_COUPLING;
     }
     if has_coverage {
         active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
     }
-    let fi = BASE_WEIGHT_FAN_IN / active_total;
-    let fo = BASE_WEIGHT_FAN_OUT / active_total;
-    let cx = if has_complexity {
-        BASE_WEIGHT_COMPLEXITY / active_total
-    } else {
-        0.0
-    };
-    let ch = if has_churn {
-        BASE_WEIGHT_CHURN / active_total
-    } else {
-        0.0
-    };
-    let cp = has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total);
-    let cov = has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total);
-    let int_ = has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total);
     EffectiveWeights {
-        fan_in: fi,
-        fan_out: fo,
-        complexity: cx,
-        churn: ch,
-        coupling: cp,
-        coverage: cov,
-        interaction: int_,
+        fan_in: BASE_WEIGHT_FAN_IN / active_total,
+        fan_out: BASE_WEIGHT_FAN_OUT / active_total,
+        complexity: BASE_WEIGHT_COMPLEXITY / active_total,
+        churn: BASE_WEIGHT_CHURN / active_total,
+        coupling: has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total),
+        coverage: has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total),
+        interaction: has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total),
     }
 }
 
@@ -589,17 +569,17 @@ impl Scorer {
             vec![0.0; files.len()]
         };
 
-        // Base active weight sum + optional extras. Renormalize over
-        // whatever the caller supplied; matches Ruby normalize_weights.
-        // Ruby lumps coverage + interaction into the active-key sum
-        // together via `coverage_available?`; we keep the same gate.
-        let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
-        if has_complexity {
-            active_total += BASE_WEIGHT_COMPLEXITY;
-        }
-        if has_churn {
-            active_total += BASE_WEIGHT_CHURN;
-        }
+        // Ruby `Scorer#normalize_weights` keeps ALL FOUR
+        // `BASE_WEIGHT_KEYS` active for the denominator every run,
+        // regardless of whether each signal is populated. An absent
+        // signal contributes 0 to the per-file score but its weight
+        // still occupies the ratio share — so remaining signals
+        // don't balloon to fill the gap. coverage/interaction add
+        // only when coverage is loaded; coupling only when coupling
+        // data is available. Caught as Ohm non-blocking on PR #86;
+        // fixed here in slice #10d together with effective_weights().
+        let mut active_total =
+            BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
         if has_coupling {
             active_total += EXTRA_WEIGHT_COUPLING;
         }
@@ -608,16 +588,8 @@ impl Scorer {
         }
         let w_fi = BASE_WEIGHT_FAN_IN / active_total;
         let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
-        let w_cx = if has_complexity {
-            BASE_WEIGHT_COMPLEXITY / active_total
-        } else {
-            0.0
-        };
-        let w_ch = if has_churn {
-            BASE_WEIGHT_CHURN / active_total
-        } else {
-            0.0
-        };
+        let w_cx = BASE_WEIGHT_COMPLEXITY / active_total;
+        let w_ch = BASE_WEIGHT_CHURN / active_total;
         let w_cp = if has_coupling {
             EXTRA_WEIGHT_COUPLING / active_total
         } else {

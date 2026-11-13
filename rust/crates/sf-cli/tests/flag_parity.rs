@@ -1188,6 +1188,149 @@ fn meta_only_paths_emits_original_user_input_not_rebased() {
 }
 
 #[test]
+fn branch_threshold_must_be_less_than_trunk_threshold() {
+    // Ruby `Scorer#validate!` raises `branch-threshold must be
+    // strictly less than trunk-threshold.` when the order is wrong.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--trunk-threshold")
+        .arg("50")
+        .arg("--branch-threshold")
+        .arg("60")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "invalid thresholds must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("branch-threshold must be strictly less than trunk-threshold"),
+        "expected Ruby threshold error: {stderr}"
+    );
+}
+
+#[test]
+fn trunk_threshold_above_100_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--trunk-threshold")
+        .arg("101")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "threshold > 100 must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("between 0 and 100"),
+        "expected range error: {stderr}"
+    );
+}
+
+#[test]
+fn no_newness_flag_flips_new_file_to_false_everywhere() {
+    // With `--no-newness`, sf-newness::analyze is skipped and every
+    // row should carry `new_file: false` with `age_days: 0`.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--no-newness")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let rows = v["ruby"].as_array().unwrap();
+    for r in rows {
+        assert_eq!(
+            r["new_file"],
+            serde_json::json!(false),
+            "--no-newness must flip new_file to false: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn min_files_below_threshold_emits_small_repo_warning() {
+    // A 3-file repo with --min-files=20 should emit the `small_repo`
+    // warning in both stderr and meta.warnings.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("small_repo"))),
+        "meta.warnings must carry small_repo at 3 files < default --min-files 20: {warnings:?}"
+    );
+}
+
+#[test]
+fn custom_min_files_suppresses_small_repo_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--min-files")
+        .arg("2")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("small_repo"))),
+        "--min-files below analyzed count must NOT emit small_repo: {warnings:?}"
+    );
+}
+
+#[test]
+fn weights_sum_to_one_across_four_base_signals_matching_ruby() {
+    // Ohm non-blocking fix on PR #86: Ruby `normalize_weights` keeps
+    // all four BASE_WEIGHT_KEYS active regardless of which signals
+    // are populated. Previously Rust dropped absent signals from the
+    // denominator, inflating remaining weights. A tiny 3-file repo
+    // with no git history has no churn + no coupling; the four base
+    // weights must still sum to ≈1.0 after renormalization.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let w = v["meta"]["weights"].as_object().unwrap();
+    let sum = w["fan_in"].as_f64().unwrap()
+        + w["fan_out"].as_f64().unwrap()
+        + w["complexity"].as_f64().unwrap()
+        + w["churn"].as_f64().unwrap();
+    assert!(
+        (sum - 1.0).abs() < 1e-3,
+        "four BASE_WEIGHT_KEYS should renorm to ≈1.0 even with absent signals; got {sum} from {w:?}"
+    );
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)
