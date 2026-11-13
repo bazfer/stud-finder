@@ -1331,6 +1331,92 @@ fn weights_sum_to_one_across_four_base_signals_matching_ruby() {
 }
 
 #[test]
+fn new_file_options_accept_zero_matching_ruby() {
+    // Ohm P2 on PR #88: Ruby validate_newness_options! explicitly
+    // accepts zero for --new-file-days and --new-file-min-commits
+    // (cli.rb:378-383). Zero disables that half of the recency
+    // check. Prior revision rejected zero as "value must be positive".
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    for flag in ["--new-file-days", "--new-file-min-commits"] {
+        let out = Command::new(stud_finder_bin())
+            .arg(tmp.path())
+            .arg(flag)
+            .arg("0")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{flag} 0 must succeed (Ruby accepts): stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn no_newness_flag_emits_null_evidence_not_placeholder() {
+    // Ohm P2 on PR #88: with --no-newness, newness metadata is
+    // unavailable so Ruby `Newness.evidence(...)` returns nil.
+    // JSON must emit `evidence: null`, not the scorer's placeholder
+    // 1.0, to avoid claiming maximum confidence we don't have.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--no-newness")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    for r in v["ruby"].as_array().unwrap() {
+        assert_eq!(
+            r["evidence"],
+            serde_json::Value::Null,
+            "--no-newness must emit null evidence, not placeholder: {r:?}"
+        );
+        assert_eq!(r["new_file"], serde_json::json!(false));
+    }
+}
+
+#[test]
+fn small_repo_warns_per_section_not_combined() {
+    // Ohm P2 on PR #88: Ruby score_group adds small_repo when ANY
+    // non-empty scored group is below --min-files. Prior revision
+    // used combined count, so a 2 Ruby + 2 JS repo with --min-files
+    // 3 suppressed the warning though both sections are small.
+    let tmp = tempfile::tempdir().unwrap();
+    // 2 Ruby files
+    std::fs::write(tmp.path().join("a.rb"), "class A\nend\n").unwrap();
+    std::fs::write(tmp.path().join("b.rb"), "class B\nend\n").unwrap();
+    // 2 JS files
+    std::fs::write(
+        tmp.path().join("app.js"),
+        "import { x } from './util';\nconsole.log(x);\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("util.js"), "export const x = 1;\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--min-files")
+        .arg("3")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("small_repo"))),
+        "mixed-language small-per-section must trip small_repo even if combined count ≥ threshold: {warnings:?}"
+    );
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)

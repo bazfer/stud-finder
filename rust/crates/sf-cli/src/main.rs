@@ -98,13 +98,17 @@ struct Cli {
     branch_threshold: usize,
     /// Days-since-first-commit window for the newness signal.
     /// Files with first-commit age ≤ this value are candidates for
-    /// new-file reclassification. Ruby default: 30.
-    #[arg(long, default_value_t = sf_newness::DEFAULT_DAYS, value_parser = parse_positive_u64)]
+    /// new-file reclassification. Ruby accepts zero for this field
+    /// (disables the age half of the recency check). Default: 30.
+    /// Caught as Ohm's P2 on PR #88 — prior revision rejected zero.
+    #[arg(long, default_value_t = sf_newness::DEFAULT_DAYS)]
     new_file_days: u64,
     /// Minimum total commits for a file to leave the "new" bucket.
     /// A file with fewer commits (and within `--new-file-days`)
-    /// still counts as new. Ruby default: 3.
-    #[arg(long, default_value_t = sf_newness::DEFAULT_MIN_COMMITS, value_parser = parse_positive_usize)]
+    /// still counts as new. Ruby accepts zero (disables the commit
+    /// half of the recency check). Default: 3. Caught as Ohm's P2
+    /// on PR #88 — prior revision rejected zero.
+    #[arg(long, default_value_t = sf_newness::DEFAULT_MIN_COMMITS)]
     new_file_min_commits: usize,
     /// Disable the newness signal entirely. Skips the sf-newness
     /// analyze call; every row reports `new_file: false`, no
@@ -521,16 +525,28 @@ fn main() -> Result<()> {
     let repo_display = path.display().to_string();
     let only_slice: Option<&[String]> = only_paths_raw.as_deref();
 
-    // `--min-files` advisory: Ruby emits a `small_repo` warning +
-    // stderr note when the scored population is below the threshold.
-    // Compare against the PRE-FILTER analyzed count (percentile
-    // reliability is about how many files participated in the
-    // distribution, not how many are being emitted).
-    let total_analyzed = ruby_total_analyzed + js_total_analyzed;
-    if total_analyzed < cli.min_files {
-        eprintln!(
-            "Warning: only {total_analyzed} files found. Percentile ranks are unreliable at this scale. Results are advisory only."
-        );
+    // `--min-files` advisory: Ruby `score_group` adds `small_repo`
+    // when ANY non-empty scored group is below the threshold —
+    // percentile reliability is per-section, not per-run, because
+    // Ruby + JS score in separate populations. A 12 Ruby + 12 JS
+    // repo with --min-files 20 trips the warning even though the
+    // combined count is 24. Caught as Ohm's P2 on PR #88 — prior
+    // revision used the combined count. Emit at most one warning
+    // (dedup is implicit — Warnings.normalize does it in Ruby; our
+    // Vec<WarningPayload> normalizes by uniq-by-code at JSON emit).
+    let small_sections: Vec<(&str, usize)> = [
+        ("ruby", ruby_total_analyzed),
+        ("javascript", js_total_analyzed),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0 && *n < cli.min_files)
+    .collect();
+    if !small_sections.is_empty() {
+        for (lang, n) in &small_sections {
+            eprintln!(
+                "Warning: only {n} {lang} files found. Percentile ranks are unreliable at this scale. Results are advisory only."
+            );
+        }
         warnings.push(WarningPayload {
             code: "small_repo".into(),
             message: "repo has fewer files than --min-files; results may be noisy".into(),
@@ -699,17 +715,6 @@ fn parse_positive_churn_days(s: &str) -> Result<u64, String> {
         .map_err(|_| "--churn-days must be a positive integer".to_string())?;
     if n == 0 {
         return Err("--churn-days must be positive".to_string());
-    }
-    Ok(n)
-}
-
-/// Generic positive-u64 parser (for `--new-file-days` etc.).
-fn parse_positive_u64(s: &str) -> Result<u64, String> {
-    let n: u64 = s
-        .parse()
-        .map_err(|_| "value must be a positive integer".to_string())?;
-    if n == 0 {
-        return Err("value must be positive".to_string());
     }
     Ok(n)
 }

@@ -159,8 +159,17 @@ pub struct ScoredFile {
     /// `score_with_signals` (placeholder) and is replaced by
     /// `apply_newness` using the Ruby formula over `age_days`,
     /// `total_commits`, and whether the file has an explicit
-    /// coverage entry. See `sf_newness::evidence_for`.
+    /// coverage entry. See `sf_newness::evidence_for`. When
+    /// `evidence_available` is false this field is meaningless —
+    /// readers must emit null/n/a instead.
     pub evidence: f64,
+    /// `true` when `evidence` carries a real computed value.
+    /// `false` when newness metadata was unavailable (disabled,
+    /// shallow repo, failed) so Ruby's `Newness.evidence(...)`
+    /// would have returned `nil`. The output layer gates
+    /// JSON/CSV/markdown emission on this flag to avoid claiming
+    /// confidence we don't have. Caught as Ohm's P2 on PR #88.
+    pub evidence_available: bool,
     /// `true` when the file is within the recency window, below
     /// the min-commits threshold, or has unknown lineage. `false`
     /// when both thresholds are met OR when newness metadata is
@@ -694,6 +703,15 @@ impl Scorer {
                     class,
                     escalation,
                     evidence: 1.0,
+                    // Before apply_newness runs the evidence field
+                    // carries the scorer placeholder 1.0. The
+                    // placeholder is never emitted — apply_newness
+                    // always runs on the sf-cli hot path, either
+                    // replacing it with a real value or flipping
+                    // availability off. Downstream readers must gate
+                    // emission on this flag; it stays false until
+                    // apply_newness decides.
+                    evidence_available: false,
                     new_file: false,
                     age_days: 0,
                     total_commits: 0,
@@ -745,8 +763,20 @@ pub fn apply_newness<F>(
         row.age_days = meta.age_days;
         row.total_commits = meta.total_commits;
         row.newness_metadata_available = meta.metadata_available;
-        if let Some(e) = sf_newness::evidence_for(meta, has_coverage_for(row.path.as_path())) {
-            row.evidence = e;
+        // Match Ruby `Newness.apply` which ALWAYS sets `row[:evidence]
+        // = Newness.evidence(...)`. When the result is `nil` (because
+        // `metadata_available` is false) Ruby stores nil; we flip
+        // `evidence_available` to false so output layers emit null
+        // instead of the scorer placeholder. Caught as Ohm's P2 on
+        // PR #88.
+        match sf_newness::evidence_for(meta, has_coverage_for(row.path.as_path())) {
+            Some(e) => {
+                row.evidence = e;
+                row.evidence_available = true;
+            }
+            None => {
+                row.evidence_available = false;
+            }
         }
         // escalation preserved from the scorer — pass 2 overrides.
     }
