@@ -27,7 +27,11 @@ fn write_ruby_mini_repo(root: &std::path::Path) {
 }
 
 #[test]
-fn output_json_emits_ruby_array_with_full_row_shape() {
+fn output_json_emits_ruby_parity_root_and_full_row_shape() {
+    // PR #85 (sf-output-parity slice #10a): JSON root is
+    // `{meta, warnings, ruby, javascript}` — ALL four keys always
+    // present. Per-row field names match Ruby `json_file`:
+    // `score` not `composite`, `class` not `classification`.
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let out = Command::new(stud_finder_bin())
@@ -39,41 +43,73 @@ fn output_json_emits_ruby_array_with_full_row_shape() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
-    let ruby = v.get("ruby").expect("ruby key").as_array().expect("array");
+    // Ruby-parity root keys.
+    for k in ["meta", "warnings", "ruby", "javascript"] {
+        assert!(v.get(k).is_some(), "JSON root missing `{k}`: {stdout}");
+    }
+    let meta = v.get("meta").unwrap().as_object().unwrap();
+    assert_eq!(meta.get("schema_version"), Some(&serde_json::json!(1)));
+    assert!(meta.contains_key("repo"));
+    assert!(meta.contains_key("analyzed_at"));
+    assert!(meta.contains_key("churn_days"));
+    assert!(meta.contains_key("file_count"));
+
+    let ruby = v.get("ruby").unwrap().as_array().unwrap();
     assert!(ruby.len() >= 2, "expected 2+ rows: {ruby:?}");
-    // Every row must carry the full shape.
-    let expected_keys = [
+
+    // Ruby-shape row fields. Note: `composite` must NOT be present
+    // (it's `score` in the Ruby contract); `classification` must
+    // NOT be present (it's `class`).
+    let required = [
+        "rank",
+        "language",
         "path",
+        "score",
+        "evidence",
         "class",
-        "composite",
+        "new_file",
+        "age_days",
+        "escalation",
         "fan_in",
+        "fan_in_pct",
         "fan_out",
+        "fan_out_pct",
+        "instability",
+        "instability_pct",
         "complexity",
+        "complexity_pct",
         "churn_commits",
         "churn_lines",
+        "churn_pct",
+        "loc",
+        "loc_pct",
         "max_coupling",
         "max_coupling_partner",
-        "coverage",
-        "fan_in_pct",
-        "fan_out_pct",
-        "complexity_pct",
-        "churn_pct",
+        "coupling_partners",
         "coupling_pct",
-        "coverage_pct",
-        "evidence",
+        "coverage",
     ];
+    let forbidden = ["composite", "classification"];
     for row in ruby {
-        for k in &expected_keys {
+        for k in &required {
+            assert!(row.get(k).is_some(), "row missing `{k}`: {row:?}");
+        }
+        for k in &forbidden {
             assert!(
-                row.get(k).is_some(),
-                "json row missing field `{k}`: {row:?}"
+                row.get(k).is_none(),
+                "row must NOT carry pre-parity key `{k}`: {row:?}"
             );
         }
+        assert_eq!(row.get("language"), Some(&serde_json::json!("ruby")));
     }
 }
 
 #[test]
-fn output_csv_emits_header_and_rows_per_section() {
+fn output_csv_emits_single_combined_stream_with_ruby_result_columns_header() {
+    // PR #85: CSV is now a single combined ruby+javascript stream
+    // with Ruby's RESULT_COLUMNS header (starts with
+    // rank,language,file,score,...). The old `# Ruby` / `# JavaScript`
+    // split is gone.
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let out = Command::new(stud_finder_bin())
@@ -84,16 +120,26 @@ fn output_csv_emits_header_and_rows_per_section() {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("# Ruby\n"), "no Ruby header: {stdout}");
-    let after = stdout.strip_prefix("# Ruby\n").unwrap();
-    let mut lines = after.lines();
-    let header = lines.next().expect("header line");
     assert!(
-        header.contains("class,score,fan_in"),
-        "header shape wrong: {header}"
+        !stdout.contains("# Ruby"),
+        "CSV must not include the old `# Ruby` section header: {stdout}"
     );
-    let row_count = lines.filter(|l| !l.is_empty()).count();
-    assert!(row_count >= 2, "expected 2+ data rows: {stdout}");
+    let mut lines = stdout.lines();
+    let header = lines.next().expect("header");
+    assert!(
+        header.starts_with("rank,language,file,score,evidence,class"),
+        "header does not match Ruby RESULT_COLUMNS: {header}"
+    );
+    let data_rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+    assert!(data_rows.len() >= 2, "expected 2+ data rows: {stdout}");
+    // Every data row carries the language column as the second cell.
+    for row in &data_rows {
+        let second = row.split(',').nth(1).unwrap_or("");
+        assert!(
+            second == "ruby" || second == "javascript",
+            "second cell must be the language: {row}"
+        );
+    }
 }
 
 #[test]

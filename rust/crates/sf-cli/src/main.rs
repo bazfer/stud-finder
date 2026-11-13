@@ -240,16 +240,63 @@ fn main() -> Result<()> {
             print_js_table(&js_rows);
         }
     } else {
+        // Build the warnings vector for the meta block from the
+        // signal subsystems that already ran. Currently sf-cli
+        // doesn't thread the live warning streams back here; a
+        // follow-up slice will. For now the vector is empty, which
+        // matches Ruby `Warnings.normalize([])`.
+        let warnings: Vec<output::WarningPayload> = Vec::new();
+        let analyzed_at = current_iso8601_utc();
         output::emit(
             cli.output,
             Sections {
                 ruby: &ruby_rows,
                 js: &js_rows,
+                repo: &cli.path.display().to_string(),
+                churn_days: DEFAULT_WINDOW_DAYS,
+                analyzed_at: &analyzed_at,
+                warnings: &warnings,
             },
         );
     }
 
     Ok(())
+}
+
+/// Minimal RFC3339-shaped UTC timestamp for `meta.analyzed_at`.
+/// Matches Ruby `Time.now.utc.iso8601` for the dotless-second form
+/// (2026-11-13T03:14:05Z). Not a dependency on chrono — this is one
+/// field used in one place.
+fn current_iso8601_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, hour, minute, second) = unix_epoch_to_utc_components(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Convert Unix epoch seconds to UTC (year, month, day, hour, minute, second).
+/// Standard civil-from-days algorithm — valid for epochs well beyond 2100.
+fn unix_epoch_to_utc_components(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let time_of_day = secs % 86_400;
+    let hour = (time_of_day / 3600) as u32;
+    let minute = ((time_of_day % 3600) / 60) as u32;
+    let second = (time_of_day % 60) as u32;
+
+    // Howard Hinnant's civil_from_days, shifted to a 0000-03-01 era.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let year = (if m <= 2 { y + 1 } else { y }) as i32;
+    (year, m, d, hour, minute, second)
 }
 
 fn parse_positive_top(s: &str) -> Result<usize, String> {
