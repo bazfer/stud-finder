@@ -1842,6 +1842,66 @@ fn weight_flags_apply_in_argv_order() {
 }
 
 #[test]
+fn weights_coverage_only_with_js_section_is_rejected() {
+    // Ohm P2 on PR #90 r3: a mixed Ruby+JS repo with a
+    // coverage-only vector would previously pass Ruby validation
+    // (coverage loaded) but silently score JS with defaults —
+    // JS has no coverage, no coupling, so its active_total is 0
+    // and safe_normalize falls back. Per-section active-total
+    // check must now reject.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.rb"), "class A\nend\n").unwrap();
+    std::fs::write(tmp.path().join("b.rb"), "class B\nend\n").unwrap();
+    std::fs::write(tmp.path().join("app.js"), "export const x = 1;\n").unwrap();
+    let cov = tmp.path().join("cov.json");
+    std::fs::write(&cov, r#"{"X": {"coverage": {}}}"#).unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--ruby-coverage")
+        .arg(&cov)
+        .arg("--weights")
+        .arg("fan_in:0,fan_out:0,complexity:0,churn:0,coverage:1,interaction:0,coupling:0")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "coverage-only + JS section must exit non-zero; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("active weights must be greater than 0.0"),
+        "expected active-total error: {stderr}"
+    );
+}
+
+#[test]
+fn weights_coverage_only_ruby_only_section_succeeds() {
+    // Companion to the mixed-section rejection: a Ruby-only
+    // repo with a coverage-only vector + coverage report is a
+    // VALID override — only one scoring section, and its active
+    // total is positive.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.rb"), "class A\nend\n").unwrap();
+    std::fs::write(tmp.path().join("b.rb"), "class B\nend\n").unwrap();
+    let cov = tmp.path().join("cov.json");
+    std::fs::write(&cov, r#"{"X": {"coverage": {}}}"#).unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--ruby-coverage")
+        .arg(&cov)
+        .arg("--weights")
+        .arg("fan_in:0,fan_out:0,complexity:0,churn:0,coverage:1,interaction:0,coupling:0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Ruby-only coverage-only override must succeed: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn weights_coupling_only_without_coupling_data_is_rejected() {
     // Ohm P2 on PR #90 r3: a coupling-only vector against a repo
     // with NO coupling data (non-repo path → sf-history produces no

@@ -112,6 +112,31 @@ impl RawWeights {
     /// 4. Zero interaction weight without a coverage report.
     /// 5. Active-weight total strictly > 0 given the real signal set.
     ///
+    /// Active-total-only check: returns the Ruby
+    /// `active weights must be greater than 0.0.` error when the
+    /// weight hash projected onto the given signal availability
+    /// sums to zero or less. Separate from `validate_full_override`
+    /// so per-section callers can enforce the normalization
+    /// invariant without re-running the full-vector / sum /
+    /// coverage-report CLI rules. Caught as Ohm's P2 on PR #90 r3.
+    pub fn validate_active_total(
+        &self,
+        has_coverage: bool,
+        has_coupling: bool,
+    ) -> Result<(), String> {
+        let mut active = self.fan_in + self.fan_out + self.complexity + self.churn;
+        if has_coverage {
+            active += self.coverage + self.interaction;
+        }
+        if has_coupling {
+            active += self.coupling;
+        }
+        if active <= 0.0 {
+            return Err("Error: active weights must be greater than 0.0.".to_string());
+        }
+        Ok(())
+    }
+
     /// `has_coupling` lets the check include coupling in the active
     /// total when coupling data is available — a `coupling:1.0` vector
     /// with real history is valid. Caught as Ohm's P2 on PR #90 r2.

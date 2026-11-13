@@ -504,6 +504,21 @@ fn main() -> Result<()> {
             coverage: None,
             loc: js_loc,
         };
+        // Per-section active-total check: the JS section runs
+        // without coverage and without coupling data in this port,
+        // so a `--weights` vector whose mass sits entirely in
+        // coverage/coupling leaves JS with a zero active total.
+        // Ruby `Scorer#normalize_weights` raises on that; previously
+        // safe_normalize silently fell back to defaults, producing
+        // JS rows scored by DEFAULT structural weights while
+        // `meta.weights` reported the user's custom vector. Caught
+        // as Ohm's P2 on PR #90 r3.
+        if use_custom_weights {
+            if let Err(msg) = effective_raw.validate_active_total(false, false) {
+                eprintln!("{msg}");
+                std::process::exit(2);
+            }
+        }
         let mut rows = scorer.score_with_signals(js_signals);
         // Reuse the Ruby-section newness report's git run (same repo,
         // supersets fine) rather than re-invoking git for JS. Only
