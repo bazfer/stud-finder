@@ -372,50 +372,58 @@ fn build_finding(row: &Value, reason: &str) -> Finding {
 
 /// Render the gate result as Ruby-parity markdown.
 ///
-/// Matches `Gate.markdown(result, enforce:)` verbatim on shape:
-/// `## Stud Finder gate` title, `**Mode:**` / `**Summary:**` lines,
-/// one bullet per check with a ✅/⚠️ status, then collapsed
-/// `<details>` blocks per check containing either `_No findings._`
-/// or a markdown table.
+/// Matches `Gate.markdown(result, enforce:)` verbatim, down to the
+/// trailing bytes: the Ruby implementation is a single line-array
+/// joined with `\n`, so its return value ends with ONE `\n` (from
+/// the join separator preceding the trailing empty-string that
+/// each `<details>` block appends). We mirror the same shape by
+/// building a `Vec<String>` and joining with `\n`, which also
+/// eliminates the previous risk of miscounted trailing newlines
+/// (Ohm's non-blocking note on PR #91 — the old
+/// `push_str("\n</details>\n\n")` pattern produced `\n\n` at EOF).
 pub fn markdown(result: &GateResult, enforce: bool) -> String {
-    let mut out = String::new();
-    out.push_str("## Stud Finder gate\n\n");
-    out.push_str(&format!(
-        "**Mode:** {}\n",
+    let mut lines: Vec<String> = Vec::new();
+    // Header (Ruby `markdown_header`).
+    lines.push("## Stud Finder gate".to_string());
+    lines.push(String::new());
+    lines.push(format!(
+        "**Mode:** {}",
         if enforce { "enforce" } else { "observation" }
     ));
-    out.push_str(&format!(
-        "**Summary:** {} across {} checks.\n\n",
+    lines.push(format!(
+        "**Summary:** {} across {} checks.",
         pluralize(result.finding_count(), "finding"),
         CHECKS.len()
     ));
-    // Summary bullets.
+    lines.push(String::new());
+    // Summary bullets (Ruby `markdown_summary`).
     for check in CHECKS {
         let findings = result.for_check(check);
         let status = if findings.is_empty() { "✅" } else { "⚠️" };
-        out.push_str(&format!(
-            "- {status} `{check}` — {}\n",
+        lines.push(format!(
+            "- {status} `{check}` — {}",
             pluralize(findings.len(), "finding")
         ));
     }
-    out.push('\n');
-    // Per-check collapsible details.
+    lines.push(String::new());
+    // Per-check collapsible details (Ruby `markdown_check_detail`).
     for check in CHECKS {
         let findings = result.for_check(check);
         let open = if findings.is_empty() { "" } else { " open" };
-        out.push_str(&format!("<details{open}>\n"));
-        out.push_str(&format!(
-            "<summary><strong>{check}</strong> — {}</summary>\n\n",
+        lines.push(format!("<details{open}>"));
+        lines.push(format!(
+            "<summary><strong>{check}</strong> — {}</summary>",
             pluralize(findings.len(), "finding")
         ));
+        lines.push(String::new());
         if findings.is_empty() {
-            out.push_str("_No findings._\n");
+            lines.push("_No findings._".to_string());
         } else {
-            out.push_str("| file | class | score | evidence | reason |\n");
-            out.push_str("| --- | --- | ---: | ---: | --- |\n");
+            lines.push("| file | class | score | evidence | reason |".to_string());
+            lines.push("| --- | --- | ---: | ---: | --- |".to_string());
             for f in findings {
-                out.push_str(&format!(
-                    "| `{}` | {} | {} | {} | {} |\n",
+                lines.push(format!(
+                    "| `{}` | {} | {} | {} | {} |",
                     escape_md(&f.path),
                     escape_md(f.classification.as_deref().unwrap_or("")),
                     format_number(f.score),
@@ -424,9 +432,11 @@ pub fn markdown(result: &GateResult, enforce: bool) -> String {
                 ));
             }
         }
-        out.push_str("\n</details>\n\n");
+        lines.push(String::new());
+        lines.push("</details>".to_string());
+        lines.push(String::new());
     }
-    out
+    lines.join("\n")
 }
 
 fn pluralize(count: usize, noun: &str) -> String {
