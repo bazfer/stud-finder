@@ -1673,14 +1673,16 @@ fn weights_flag_rejects_values_outside_unit_interval() {
 #[test]
 fn weights_flag_flows_into_meta_weights() {
     // A valid --weights override must land in meta.weights after
-    // renormalization. Pick fan_in dominant so after renorm it's
-    // still the largest share.
+    // renormalization. Pick fan_in dominant with all keys set so
+    // the vector sums to exactly 1.0 (Ruby validate_weights!
+    // requires sum within 0.001 of 1.0). The run has no coverage,
+    // so coverage + interaction weights must be 0.
     let tmp = tempfile::tempdir().unwrap();
     write_ruby_mini_repo(tmp.path());
     let out = Command::new(stud_finder_bin())
         .arg(tmp.path())
         .arg("--weights")
-        .arg("fan_in:0.8,fan_out:0.05,complexity:0.05,churn:0.05,coverage:0.05")
+        .arg("fan_in:0.7,fan_out:0.05,complexity:0.1,churn:0.1,coverage:0.0,interaction:0.0,coupling:0.05")
         .arg("--output")
         .arg("json")
         .output()
@@ -1692,9 +1694,6 @@ fn weights_flag_flows_into_meta_weights() {
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     let w = v["meta"]["weights"].as_object().unwrap();
-    // After renormalizing over the four base signals (no coverage
-    // loaded here, so coverage/interaction stay out), fan_in's
-    // share should dominate the others.
     let fi = w["fan_in"].as_f64().unwrap();
     let fo = w["fan_out"].as_f64().unwrap();
     assert!(fi > fo * 5.0, "fan_in share should dominate: {w:?}");
@@ -1731,6 +1730,168 @@ fn interaction_weight_flag_overrides_weights_entry() {
     assert!(
         interaction > 0.2,
         "--interaction-weight 0.3 should give a larger share: {interaction}"
+    );
+}
+
+#[test]
+fn weights_flag_rejects_nan_as_non_float() {
+    // Ohm P1 on PR #90: NaN must be rejected at parse time as
+    // "weight values must be floats." Rust's f64 parser accepts
+    // `NaN` strings, so filter on `is_finite` before range check.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:NaN,fan_out:0.1,complexity:0.2,churn:0.2,coverage:0.1,interaction:0.0,coupling:0.05")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "NaN weight must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("weight values must be floats"),
+        "expected non-float error on NaN: {stderr}"
+    );
+}
+
+#[test]
+fn weights_flag_rejects_non_unit_sum() {
+    // Ohm P2 on PR #90: Ruby validate_weights! requires raw sum
+    // within 0.001 of 1.0.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0.5,fan_out:0.05,complexity:0.05,churn:0.05,coverage:0.05")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sum to 1.0"),
+        "expected sum error: {stderr}"
+    );
+}
+
+#[test]
+fn weights_positive_coverage_without_report_is_rejected() {
+    // Ohm P2 on PR #90: coverage/interaction weight > 0 without a
+    // loaded coverage report is rejected.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0.6,fan_out:0.05,complexity:0.1,churn:0.1,coverage:0.1,interaction:0.0,coupling:0.05")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "coverage>0 without report must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("coverage report"),
+        "expected coverage-required error: {stderr}"
+    );
+}
+
+#[test]
+fn weight_flags_apply_in_argv_order() {
+    // Ohm P2 on PR #90: Ruby OptionParser mutates the weights hash
+    // in ARGV order. Both orders must succeed and produce distinct
+    // effective weights. Previously the per-key flags always
+    // beat --weights regardless of position.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out1 = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coupling-weight")
+        .arg("0.2")
+        .arg("--weights")
+        .arg("fan_in:0.6,fan_out:0.05,complexity:0.1,churn:0.1,coverage:0.0,interaction:0.0,coupling:0.15")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    // Reversed order with the same two values.
+    let out2 = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0.6,fan_out:0.05,complexity:0.1,churn:0.1,coverage:0.0,interaction:0.0,coupling:0.15")
+        .arg("--coupling-weight")
+        .arg("0.2")
+        .output()
+        .unwrap();
+    // The second run reassigns coupling=0.2 AFTER --weights so the
+    // raw sum is 0.6+0.05+0.1+0.1+0+0+0.2 = 1.05 → sum-violation
+    // if full validate fired. Ruby's validate only fires on
+    // `--weights` presence (full vector) and runs over the FINAL
+    // merged hash. So the sum 1.05 should fail.
+    assert!(
+        !out2.status.success(),
+        "argv-order change that makes raw-sum deviate from 1.0 must exit non-zero: stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+}
+
+#[test]
+fn coupling_weight_zero_strips_coupling_from_formula() {
+    // Ohm P2 on PR #90: a run WITH coupling data but
+    // --coupling-weight 0 must label as 4-factor, not
+    // "4-factor + coupling".
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.rb"), "class A\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\nend\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "c1"]);
+    std::fs::write(repo.join("a.rb"), "class A\n  def x; end\nend\n").unwrap();
+    std::fs::write(repo.join("b.rb"), "class B\n  def x; end\nend\n").unwrap();
+    run_git(&["commit", "-qam", "c2"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(repo)
+        .arg("--coupling-weight")
+        .arg("0")
+        .arg("--coupling-min-commits")
+        .arg("1")
+        .arg("--coupling-threshold")
+        .arg("0.0")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let formula = v["meta"]["formula"].as_str().unwrap();
+    assert!(
+        !formula.contains("+ coupling"),
+        "coupling-weight 0 with coupling data must drop `+ coupling`: {formula}"
     );
 }
 

@@ -370,28 +370,33 @@ fn main() -> Result<()> {
     // from Ruby's 0-100 percentile integers to the sf-score 0.0-1.0
     // floats the composite classification uses. Custom weights (if
     // any) overlay on top of either `--weights` or the Ruby defaults.
-    let custom_weights = cli.weights.as_deref().map(|s| {
-        parse_weights_flag(s).unwrap_or_else(|err| {
+    // Walk raw ARGV so weight flags apply in the user's declared
+    // order. Ruby `OptionParser` mutates `@options[:weights]` as it
+    // encounters each flag; a later `--weights` REPLACES whatever
+    // earlier `--coupling-weight` / `--interaction-weight` set, and
+    // vice versa. clap's derive collapses to final values, losing
+    // the order needed for parity. Caught as Ohm's P2 on PR #90.
+    let (effective_raw, use_custom_weights) = apply_weight_overrides_in_argv_order()
+        .unwrap_or_else(|err| {
             eprintln!("{err}");
             std::process::exit(2);
-        })
-    });
-    let effective_raw = {
-        let mut w = custom_weights.unwrap_or_default();
-        if let Some(i) = cli.interaction_weight {
-            w.interaction = i;
+        });
+    // Ruby `validate_weights!` fires only when `--weights` provided
+    // a full-vector replacement — not for the per-key overlay flags
+    // alone. The full-vector check enforces sum-to-1.0 within 0.001
+    // AND rejects positive coverage/interaction without coverage.
+    // Gate on `--weights` presence, not on `use_custom_weights`.
+    // Caught as Ohm's P2 on PR #90.
+    let full_weights_override = cli.weights.is_some();
+    if full_weights_override {
+        let has_coverage_for_validate = cli.ruby_coverage.is_some() || cli.coverage.is_some();
+        if let Err(msg) = effective_raw.validate_full_override(has_coverage_for_validate) {
+            eprintln!("{msg}");
+            std::process::exit(2);
         }
-        if let Some(c) = cli.coupling_weight {
-            w.coupling = c;
-        }
-        // Ruby `--interaction-weight` + `--coupling-weight` both
-        // range-check (0.0..=1.0); parse_unit_float enforced that
-        // already.
-        w
-    };
-    let use_custom_weights = custom_weights.is_some()
-        || cli.interaction_weight.is_some()
-        || cli.coupling_weight.is_some();
+    }
+    let _ = cli.interaction_weight;
+    let _ = cli.coupling_weight;
     let scorer = {
         let mut s = Scorer::with_floors(
             cli.trunk_threshold as f64 / 100.0,
@@ -595,13 +600,20 @@ fn main() -> Result<()> {
         // populated for JS in this slice.
         (has_js_complexity, false, false)
     };
-    let formula = output::formula_label(has_coverage, has_coupling);
     let _ = (has_complexity, has_churn);
     let weights = if use_custom_weights {
         sf_score::effective_weights_from(&effective_raw, has_coupling, has_coverage)
     } else {
         sf_score::effective_weights(true, true, has_coupling, has_coverage)
     };
+    // Formula label gates `+ coupling` on BOTH the signal being
+    // present AND the effective coupling weight being positive —
+    // Ruby `json_formula` reads `normalized_weights[:coupling] > 0`.
+    // A `--coupling-weight 0` run with coupling data still labels
+    // as `4-factor` because coupling contributes zero. Caught as
+    // Ohm's P2 on PR #90.
+    let coupling_contributes = weights.coupling.map(|c| c > 0.0).unwrap_or(false);
+    let formula = output::formula_label(has_coverage, coupling_contributes);
     // Ruby `meta.filtered` is set ONLY when `filter_set` is
     // populated — i.e. `--diff-base` or `--only`. `--top` is a
     // truncation knob, not a filter. Caught as Ohm's P2 on PR #86.
@@ -825,6 +837,74 @@ fn parse_positive_u64(s: &str) -> Result<u64, String> {
 /// floats in `[0.0, 1.0]`. Missing `interaction` defaults to 0.0;
 /// missing `coupling` defaults to 0.05 — matches Ruby `parse_weights`
 /// at `lib/stud_finder/cli.rb:322`.
+/// Walk `std::env::args()` and apply weight flags in the order
+/// they appear. Returns `(RawWeights, custom_applied)` — the
+/// boolean is true when any of the three flags was present.
+///
+/// Semantics match Ruby `OptionParser`:
+/// - `--weights W` REPLACES the entire raw-weights hash with the
+///   parsed one.
+/// - `--interaction-weight N` / `--coupling-weight N` overwrite
+///   only that key on whatever hash is currently in place.
+/// - Later flags beat earlier flags verbatim.
+///
+/// Caught as Ohm's P2 on PR #90 (pre-fix clap-derive version
+/// always layered the per-key flags last, regardless of argv order).
+fn apply_weight_overrides_in_argv_order() -> Result<(sf_score::RawWeights, bool), String> {
+    let argv: Vec<String> = std::env::args().collect();
+    let mut raw = sf_score::RawWeights::default();
+    let mut any = false;
+    let mut i = 0usize;
+    while i < argv.len() {
+        let arg = &argv[i];
+        // Support `--flag value` and `--flag=value` for each of the
+        // three weight flags.
+        let (key, value): (Option<&str>, Option<String>) =
+            if let Some(rest) = arg.strip_prefix("--weights=") {
+                (Some("weights"), Some(rest.to_string()))
+            } else if arg == "--weights" {
+                let v = argv.get(i + 1).cloned();
+                i += 1;
+                (Some("weights"), v)
+            } else if let Some(rest) = arg.strip_prefix("--interaction-weight=") {
+                (Some("interaction"), Some(rest.to_string()))
+            } else if arg == "--interaction-weight" {
+                let v = argv.get(i + 1).cloned();
+                i += 1;
+                (Some("interaction"), v)
+            } else if let Some(rest) = arg.strip_prefix("--coupling-weight=") {
+                (Some("coupling"), Some(rest.to_string()))
+            } else if arg == "--coupling-weight" {
+                let v = argv.get(i + 1).cloned();
+                i += 1;
+                (Some("coupling"), v)
+            } else {
+                (None, None)
+            };
+        if let (Some(k), Some(v)) = (key, value) {
+            match k {
+                "weights" => {
+                    raw = parse_weights_flag(&v)?;
+                    any = true;
+                }
+                "interaction" => {
+                    let n: f64 = parse_unit_float(&v)?;
+                    raw.interaction = n;
+                    any = true;
+                }
+                "coupling" => {
+                    let n: f64 = parse_unit_float(&v)?;
+                    raw.coupling = n;
+                    any = true;
+                }
+                _ => unreachable!(),
+            }
+        }
+        i += 1;
+    }
+    Ok((raw, any))
+}
+
 fn parse_weights_flag(s: &str) -> Result<sf_score::RawWeights, String> {
     let mut map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for entry in s.split(',') {
@@ -854,6 +934,14 @@ fn parse_weights_flag(s: &str) -> Result<sf_score::RawWeights, String> {
             "Error: weights must include fan_in, fan_out, complexity, churn, and coverage."
                 .to_string(),
         );
+    }
+    // Ruby `Float(raw)` rejects `NaN` / `Infinity` strings with
+    // ArgumentError → the parse_weights rescue branch surfaces as
+    // "weight values must be floats." Match that semantic by
+    // treating non-finite weights as parse errors, not range
+    // errors. Caught as Ohm's P1 on PR #90.
+    if map.values().any(|v| !v.is_finite()) {
+        return Err("Error: weight values must be floats.".to_string());
     }
     if map.values().any(|v| *v < 0.0 || *v > 1.0) {
         return Err("Error: weight values must be between 0.0 and 1.0.".to_string());

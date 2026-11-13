@@ -89,6 +89,70 @@ impl Default for RawWeights {
     }
 }
 
+impl RawWeights {
+    /// Sum of all seven raw weights (raw, not renormalized). Ruby
+    /// `validate_weights!` requires this to equal 1.0 within 0.001
+    /// when the full-vector override is active.
+    pub fn sum(&self) -> f64 {
+        self.fan_in
+            + self.fan_out
+            + self.complexity
+            + self.churn
+            + self.coverage
+            + self.interaction
+            + self.coupling
+    }
+
+    /// Match Ruby `validate_weights!` (`lib/stud_finder/cli.rb:416`)
+    /// — gated by `--weights`/`custom_weights`. Requires:
+    /// 1. Every weight finite (parse_weights rejects NaN earlier
+    ///    but a programmatic caller may still build one).
+    /// 2. Sum within 0.001 of 1.0.
+    /// 3. Zero coverage AND interaction weight when coverage is
+    ///    not available for the run.
+    /// 4. Active-weight total strictly > 0 (Ruby raises
+    ///    `active weights must be greater than 0.0.` from the
+    ///    scorer itself, folded in here so sf-cli errors before
+    ///    calling into sf-score).
+    ///
+    /// Caught as Ohm's P1 + P2 on PR #90.
+    pub fn validate_full_override(&self, has_coverage: bool) -> Result<(), String> {
+        if !self.fan_in.is_finite()
+            || !self.fan_out.is_finite()
+            || !self.complexity.is_finite()
+            || !self.churn.is_finite()
+            || !self.coverage.is_finite()
+            || !self.interaction.is_finite()
+            || !self.coupling.is_finite()
+        {
+            return Err("Error: weight values must be floats.".to_string());
+        }
+        if (self.sum() - 1.0).abs() > 0.001 {
+            return Err("Error: weights must sum to 1.0.".to_string());
+        }
+        if !has_coverage && (self.coverage > 0.0 || self.interaction > 0.0) {
+            return Err(
+                "Error: coverage and interaction weights require a coverage report.".to_string(),
+            );
+        }
+        // Active-total: BASE_KEYS (always) + coverage+interaction (if
+        // coverage) + coupling (if coupling data present). We don't
+        // know coupling availability here; use the lower bound by
+        // assuming no coupling signal — a zero base + optional-only
+        // override would still raise.
+        let base_total = self.fan_in + self.fan_out + self.complexity + self.churn;
+        let with_cov = if has_coverage {
+            base_total + self.coverage + self.interaction
+        } else {
+            base_total
+        };
+        if with_cov <= 0.0 {
+            return Err("Error: active weights must be greater than 0.0.".to_string());
+        }
+        Ok(())
+    }
+}
+
 // Default base weights are kept as named constants so sf-score
 // tests can assert against them symbolically. The production
 // scoring path reads the equivalent fields on `RawWeights::default`
