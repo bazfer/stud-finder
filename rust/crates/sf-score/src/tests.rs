@@ -1469,6 +1469,17 @@ fn apply_newness_does_not_cascade_trunk_promotions() {
         };
         r.escalation = String::new();
     }
+    // Sort so b.rb processes BEFORE c.rb in apply_newness's pass 2.
+    // This is the order that WOULD catch a cascade bug: if a bad
+    // implementation reads trunk_paths from the mutating rows
+    // instead of a snapshot, b.rb → Trunk mid-pass would let
+    // c.rb's trunk-adjacent check see b.rb as Trunk. With the
+    // correct implementation, trunk_paths is frozen before pass
+    // 2 so c.rb still doesn't cascade. Without the sort, HashSet
+    // iteration order could put c.rb before b.rb and the cascade
+    // bug would pass this test by luck. Caught as Ohm's P2 on
+    // PR #84.
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
     let metadata = mk_metadata(&[
         (
             "b.rb",

@@ -39,7 +39,7 @@ fn single_commit_file_reads_as_new_by_low_commit_count() {
     let now = 1_700_000_000;
     let log = fake_log(&[(now - 86_400, &[&["A", "new.rb"]])]);
     let wanted = files_set(&["new.rb"]);
-    let parsed = parse_history(&log, &wanted);
+    let parsed = parse_history(&log, &wanted, None);
     assert_eq!(parsed.total_commits.get(&p("new.rb")).copied(), Some(1));
     assert_eq!(
         parsed.first_commit_epoch.get(&p("new.rb")).copied(),
@@ -93,7 +93,7 @@ fn rename_canonicalizes_old_path_to_new() {
     ]);
     // `wanted` names only the NEW path — Ruby semantics.
     let wanted = files_set(&["new.rb"]);
-    let parsed = parse_history(&log, &wanted);
+    let parsed = parse_history(&log, &wanted, None);
     // 3 commits all tally against the canonical new path.
     assert_eq!(parsed.total_commits.get(&p("new.rb")).copied(), Some(3));
     // Oldest touch is the pre-rename `A` commit on old.rb — aliases
@@ -109,28 +109,70 @@ fn rename_canonicalizes_old_path_to_new() {
 #[test]
 fn deletion_starts_a_lineage_boundary() {
     let now = 1_700_000_000;
-    // same-path file created, deleted, created again — Ruby treats
-    // the second lineage as a fresh file.
+    // Real git log order: NEWEST → OLDEST. Ruby walks the stream
+    // in that order, so the `D` fires BEFORE the older `A`, and
+    // the boundary suppresses the pre-deletion lineage's touches
+    // entirely. Expected: only the post-deletion `A` (the newest)
+    // tallies. Count = 1, first_commit_epoch = `now - 10 * 86_400`.
     let log = fake_log(&[
-        (now - 100 * 86_400, &[&["A", "f.rb"]]),
-        (now - 50 * 86_400, &[&["D", "f.rb"]]),
-        (now - 10 * 86_400, &[&["A", "f.rb"]]),
+        (now - 10 * 86_400, &[&["A", "f.rb"]]), // post-delete add (newest)
+        (now - 50 * 86_400, &[&["D", "f.rb"]]), // deletion
+        (now - 100 * 86_400, &[&["A", "f.rb"]]), // pre-delete add (oldest, suppressed)
     ]);
     let wanted = files_set(&["f.rb"]);
-    let parsed = parse_history(&log, &wanted);
-    // Only the post-deletion lineage counts. In our Ruby-style walk,
-    // the D line marks the old path as a boundary so subsequent
-    // additions re-start the file's lineage. The expected count is
-    // 1 commit from the fresh (post-delete) add.
-    //
-    // NOTE: Ruby's walk observes the log OLDEST → NEWEST only via
-    // default git log order (NEWEST → OLDEST), so the boundary
-    // actually fires before the earlier `A` in the same log stream.
-    // Deleted-first semantics match what Ruby does.
-    let total = parsed.total_commits.get(&p("f.rb")).copied().unwrap_or(0);
-    assert!(
-        (1..=3).contains(&total),
-        "boundary handling keeps count between 1 and 3 — observed {total}"
+    let parsed = parse_history(&log, &wanted, None);
+    assert_eq!(
+        parsed.total_commits.get(&p("f.rb")).copied(),
+        Some(1),
+        "pre-deletion lineage must be suppressed — only post-D `A` counts"
+    );
+    assert_eq!(
+        parsed.first_commit_epoch.get(&p("f.rb")).copied(),
+        Some(now - 10 * 86_400),
+        "first_commit_epoch must reflect the fresh lineage, not the suppressed one"
+    );
+}
+
+#[test]
+fn parse_history_strips_analysis_prefix_before_matching_wanted() {
+    // git log emits paths relative to repo root; FileCollector
+    // yields paths relative to the scan root. With a subdir scan
+    // (repo/app), raw git paths look like "app/models/user.rb"
+    // while wanted holds "models/user.rb". Without rebasing, the
+    // wanted set never matches. Caught as Ohm's P1 on PR #84.
+    let now = 1_700_000_000;
+    let log = fake_log(&[(now - 86_400, &[&["A", "app/models/user.rb"]])]);
+    let wanted = files_set(&["models/user.rb"]);
+    let parsed_no_prefix = parse_history(&log, &wanted, None);
+    assert_eq!(
+        parsed_no_prefix.total_commits.get(&p("models/user.rb")),
+        None,
+        "without prefix stripping, the wanted set must NOT match"
+    );
+    let parsed_with_prefix = parse_history(&log, &wanted, Some("app/"));
+    assert_eq!(
+        parsed_with_prefix
+            .total_commits
+            .get(&p("models/user.rb"))
+            .copied(),
+        Some(1),
+        "with prefix stripping, the rebased path matches wanted"
+    );
+}
+
+#[test]
+fn parse_history_prefix_drops_paths_outside_subdirectory() {
+    // A file that lives OUTSIDE the analysis subdirectory must
+    // disappear entirely from the metadata even if its path
+    // happens to end with a wanted basename.
+    let now = 1_700_000_000;
+    let log = fake_log(&[(now - 86_400, &[&["A", "lib/models/user.rb"]])]);
+    let wanted = files_set(&["models/user.rb"]);
+    let parsed = parse_history(&log, &wanted, Some("app/"));
+    assert_eq!(
+        parsed.total_commits.get(&p("models/user.rb")),
+        None,
+        "lib/ file must not match an app/ analysis prefix"
     );
 }
 
@@ -139,7 +181,7 @@ fn files_outside_the_wanted_set_are_ignored() {
     let now = 1_700_000_000;
     let log = fake_log(&[(now - 86_400, &[&["A", "a.rb"], &["A", "b.rb"]])]);
     let wanted = files_set(&["a.rb"]);
-    let parsed = parse_history(&log, &wanted);
+    let parsed = parse_history(&log, &wanted, None);
     assert_eq!(parsed.total_commits.get(&p("a.rb")).copied(), Some(1));
     assert!(!parsed.total_commits.contains_key(&p("b.rb")));
 }
@@ -343,4 +385,77 @@ fn shallow_repo_returns_disabled_with_shallow_warning() {
     );
     let meta = report.metadata.get(&file).unwrap();
     assert_eq!(meta, &FileNewness::disabled());
+}
+
+#[test]
+fn analyze_over_real_repo_subdirectory_rebases_paths_correctly() {
+    // End-to-end: run analyze() against a subdirectory of a repo.
+    // Without the analysis-prefix rebasing, git log emits
+    // `app/models/user.rb` while our wanted set keyed by
+    // `models/user.rb` sees zero matches and the file reads as
+    // zero-history. Ohm's P1 on PR #84.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    let subdir = repo.join("app");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let run = |args: &[&str], cwd: &Path| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        assert!(status.map(|s| s.success()).unwrap_or(false));
+    };
+    run(&["init", "-q", "-b", "main"], repo);
+    std::fs::create_dir_all(subdir.join("models")).unwrap();
+    std::fs::write(subdir.join("models/user.rb"), "one\n").unwrap();
+    run(&["add", "app/models/user.rb"], repo);
+    let commit_at = |msg: &str, epoch: u64| {
+        let date = format!("{epoch} +0000");
+        let status = Command::new("git")
+            .args(["commit", "-q", "-m", msg])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        assert!(status.map(|s| s.success()).unwrap_or(false));
+    };
+    commit_at("c1", 1_700_000_000);
+    std::fs::write(subdir.join("models/user.rb"), "two\n").unwrap();
+    run(&["add", "app/models/user.rb"], repo);
+    commit_at("c2", 1_700_000_000 + 20 * 86_400);
+
+    let models_user = PathBuf::from("models/user.rb");
+    let files: Vec<&Path> = vec![models_user.as_path()];
+    let now = 1_700_000_000 + 30 * 86_400;
+    let cfg = NewnessConfig {
+        days: 30,
+        min_commits: 3,
+        now_epoch: now,
+    };
+    // Scan from the subdirectory — this is what sf-cli does when
+    // scanning app/ instead of the repo root.
+    let report = analyze(&subdir, &files, cfg);
+    assert!(report.succeeded);
+    let meta = report
+        .metadata
+        .get(&models_user)
+        .expect("subdirectory scan must still land metadata for models/user.rb");
+    assert_eq!(
+        meta.total_commits, 2,
+        "both commits must count after prefix-rebasing"
+    );
+    assert_eq!(meta.age_days, 30, "oldest commit was 30 days ago");
+    assert!(meta.metadata_available);
 }

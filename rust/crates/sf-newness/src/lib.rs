@@ -133,6 +133,21 @@ pub fn analyze(repo_root: &Path, files: &[&Path], config: NewnessConfig) -> Newn
         return disabled_report(files, NewnessWarning::ShallowClone);
     }
 
+    // When scanning a SUBDIRECTORY of the repository (e.g.
+    // `/repo/app`), git log emits paths relative to the repo root
+    // (`app/models/user.rb`), but the file-collector hands us paths
+    // relative to the scan root (`models/user.rb`). Without
+    // stripping that prefix from log paths, the wanted set never
+    // matches and every file reads as zero-history. Ruby Newness
+    // handles this via `rebase_to_analysis_root`. We compute the
+    // prefix once and hand it to `parse_history`.
+    //
+    // `--relative` on git log would seem simpler, but mixing it
+    // with `--find-renames` + `--name-status` has edge cases on
+    // cross-subdirectory renames. We mirror Ruby's manual rebase
+    // instead.
+    let analysis_prefix = analysis_root_prefix(repo_root);
+
     let output = match Command::new("git")
         .args([
             "-C",
@@ -165,7 +180,7 @@ pub fn analyze(repo_root: &Path, files: &[&Path], config: NewnessConfig) -> Newn
     }
 
     let file_set: HashSet<PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
-    let history = parse_history(&output.stdout, &file_set);
+    let history = parse_history(&output.stdout, &file_set, analysis_prefix.as_deref());
 
     let metadata = files
         .iter()
@@ -208,6 +223,36 @@ fn disabled_report(files: &[&Path], warning: NewnessWarning) -> NewnessReport {
     }
 }
 
+/// Return the repo-relative prefix for `repo_root` when it's a
+/// SUBDIRECTORY of the enclosing git toplevel. `Some("app/")` when
+/// the scan root is `/repo/app`. `None` when the scan root IS the
+/// toplevel (no rebasing needed) or git refuses to answer.
+///
+/// Matches Ruby `Newness#analysis_root_prefix`.
+pub fn analysis_root_prefix(repo_root: &Path) -> Option<String> {
+    let repo_arg = repo_root.to_str()?;
+    let output = Command::new("git")
+        .args(["-C", repo_arg, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let toplevel_raw = String::from_utf8(output.stdout).ok()?;
+    let toplevel = PathBuf::from(toplevel_raw.trim());
+    let toplevel = std::fs::canonicalize(&toplevel).ok()?;
+    let analysis = std::fs::canonicalize(repo_root).ok()?;
+    if analysis == toplevel {
+        return None;
+    }
+    let rel = analysis.strip_prefix(&toplevel).ok()?;
+    let s = rel.to_str()?;
+    if s.is_empty() || s == "." || s.starts_with("..") {
+        return None;
+    }
+    Some(format!("{s}/"))
+}
+
 /// Ask git whether `repo_root` is a shallow clone. Falls back to
 /// probing `.git/shallow` directly if the subprocess can't run.
 /// Matches Ruby `shallow_repository?`.
@@ -237,7 +282,18 @@ struct ParsedHistory {
 /// We walk per-commit, canonicalize paths through renames, respect
 /// deletion boundaries, and tally per-file `first_commit_epoch` +
 /// `total_commits`.
-fn parse_history(stdout: &[u8], wanted: &HashSet<PathBuf>) -> ParsedHistory {
+///
+/// `analysis_prefix` is the repo-relative prefix that identifies
+/// the subdirectory being scanned (e.g. `Some("app/")` when the
+/// scan root is `/repo/app`). Paths that don't start with the
+/// prefix are dropped entirely; paths that do have the prefix
+/// stripped before being compared against `wanted`. Matches Ruby
+/// `rebase_to_analysis_root`.
+fn parse_history(
+    stdout: &[u8],
+    wanted: &HashSet<PathBuf>,
+    analysis_prefix: Option<&str>,
+) -> ParsedHistory {
     let mut first_commit_epoch: HashMap<PathBuf, u64> = HashMap::new();
     let mut total_commits: HashMap<PathBuf, usize> = HashMap::new();
     let mut aliases: HashMap<PathBuf, PathBuf> = HashMap::new();
@@ -272,6 +328,16 @@ fn parse_history(stdout: &[u8], wanted: &HashSet<PathBuf>) -> ParsedHistory {
         touched.clear();
     };
 
+    // Local helper closure: rebase a git-emitted path to the analysis
+    // root. Returns `None` when the path lies outside the subdirectory
+    // being scanned (and should be ignored entirely).
+    let rebase = |raw: &str| -> Option<PathBuf> {
+        match analysis_prefix {
+            None => Some(PathBuf::from(raw)),
+            Some(prefix) => raw.strip_prefix(prefix).map(PathBuf::from),
+        }
+    };
+
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix('\x1e') {
             flush(
@@ -294,10 +360,13 @@ fn parse_history(stdout: &[u8], wanted: &HashSet<PathBuf>) -> ParsedHistory {
             // so a later same-path file doesn't inherit this
             // lineage.
             if let Some(path) = parts.next() {
-                let p = PathBuf::from(path);
-                if let Some(canonical) = canonical_path(&p, &aliases) {
+                let rebased = match rebase(path) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if let Some(canonical) = canonical_path(&rebased, &aliases) {
                     if wanted.contains(&canonical) {
-                        lineage_boundaries.insert(p);
+                        lineage_boundaries.insert(rebased);
                     }
                 }
             }
@@ -307,31 +376,50 @@ fn parse_history(stdout: &[u8], wanted: &HashSet<PathBuf>) -> ParsedHistory {
             // Rename / copy: status is `R<score>` or `C<score>`,
             // followed by old path + new path. The NEW path is the
             // active one going forward.
-            let old_path = match parts.next() {
-                Some(p) => PathBuf::from(p),
+            let raw_old = match parts.next() {
+                Some(p) => p,
                 None => continue,
             };
-            let new_path = match parts.next() {
-                Some(p) => PathBuf::from(p),
+            let raw_new = match parts.next() {
+                Some(p) => p,
                 None => continue,
             };
+            // Rebase both; if the new path is outside the analysis
+            // subdirectory, skip the record (the file is being moved
+            // out of our view). If only the old path is outside,
+            // still track the new one — it just has no prior
+            // in-scope lineage.
+            let new_path = match rebase(raw_new) {
+                Some(p) => p,
+                None => continue,
+            };
+            let old_path = rebase(raw_old);
             let canonical_new = canonical_path(&new_path, &aliases).unwrap_or(new_path.clone());
+            let old_boundary_hit = old_path
+                .as_ref()
+                .map(|p| lineage_boundaries.contains(p))
+                .unwrap_or(false);
             if wanted.contains(&canonical_new)
-                && !lineage_boundaries.contains(&old_path)
+                && !old_boundary_hit
                 && !lineage_boundaries.contains(&new_path)
             {
                 touched.insert(canonical_new.clone());
-                aliases.insert(old_path, canonical_new);
+                if let Some(old) = old_path {
+                    aliases.insert(old, canonical_new);
+                }
             }
             continue;
         }
         // Add / modify / else (A, M, T, …): single path follows.
         if let Some(path) = parts.next() {
-            let p = PathBuf::from(path);
-            if lineage_boundaries.contains(&p) {
+            let rebased = match rebase(path) {
+                Some(p) => p,
+                None => continue,
+            };
+            if lineage_boundaries.contains(&rebased) {
                 continue;
             }
-            if let Some(canonical) = canonical_path(&p, &aliases) {
+            if let Some(canonical) = canonical_path(&rebased, &aliases) {
                 if wanted.contains(&canonical) {
                     touched.insert(canonical);
                 }
