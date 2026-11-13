@@ -191,23 +191,88 @@ fn row_class(row: &Value) -> Option<String> {
     row.get("class").and_then(Value::as_str).map(str::to_string)
 }
 
-/// Ruby-compatible numeric coercion: `nil → None`, number → number,
-/// string → `str.to_f` (0.0 on garbage), anything else → `None`.
-/// Caught as Ohm's P2 on PR #91 — prior revision used `as_f64()`
-/// which returned None for `"0.9"`, letting a numeric-string score
-/// skip the `low_evidence_high_score` check.
+/// Ruby-compatible numeric coercion matching `String#to_f`:
+///
+/// - `nil` → None
+/// - number → f64
+/// - string: take leading optional sign, decimal/exponent prefix,
+///   parse that. Unparseable prefix → 0.0. Stops at the first
+///   non-numeric character (`"0.9junk"` → 0.9). Rejects `NaN` /
+///   `Infinity` literals (Ruby `to_f` does not recognize those
+///   strings — they return 0.0). Also collapses any non-finite
+///   parse result (defensive) to 0.0.
+/// - bool / array / object → None (Ruby lacks `.to_f` for these
+///   and sf-gate inputs should never carry them; skip the row).
+///
+/// Caught as Ohm's P2 on PR #91 r1: Rust `str::parse::<f64>()`
+/// accepts `"NaN"` and refuses `"0.9junk"`; neither matches Ruby.
 fn coerce_f64(v: Option<&Value>) -> Option<f64> {
     match v {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => {
-            // Ruby `"0.9".to_f == 0.9`, `"garbage".to_f == 0.0`.
-            // Rust `str::parse::<f64>()` returns Err on garbage;
-            // match Ruby by substituting 0.0.
-            Some(s.trim().parse::<f64>().unwrap_or(0.0))
-        }
-        // Bools/arrays/objects do NOT support `.to_f` in Ruby either.
+        Some(Value::String(s)) => Some(ruby_to_f(s)),
         _ => None,
+    }
+}
+
+/// Port of Ruby `String#to_f`: returns the numeric prefix as f64,
+/// or `0.0` on anything Ruby wouldn't accept (garbage input,
+/// `NaN`/`Infinity` literals, or no numeric prefix).
+fn ruby_to_f(s: &str) -> f64 {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    // Leading whitespace is skipped by Ruby's to_f.
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    let mut end = i;
+    // Optional sign.
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    let digits_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    let had_digits_before_dot = end > digits_start;
+    if end < bytes.len() && bytes[end] == b'.' {
+        end += 1;
+        let frac_start = end;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        // Ruby refuses `.` without a leading digit AND without a
+        // trailing digit (e.g. `"."` → 0.0).
+        if !had_digits_before_dot && end == frac_start {
+            return 0.0;
+        }
+    } else if !had_digits_before_dot {
+        // No digits at all (e.g. `"NaN"`, `"Infinity"`, `"junk"`) →
+        // Ruby `to_f` returns 0.0 and never recognizes those literals.
+        return 0.0;
+    }
+    // Optional exponent.
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let exp_marker = end;
+        end += 1;
+        if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+            end += 1;
+        }
+        let exp_digits_start = end;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        // Bare exponent marker with no digits — Ruby rolls back
+        // the exponent portion rather than failing (e.g. `"1e"` →
+        // 1.0). Mirror by snipping back to the marker.
+        if end == exp_digits_start {
+            end = exp_marker;
+        }
+    }
+    let prefix = &s[i..end];
+    match prefix.parse::<f64>() {
+        Ok(n) if n.is_finite() => n,
+        _ => 0.0,
     }
 }
 
@@ -491,6 +556,54 @@ mod tests {
             r.low_evidence_high_score.len(),
             0,
             "numeric-string evidence must coerce and not trigger finding"
+        );
+    }
+
+    #[test]
+    fn ruby_to_f_prefix_coercion_matches_docker_ruby() {
+        // Verified against ruby:3.3.13-slim:
+        //   "0.9".to_f        => 0.9
+        //   "0.9junk".to_f    => 0.9
+        //   "NaN".to_f        => 0.0
+        //   "Infinity".to_f   => 0.0
+        //   "1e3".to_f        => 1000.0
+        //   " 0.5 ".to_f      => 0.5
+        //   "-0.5".to_f       => -0.5
+        //   "junk".to_f       => 0.0
+        //   "".to_f           => 0.0
+        assert_eq!(ruby_to_f("0.9"), 0.9);
+        assert_eq!(ruby_to_f("0.9junk"), 0.9);
+        assert_eq!(ruby_to_f("NaN"), 0.0);
+        assert_eq!(ruby_to_f("Infinity"), 0.0);
+        assert_eq!(ruby_to_f("1e3"), 1000.0);
+        assert_eq!(ruby_to_f(" 0.5 "), 0.5);
+        assert_eq!(ruby_to_f("-0.5"), -0.5);
+        assert_eq!(ruby_to_f("junk"), 0.0);
+        assert_eq!(ruby_to_f(""), 0.0);
+    }
+
+    #[test]
+    fn score_with_numeric_prefix_triggers_high_score_check() {
+        // Ohm P2 on PR #91 r1: `"0.9junk".to_f` is 0.9 in Ruby,
+        // not NaN or garbage. Previously Rust parse failed and
+        // substituted 0.0, missing the finding.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":"0.9junk","evidence":0.1}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(r.low_evidence_high_score.len(), 1);
+    }
+
+    #[test]
+    fn evidence_nan_literal_coerces_to_low_matching_ruby() {
+        // Ohm P2 on PR #91 r1: `"NaN".to_f` is 0.0 in Ruby — NOT
+        // a NaN. Previously Rust parsed "NaN" to f64::NAN, which
+        // failed the `< 0.50` comparison (NaN < anything is false),
+        // so the row wasn't flagged.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":"NaN"}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            1,
+            "NaN-string evidence must coerce to 0.0 (low)"
         );
     }
 
