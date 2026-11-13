@@ -445,10 +445,14 @@ fn main() -> Result<()> {
     // Ruby `meta.filtered` is set ONLY when `filter_set` is
     // populated — i.e. `--diff-base` or `--only`. `--top` is a
     // truncation knob, not a filter. Caught as Ohm's P2 on PR #86.
-    let filter_note = build_filter_note(cli.diff_base.as_deref(), only_paths.as_deref());
-    let filtered = cli.diff_base.is_some() || only_paths.is_some();
+    // `meta.only_paths` must carry the USER-SUPPLIED paths unchanged
+    // (Ruby `json_meta` emits `@options[:only_paths]` verbatim). The
+    // rebased list is for filter matching only. Caught as Ohm's P2
+    // on PR #87 round 2.
+    let filter_note = build_filter_note(cli.diff_base.as_deref(), only_paths_raw.as_deref());
+    let filtered = cli.diff_base.is_some() || only_paths_raw.is_some();
     let repo_display = path.display().to_string();
-    let only_slice: Option<&[String]> = only_paths.as_deref();
+    let only_slice: Option<&[String]> = only_paths_raw.as_deref();
     output::emit(
         cli.output,
         Sections {
@@ -575,10 +579,15 @@ fn rebase_filter_paths(paths: &[String], scan_root: &Path) -> Vec<String> {
     if prefix == "./" || prefix.is_empty() {
         return paths.to_vec();
     }
+    // `strip_prefix` removes the prefix EXACTLY once, matching Ruby
+    // `delete_prefix`. Prior revision used `trim_start_matches`,
+    // which strips repeated instances — a path like
+    // `lib/lib/foo.rb` under scan root `lib/` would collapse to
+    // `foo.rb` instead of `lib/foo.rb`. Caught as Ohm's P2 on
+    // PR #87 round 2.
     paths
         .iter()
-        .filter(|p| p.starts_with(&prefix))
-        .map(|p| p.trim_start_matches(&prefix).to_string())
+        .filter_map(|p| p.strip_prefix(&prefix).map(str::to_string))
         .collect()
 }
 
@@ -960,8 +969,16 @@ fn is_auto_generated(abs: &Path) -> bool {
             return false;
         };
         rest = after_hash.trim_start();
-        return rest.len() >= SENTINEL.len()
-            && rest[..SENTINEL.len()].eq_ignore_ascii_case(SENTINEL);
+        // Compare by BYTES — slicing `&str[..SENTINEL.len()]` would
+        // panic on a non-char-boundary (e.g. a leading `é` would
+        // straddle byte 27). Ruby's regex matches literal ASCII, so
+        // a byte-level ascii-case comparison is sufficient and
+        // doesn't crash on Unicode header text. Caught as Ohm's P1
+        // on PR #87 round 2.
+        return rest
+            .as_bytes()
+            .get(..SENTINEL.len())
+            .is_some_and(|bytes| bytes.eq_ignore_ascii_case(SENTINEL.as_bytes()));
     }
     false
 }

@@ -1034,6 +1034,160 @@ fn only_empty_list_emits_zero_rows_with_diff_filter_empty_warning() {
 }
 
 #[test]
+fn auto_generated_check_does_not_crash_on_unicode_header() {
+    // Ohm P1 on PR #87 round 2: slicing `rest[..SENTINEL.len()]`
+    // panics if byte 27 falls mid-character. A valid source whose
+    // first non-blank line starts with non-ASCII chars (`é`, etc.)
+    // must not crash the whole scan.
+    let tmp = tempfile::tempdir().unwrap();
+    // 20 `é` chars = 40 bytes. Earlier revision crashed slicing at
+    // byte 27.
+    let eacute = "é".repeat(20);
+    let header = format!("# {eacute}\nclass Unicode\nend\n");
+    std::fs::write(tmp.path().join("unicode.rb"), header).unwrap();
+    std::fs::write(tmp.path().join("plain.rb"), "class Plain\nend\n").unwrap();
+    std::fs::write(tmp.path().join("third.rb"), "class Third\nend\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "non-ASCII header must not crash: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("unicode.rb"),
+        "unicode.rb should be scored, not sentinel-excluded: {stdout}"
+    );
+}
+
+#[test]
+fn rebase_filter_paths_strips_scan_root_prefix_exactly_once() {
+    // Ohm P2 on PR #87 round 2: `trim_start_matches` strips the
+    // prefix REPEATEDLY, so a nested dir like `lib/lib/foo.rb`
+    // under scan root `lib/` collapsed to `foo.rb` instead of
+    // `lib/foo.rb`. Use `strip_prefix` once.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir_all(repo.join("lib/lib")).unwrap();
+    std::fs::write(
+        repo.join("lib/lib/foo.rb"),
+        "class Foo\n  def one; end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("lib/other.rb"),
+        "class Other\n  def one; end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("lib/third.rb"), "class Third\nend\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "base"]);
+
+    // Scan lib/, filter `lib/lib/foo.rb` → rebased to `lib/foo.rb`,
+    // which is the scan-root-relative key for the file.
+    let out = Command::new(stud_finder_bin())
+        .arg(repo.join("lib"))
+        .arg("--only")
+        .arg("lib/lib/foo.rb")
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let _header = lines.next();
+    let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "nested repeated-prefix --only must match exactly once: {stdout}"
+    );
+    assert!(
+        rows[0].contains("lib/foo.rb"),
+        "row must be the lib/foo.rb file: {}",
+        rows[0]
+    );
+}
+
+#[test]
+fn meta_only_paths_emits_original_user_input_not_rebased() {
+    // Ohm P2 on PR #87 round 2: Ruby `json_meta` emits
+    // `@options[:only_paths]` unchanged — the rebased list is for
+    // filter matching only. A user who passes `--only lib/foo.rb`
+    // in a nested scan must see `lib/foo.rb` back in meta, not the
+    // internal `foo.rb` rebased form.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::create_dir_all(repo.join("lib/app")).unwrap();
+    write_ruby_mini_repo(&repo.join("lib/app"));
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "base"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(repo.join("lib/app"))
+        .arg("--only")
+        .arg("lib/app/order.rb")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v["meta"]["only_paths"],
+        serde_json::json!(["lib/app/order.rb"]),
+        "meta.only_paths must carry the user-supplied, un-rebased paths: {}",
+        v["meta"]
+    );
+    // AND the row must have been matched after internal rebasing.
+    let rows = v["ruby"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["path"], serde_json::json!("order.rb"));
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)
