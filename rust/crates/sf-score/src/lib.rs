@@ -283,6 +283,88 @@ impl<'a> Signals<'a> {
     }
 }
 
+/// Renormalized weights for the composite, matching Ruby's
+/// `Scorer#normalize_weights` output. Mirrors the shape of
+/// `json_weights` in `lib/stud_finder/cli.rb`: `fan_in`, `fan_out`,
+/// `complexity`, and `churn` are always numbers (0.0 when the signal
+/// is inactive), while `coverage`, `interaction`, and `coupling` are
+/// `None` when the corresponding signal is unavailable. Callers that
+/// serialize to JSON should emit `None` as `null` to match Ruby's
+/// `&.round(4)` pattern.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveWeights {
+    pub fan_in: f64,
+    pub fan_out: f64,
+    pub complexity: f64,
+    pub churn: f64,
+    pub coupling: Option<f64>,
+    pub coverage: Option<f64>,
+    pub interaction: Option<f64>,
+}
+
+/// Compute the active-weight renormalization for a given signal set.
+/// Mirrors the inline active-weight math in `Scorer::score_with_signals`
+/// so sf-cli can report `meta.weights` without rerunning the scorer.
+///
+/// **Divergence from Ruby `Scorer#normalize_weights`:** Ruby always
+/// keeps all four `BASE_WEIGHT_KEYS` active (fan_in, fan_out,
+/// complexity, churn) regardless of whether the backing signal is
+/// present — a missing signal still occupies its share of the
+/// composite but contributes 0 to the per-file total. The Rust
+/// scorer drops absent signals from the active-weight sum, so this
+/// helper mirrors the Rust scorer rather than Ruby. The resulting
+/// weights match the composite the Rust scorer actually computed,
+/// so `meta.weights` stays truthful for THIS implementation, but
+/// byte-level diff against a Ruby run with the same signal set
+/// absent would differ on inactive-signal rows. Tracking this
+/// divergence (Ohm non-blocking on PR #86) in a follow-up so the
+/// scorer and this helper swap to Ruby's always-active behavior
+/// together.
+pub fn effective_weights(
+    has_complexity: bool,
+    has_churn: bool,
+    has_coupling: bool,
+    has_coverage: bool,
+) -> EffectiveWeights {
+    let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
+    if has_complexity {
+        active_total += BASE_WEIGHT_COMPLEXITY;
+    }
+    if has_churn {
+        active_total += BASE_WEIGHT_CHURN;
+    }
+    if has_coupling {
+        active_total += EXTRA_WEIGHT_COUPLING;
+    }
+    if has_coverage {
+        active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
+    }
+    let fi = BASE_WEIGHT_FAN_IN / active_total;
+    let fo = BASE_WEIGHT_FAN_OUT / active_total;
+    let cx = if has_complexity {
+        BASE_WEIGHT_COMPLEXITY / active_total
+    } else {
+        0.0
+    };
+    let ch = if has_churn {
+        BASE_WEIGHT_CHURN / active_total
+    } else {
+        0.0
+    };
+    let cp = has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total);
+    let cov = has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total);
+    let int_ = has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total);
+    EffectiveWeights {
+        fan_in: fi,
+        fan_out: fo,
+        complexity: cx,
+        churn: ch,
+        coupling: cp,
+        coverage: cov,
+        interaction: int_,
+    }
+}
+
 /// Scorer with tunable thresholds. Construct with `Scorer::new()` for
 /// the Ruby defaults, or `Scorer::with_thresholds` to override.
 #[derive(Debug, Clone, Copy)]
