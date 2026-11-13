@@ -1842,6 +1842,35 @@ fn weight_flags_apply_in_argv_order() {
 }
 
 #[test]
+fn weights_coupling_only_without_coupling_data_is_rejected() {
+    // Ohm P2 on PR #90 r3: a coupling-only vector against a repo
+    // with NO coupling data (non-repo path → sf-history produces no
+    // coupling) must exit with `active weights must be greater than
+    // 0.0.`. Previously `has_coupling` was proxied from the raw
+    // weight value so the validate check passed and safe_normalize
+    // silently fell back to default structural weights.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    // Not a git repo → no coupling data.
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--weights")
+        .arg("fan_in:0,fan_out:0,complexity:0,churn:0,coverage:0,interaction:0,coupling:1")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "coupling-only with NO coupling data must exit non-zero: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("active weights must be greater than 0.0"),
+        "expected active-total error: {stderr}"
+    );
+}
+
+#[test]
 fn weights_coupling_only_with_history_validates_and_runs() {
     // Ohm P2 on PR #90 r2: a `coupling:1.0` vector against a repo
     // with real coupling data (two files committed together) is a

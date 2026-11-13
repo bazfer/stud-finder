@@ -389,19 +389,17 @@ fn main() -> Result<()> {
     // Caught as Ohm's P2 on PR #90.
     let full_weights_override = cli.weights.is_some();
     if full_weights_override {
-        let has_coverage_for_validate = cli.ruby_coverage.is_some() || cli.coverage.is_some();
-        // Coupling will be active for the scoring run when the user
-        // has not zeroed its weight AND the signal-availability
-        // path produces data. At validate time we don't yet know the
-        // git-history outcome, so permit `coupling > 0` to count as
-        // "coupling intended" — a `coupling:1.0` vector against a
-        // real repo should validate. If the run turns out to have
-        // no coupling data at scoring time, safe_normalize falls
-        // back to defaults rather than producing NaN. Caught as
-        // Ohm's P2 on PR #90 r2.
-        let has_coupling_for_validate = effective_raw.coupling > 0.0;
-        if let Err(msg) = effective_raw
-            .validate_full_override(has_coverage_for_validate, has_coupling_for_validate)
+        // Use the ACTUAL cached signal state — sf-history already
+        // computed `has_ruby_coupling` and we know whether coverage
+        // loaded. Previously we used a proxy
+        // (`effective_raw.coupling > 0.0`) which let a
+        // coupling-only vector against a coupling-less repo slip
+        // through and silently fall back to default weights in
+        // safe_normalize. Ruby raises
+        // `active weights must be greater than 0.0.` on this.
+        // Caught as Ohm's P2 on PR #90 r3.
+        if let Err(msg) =
+            effective_raw.validate_full_override(coverage_available, has_ruby_coupling)
         {
             eprintln!("{msg}");
             std::process::exit(2);
