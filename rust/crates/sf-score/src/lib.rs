@@ -159,8 +159,17 @@ pub struct ScoredFile {
     /// `score_with_signals` (placeholder) and is replaced by
     /// `apply_newness` using the Ruby formula over `age_days`,
     /// `total_commits`, and whether the file has an explicit
-    /// coverage entry. See `sf_newness::evidence_for`.
+    /// coverage entry. See `sf_newness::evidence_for`. When
+    /// `evidence_available` is false this field is meaningless —
+    /// readers must emit null/n/a instead.
     pub evidence: f64,
+    /// `true` when `evidence` carries a real computed value.
+    /// `false` when newness metadata was unavailable (disabled,
+    /// shallow repo, failed) so Ruby's `Newness.evidence(...)`
+    /// would have returned `nil`. The output layer gates
+    /// JSON/CSV/markdown emission on this flag to avoid claiming
+    /// confidence we don't have. Caught as Ohm's P2 on PR #88.
+    pub evidence_available: bool,
     /// `true` when the file is within the recency window, below
     /// the min-commits threshold, or has unknown lineage. `false`
     /// when both thresholds are met OR when newness metadata is
@@ -302,66 +311,46 @@ pub struct EffectiveWeights {
     pub interaction: Option<f64>,
 }
 
-/// Compute the active-weight renormalization for a given signal set.
-/// Mirrors the inline active-weight math in `Scorer::score_with_signals`
-/// so sf-cli can report `meta.weights` without rerunning the scorer.
+/// Compute the active-weight renormalization for a given signal set,
+/// matching Ruby `Scorer#normalize_weights`.
 ///
-/// **Divergence from Ruby `Scorer#normalize_weights`:** Ruby always
-/// keeps all four `BASE_WEIGHT_KEYS` active (fan_in, fan_out,
-/// complexity, churn) regardless of whether the backing signal is
-/// present — a missing signal still occupies its share of the
-/// composite but contributes 0 to the per-file total. The Rust
-/// scorer drops absent signals from the active-weight sum, so this
-/// helper mirrors the Rust scorer rather than Ruby. The resulting
-/// weights match the composite the Rust scorer actually computed,
-/// so `meta.weights` stays truthful for THIS implementation, but
-/// byte-level diff against a Ruby run with the same signal set
-/// absent would differ on inactive-signal rows. Tracking this
-/// divergence (Ohm non-blocking on PR #86) in a follow-up so the
-/// scorer and this helper swap to Ruby's always-active behavior
-/// together.
+/// Ruby keeps all four `BASE_WEIGHT_KEYS` (fan_in, fan_out,
+/// complexity, churn) active for the renormalization denominator
+/// EVERY RUN, regardless of whether each signal is populated.
+/// Absent signals contribute 0.0 to the per-file score but still
+/// occupy their share of the weight ratio — so remaining signals
+/// do NOT grow to fill the gap. `coverage` + `interaction` add to
+/// active_total only when coverage is loaded; `coupling` only when
+/// coupling data is available.
+///
+/// Prior revision dropped absent BASE signals from the denominator
+/// (Ohm non-blocking on PR #86); the scorer and this helper swap
+/// together to the Ruby behavior in slice #10d. For a Ruby-only
+/// 4-factor run with all signals present, the numbers don't
+/// change; divergence only surfaced on runs with an absent base
+/// signal (e.g. empty complexity map).
 pub fn effective_weights(
-    has_complexity: bool,
-    has_churn: bool,
+    _has_complexity: bool,
+    _has_churn: bool,
     has_coupling: bool,
     has_coverage: bool,
 ) -> EffectiveWeights {
-    let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
-    if has_complexity {
-        active_total += BASE_WEIGHT_COMPLEXITY;
-    }
-    if has_churn {
-        active_total += BASE_WEIGHT_CHURN;
-    }
+    let mut active_total =
+        BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
     if has_coupling {
         active_total += EXTRA_WEIGHT_COUPLING;
     }
     if has_coverage {
         active_total += BASE_WEIGHT_COVERAGE + EXTRA_WEIGHT_INTERACTION;
     }
-    let fi = BASE_WEIGHT_FAN_IN / active_total;
-    let fo = BASE_WEIGHT_FAN_OUT / active_total;
-    let cx = if has_complexity {
-        BASE_WEIGHT_COMPLEXITY / active_total
-    } else {
-        0.0
-    };
-    let ch = if has_churn {
-        BASE_WEIGHT_CHURN / active_total
-    } else {
-        0.0
-    };
-    let cp = has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total);
-    let cov = has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total);
-    let int_ = has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total);
     EffectiveWeights {
-        fan_in: fi,
-        fan_out: fo,
-        complexity: cx,
-        churn: ch,
-        coupling: cp,
-        coverage: cov,
-        interaction: int_,
+        fan_in: BASE_WEIGHT_FAN_IN / active_total,
+        fan_out: BASE_WEIGHT_FAN_OUT / active_total,
+        complexity: BASE_WEIGHT_COMPLEXITY / active_total,
+        churn: BASE_WEIGHT_CHURN / active_total,
+        coupling: has_coupling.then(|| EXTRA_WEIGHT_COUPLING / active_total),
+        coverage: has_coverage.then(|| BASE_WEIGHT_COVERAGE / active_total),
+        interaction: has_coverage.then(|| EXTRA_WEIGHT_INTERACTION / active_total),
     }
 }
 
@@ -589,17 +578,17 @@ impl Scorer {
             vec![0.0; files.len()]
         };
 
-        // Base active weight sum + optional extras. Renormalize over
-        // whatever the caller supplied; matches Ruby normalize_weights.
-        // Ruby lumps coverage + interaction into the active-key sum
-        // together via `coverage_available?`; we keep the same gate.
-        let mut active_total = BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT;
-        if has_complexity {
-            active_total += BASE_WEIGHT_COMPLEXITY;
-        }
-        if has_churn {
-            active_total += BASE_WEIGHT_CHURN;
-        }
+        // Ruby `Scorer#normalize_weights` keeps ALL FOUR
+        // `BASE_WEIGHT_KEYS` active for the denominator every run,
+        // regardless of whether each signal is populated. An absent
+        // signal contributes 0 to the per-file score but its weight
+        // still occupies the ratio share — so remaining signals
+        // don't balloon to fill the gap. coverage/interaction add
+        // only when coverage is loaded; coupling only when coupling
+        // data is available. Caught as Ohm non-blocking on PR #86;
+        // fixed here in slice #10d together with effective_weights().
+        let mut active_total =
+            BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
         if has_coupling {
             active_total += EXTRA_WEIGHT_COUPLING;
         }
@@ -608,16 +597,8 @@ impl Scorer {
         }
         let w_fi = BASE_WEIGHT_FAN_IN / active_total;
         let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
-        let w_cx = if has_complexity {
-            BASE_WEIGHT_COMPLEXITY / active_total
-        } else {
-            0.0
-        };
-        let w_ch = if has_churn {
-            BASE_WEIGHT_CHURN / active_total
-        } else {
-            0.0
-        };
+        let w_cx = BASE_WEIGHT_COMPLEXITY / active_total;
+        let w_ch = BASE_WEIGHT_CHURN / active_total;
         let w_cp = if has_coupling {
             EXTRA_WEIGHT_COUPLING / active_total
         } else {
@@ -722,6 +703,15 @@ impl Scorer {
                     class,
                     escalation,
                     evidence: 1.0,
+                    // Before apply_newness runs the evidence field
+                    // carries the scorer placeholder 1.0. The
+                    // placeholder is never emitted — apply_newness
+                    // always runs on the sf-cli hot path, either
+                    // replacing it with a real value or flipping
+                    // availability off. Downstream readers must gate
+                    // emission on this flag; it stays false until
+                    // apply_newness decides.
+                    evidence_available: false,
                     new_file: false,
                     age_days: 0,
                     total_commits: 0,
@@ -773,8 +763,20 @@ pub fn apply_newness<F>(
         row.age_days = meta.age_days;
         row.total_commits = meta.total_commits;
         row.newness_metadata_available = meta.metadata_available;
-        if let Some(e) = sf_newness::evidence_for(meta, has_coverage_for(row.path.as_path())) {
-            row.evidence = e;
+        // Match Ruby `Newness.apply` which ALWAYS sets `row[:evidence]
+        // = Newness.evidence(...)`. When the result is `nil` (because
+        // `metadata_available` is false) Ruby stores nil; we flip
+        // `evidence_available` to false so output layers emit null
+        // instead of the scorer placeholder. Caught as Ohm's P2 on
+        // PR #88.
+        match sf_newness::evidence_for(meta, has_coverage_for(row.path.as_path())) {
+            Some(e) => {
+                row.evidence = e;
+                row.evidence_available = true;
+            }
+            None => {
+                row.evidence_available = false;
+            }
         }
         // escalation preserved from the scorer — pass 2 overrides.
     }

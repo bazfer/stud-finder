@@ -169,7 +169,19 @@ fn row_json(section_language: &str, coverage_available: bool, r: &ScoredFile) ->
     );
     m.insert("path".into(), json!(r.path.display().to_string()));
     m.insert("score".into(), json!(round4(r.composite)));
-    m.insert("evidence".into(), json!(round4(r.evidence)));
+    // Ruby `row[:evidence]` is `nil` when newness metadata is
+    // unavailable (disabled, shallow repo, failed). Emit JSON null
+    // rather than the scorer's placeholder 1.0 — claiming full
+    // confidence we don't have is a parity bug. Caught as Ohm's
+    // P2 on PR #88.
+    m.insert(
+        "evidence".into(),
+        if r.evidence_available {
+            json!(round4(r.evidence))
+        } else {
+            Value::Null
+        },
+    );
     m.insert("class".into(), json!(class_str(r.class)));
     m.insert("new_file".into(), json!(r.new_file));
     m.insert("age_days".into(), json!(r.age_days));
@@ -410,12 +422,21 @@ fn csv_row(section_language: &str, coverage_available: bool, r: &ScoredFile) -> 
     // Ruby stringifies empty → `""`, and `max_coupling_partner` is
     // also a string that can be empty-at-emit for rows with no
     // qualifying partner. Rank/counts stay numeric (never empty).
+    // Ruby `csv_file` passes `row[:evidence]` verbatim to
+    // CSV.generate_line; `nil` emits as a bare empty cell. Match
+    // that when evidence is unavailable (see JSON null above) so
+    // the CSV doesn't claim confidence that doesn't exist.
+    let evidence_cell = if r.evidence_available {
+        format_score(r.evidence)
+    } else {
+        String::new()
+    };
     let cells: Vec<String> = vec![
         r.rank.to_string(),
         csv_escape(row_language(section_language, &r.path)),
         csv_escape(&r.path.display().to_string()),
         format_score(r.composite),
-        format_score(r.evidence),
+        evidence_cell,
         class_str(r.class).to_string(),
         r.new_file.to_string(),
         r.age_days.to_string(),
@@ -524,7 +545,14 @@ fn markdown_row(section_title: &str, coverage_available: bool, r: &ScoredFile) -
     let language = row_language(section_language, &r.path);
     let path = md_escape(&r.path.display().to_string());
     let partner = md_escape(&r.max_coupling_partner.display().to_string());
-    let evidence = format_score(r.evidence);
+    // Ruby `format_evidence(nil)` returns nil → `nil.to_s` in cell
+    // interpolation is the empty string. Mirror that for unavailable
+    // evidence rather than showing a bogus `1.0000`.
+    let evidence = if r.evidence_available {
+        format_score(r.evidence)
+    } else {
+        String::new()
+    };
     let coverage = format_coverage_cell_markdown(coverage_available, r);
     format!(
         "| {rank} | {language} | {path} | {score} | {evidence} | {class} | {new_file} | {age} | \
@@ -660,6 +688,13 @@ fn table_row(coverage_available: bool, r: &ScoredFile) -> String {
     // truncated the FIRST 40 chars and dropped the basename.
     let partner = truncate_partner(&r.max_coupling_partner.display().to_string());
     let coverage = format_coverage_cell_table(coverage_available, r);
+    // Ruby `format_evidence(nil)` returns nil → `nil || 'n/a'` in the
+    // table template emits "n/a" for an unavailable value.
+    let evidence = if r.evidence_available {
+        format_score(r.evidence)
+    } else {
+        "n/a".to_string()
+    };
     format!(
         "{rank:>5}  {language:<10}  {path:<45}  {score:>6}  {evidence:>8}  \
          {class:<6}  {new_file:>5}  {age:>8}  {escalation:<15}  {fan_in:>6}  {fan_out:>7}  \
@@ -670,7 +705,7 @@ fn table_row(coverage_available: bool, r: &ScoredFile) -> String {
         language = language,
         path = path,
         score = format_score(r.composite),
-        evidence = format_score(r.evidence),
+        evidence = evidence,
         class = class_str(r.class),
         new_file = r.new_file.to_string(),
         age = r.age_days,
@@ -831,6 +866,7 @@ mod tests {
             class,
             escalation: String::new(),
             evidence: 1.0,
+            evidence_available: true,
             new_file: false,
             age_days: 0,
             total_commits: 0,

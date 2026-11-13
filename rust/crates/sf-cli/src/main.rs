@@ -86,6 +86,42 @@ struct Cli {
     /// expand verbosity in follow-ups.
     #[arg(long)]
     verbose: bool,
+    /// Percentile cutoff for the `trunk` class (default 85). A file
+    /// whose composite percentile is >= this value classifies as
+    /// trunk. Must be greater than `--branch-threshold`.
+    #[arg(long, default_value_t = 85, value_parser = parse_percentile_threshold)]
+    trunk_threshold: usize,
+    /// Percentile cutoff for the `branch` class (default 50). A
+    /// file whose composite percentile is >= this value and
+    /// < trunk-threshold classifies as branch. Below → leaf.
+    #[arg(long, default_value_t = 50, value_parser = parse_percentile_threshold)]
+    branch_threshold: usize,
+    /// Days-since-first-commit window for the newness signal.
+    /// Files with first-commit age ≤ this value are candidates for
+    /// new-file reclassification. Ruby accepts zero for this field
+    /// (disables the age half of the recency check). Default: 30.
+    /// Caught as Ohm's P2 on PR #88 — prior revision rejected zero.
+    #[arg(long, default_value_t = sf_newness::DEFAULT_DAYS)]
+    new_file_days: u64,
+    /// Minimum total commits for a file to leave the "new" bucket.
+    /// A file with fewer commits (and within `--new-file-days`)
+    /// still counts as new. Ruby accepts zero (disables the commit
+    /// half of the recency check). Default: 3. Caught as Ohm's P2
+    /// on PR #88 — prior revision rejected zero.
+    #[arg(long, default_value_t = sf_newness::DEFAULT_MIN_COMMITS)]
+    new_file_min_commits: usize,
+    /// Disable the newness signal entirely. Skips the sf-newness
+    /// analyze call; every row reports `new_file: false`, no
+    /// reclassification, evidence confidence falls back to the
+    /// scorer's placeholder.
+    #[arg(long = "no-newness", action = clap::ArgAction::SetTrue)]
+    no_newness: bool,
+    /// Advisory minimum file count. When the scored population is
+    /// smaller than this value a `small_repo` warning is emitted
+    /// (percentile ranks are unreliable at small scales).
+    /// Ruby default: 20.
+    #[arg(long, default_value_t = 20, value_parser = parse_positive_usize)]
+    min_files: usize,
 }
 
 fn main() -> Result<()> {
@@ -135,6 +171,14 @@ fn main() -> Result<()> {
     // PR #87.
     if cli.diff_base.is_some() && cli.only.is_some() {
         eprintln!("Error: --diff-base and --only are mutually exclusive.");
+        std::process::exit(2);
+    }
+
+    // Ruby `Scorer#validate!` requires branch < trunk; raise with
+    // the exact Ruby error message so automation parsers can
+    // string-match.
+    if cli.branch_threshold >= cli.trunk_threshold {
+        eprintln!("Error: branch-threshold must be strictly less than trunk-threshold.");
         std::process::exit(2);
     }
 
@@ -266,16 +310,38 @@ fn main() -> Result<()> {
     };
     let coverage_for_newness = signals.coverage.clone();
     let coverage_available = signals.coverage.is_some();
-    let scored = Scorer::new().score_with_signals(signals);
+    // Honor `--trunk-threshold` + `--branch-threshold` by converting
+    // from Ruby's 0-100 percentile integers to the sf-score 0.0-1.0
+    // floats the composite classification uses.
+    let scorer = Scorer::with_floors(
+        cli.trunk_threshold as f64 / 100.0,
+        cli.branch_threshold as f64 / 100.0,
+        sf_score::FAN_IN_FLOOR,
+        sf_score::COMPLEXITY_FLOOR,
+    );
+    let scored = scorer.score_with_signals(signals);
     let mut ruby_rows = scored;
 
-    // Newness: pull per-file newness metadata + apply the
-    // reclassification + real evidence formula. Matches Ruby
-    // `apply_newness` + `Newness.apply`. Warnings go to stderr so
-    // the run still completes even on a shallow / non-repo /
-    // git-less host.
-    let newness_report =
-        sf_newness::analyze(&path, &ruby_refs, sf_newness::NewnessConfig::default());
+    // Newness config: honor `--new-file-days` + `--new-file-min-commits`,
+    // skip the sf-newness analyze call entirely when `--no-newness`
+    // is set (matches Ruby `@options[:newness] = false` which short-
+    // circuits `Newness::Analyzer#analyze` and leaves rows with
+    // `new_file: false`).
+    let newness_cfg = sf_newness::NewnessConfig {
+        days: cli.new_file_days,
+        min_commits: cli.new_file_min_commits,
+        now_epoch: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    let newness_report = if cli.no_newness {
+        // Empty report with no metadata — apply_newness becomes a
+        // no-op pass on the base classification.
+        sf_newness::NewnessReport::default()
+    } else {
+        sf_newness::analyze(&path, &ruby_refs, newness_cfg)
+    };
     for warning in &newness_report.warnings {
         match warning {
             sf_newness::NewnessWarning::ShallowClone => {
@@ -338,11 +404,16 @@ fn main() -> Result<()> {
             coverage: None,
             loc: js_loc,
         };
-        let mut rows = Scorer::new().score_with_signals(js_signals);
+        let mut rows = scorer.score_with_signals(js_signals);
         // Reuse the Ruby-section newness report's git run (same repo,
         // supersets fine) rather than re-invoking git for JS. Only
-        // JS paths appear in the metadata lookup.
-        let js_newness = sf_newness::analyze(&path, &js_refs, sf_newness::NewnessConfig::default());
+        // JS paths appear in the metadata lookup. Honor
+        // --no-newness identically to the Ruby pass.
+        let js_newness = if cli.no_newness {
+            sf_newness::NewnessReport::default()
+        } else {
+            sf_newness::analyze(&path, &js_refs, newness_cfg)
+        };
         sf_score::apply_newness(&mut rows, &js_newness.metadata, &js_graph, |_| false);
         sort_rows(&mut rows);
         assign_ranks(&mut rows);
@@ -453,6 +524,34 @@ fn main() -> Result<()> {
     let filtered = cli.diff_base.is_some() || only_paths_raw.is_some();
     let repo_display = path.display().to_string();
     let only_slice: Option<&[String]> = only_paths_raw.as_deref();
+
+    // `--min-files` advisory: Ruby `score_group` adds `small_repo`
+    // when ANY non-empty scored group is below the threshold —
+    // percentile reliability is per-section, not per-run, because
+    // Ruby + JS score in separate populations. A 12 Ruby + 12 JS
+    // repo with --min-files 20 trips the warning even though the
+    // combined count is 24. Caught as Ohm's P2 on PR #88 — prior
+    // revision used the combined count. Emit at most one warning
+    // (dedup is implicit — Warnings.normalize does it in Ruby; our
+    // Vec<WarningPayload> normalizes by uniq-by-code at JSON emit).
+    let small_sections: Vec<(&str, usize)> = [
+        ("ruby", ruby_total_analyzed),
+        ("javascript", js_total_analyzed),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0 && *n < cli.min_files)
+    .collect();
+    if !small_sections.is_empty() {
+        for (lang, n) in &small_sections {
+            eprintln!(
+                "Warning: only {n} {lang} files found. Percentile ranks are unreliable at this scale. Results are advisory only."
+            );
+        }
+        warnings.push(WarningPayload {
+            code: "small_repo".into(),
+            message: "repo has fewer files than --min-files; results may be noisy".into(),
+        });
+    }
     output::emit(
         cli.output,
         Sections {
@@ -616,6 +715,32 @@ fn parse_positive_churn_days(s: &str) -> Result<u64, String> {
         .map_err(|_| "--churn-days must be a positive integer".to_string())?;
     if n == 0 {
         return Err("--churn-days must be positive".to_string());
+    }
+    Ok(n)
+}
+
+/// Generic positive-usize parser.
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| "value must be a positive integer".to_string())?;
+    if n == 0 {
+        return Err("value must be positive".to_string());
+    }
+    Ok(n)
+}
+
+/// Parser for `--trunk-threshold` / `--branch-threshold`. Ruby
+/// `validate_threshold!` allows percentile values in `0..=100` and
+/// requires branch < trunk (checked later at run time). Reject
+/// out-of-range values with Ruby's exact phrasing: "`<flag>` must
+/// be between 0 and 100".
+fn parse_percentile_threshold(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| "threshold must be an integer between 0 and 100".to_string())?;
+    if n > 100 {
+        return Err("threshold must be between 0 and 100".to_string());
     }
     Ok(n)
 }

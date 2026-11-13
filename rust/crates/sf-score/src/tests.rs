@@ -81,16 +81,27 @@ fn scorer_emits_row_per_registered_file() {
 }
 
 #[test]
-fn composite_uses_four_to_two_weight_ratio_in_two_signal_mode() {
+fn composite_uses_four_base_weight_ratio_regardless_of_signal_presence() {
+    // Ruby `normalize_weights` keeps ALL FOUR BASE_WEIGHT_KEYS
+    // active in the denominator every run. A 2-signal-populated
+    // call still allocates complexity + churn their share of the
+    // ratio (contributing 0 to the per-file sum, but occupying the
+    // weight space). Slice #10d swap aligning Rust to Ruby. Prior
+    // revision dropped absent signals from active_total and this
+    // test asserted the wrong behavior.
     let g = tiny_graph();
     let rows = Scorer::new().score(&g);
     let order = row(&rows, "app/models/order.rb");
-    // 2-signal weights renormalize to w_fi : w_fo = 4 : 2 regardless
-    // of the absolute base values.
-    let w_fi = BASE_WEIGHT_FAN_IN / (BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT);
-    let w_fo = BASE_WEIGHT_FAN_OUT / (BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT);
+    let active_total =
+        BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
+    let w_fi = BASE_WEIGHT_FAN_IN / active_total;
+    let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
     let expected = round4(w_fi * order.fan_in_pct + w_fo * order.fan_out_pct);
-    assert!((order.composite - expected).abs() < 1e-9);
+    assert!(
+        (order.composite - expected).abs() < 1e-9,
+        "composite {} ≠ expected {expected} (active_total={active_total})",
+        order.composite
+    );
 }
 
 #[test]
@@ -228,7 +239,12 @@ fn two_files_with_same_signals_both_get_zero_pct() {
 // --- 3-signal mode with complexity ---
 
 #[test]
-fn three_signal_renormalization_weights_sum_to_one() {
+fn three_signal_renormalization_weights_sum_to_one_over_all_four_base() {
+    // Ruby parity (slice #10d): all four BASE_WEIGHT_KEYS are
+    // always in the denominator. A 3-signal-populated call (fan_in,
+    // fan_out, complexity) still allocates churn its share of the
+    // ratio. The four base weights sum to 1.0 regardless of which
+    // signals the caller actually provided.
     let mut g = DependencyGraph::new();
     g.register_file("top.rb");
     for i in 0..5 {
@@ -245,20 +261,15 @@ fn three_signal_renormalization_weights_sum_to_one() {
         cx_entries.push((name, 1));
     }
     let signals = signals_with_complexity(&g, &cx_entries);
-    let rows = Scorer::new().score_with_signals(signals);
-    let top = row(&rows, "top.rb");
-    assert!(
-        (top.composite - 1.0).abs() < 1e-9,
-        "three-signal composite should hit 1.0 when every signal's pct is 1.0, got {}",
-        top.composite
-    );
-    let w_fi =
-        BASE_WEIGHT_FAN_IN / (BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY);
-    let w_fo =
-        BASE_WEIGHT_FAN_OUT / (BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY);
-    let w_cx = BASE_WEIGHT_COMPLEXITY
-        / (BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY);
-    assert!((w_fi + w_fo + w_cx - 1.0).abs() < 1e-12);
+    let _ = Scorer::new().score_with_signals(signals);
+
+    let active_total =
+        BASE_WEIGHT_FAN_IN + BASE_WEIGHT_FAN_OUT + BASE_WEIGHT_COMPLEXITY + BASE_WEIGHT_CHURN;
+    let w_fi = BASE_WEIGHT_FAN_IN / active_total;
+    let w_fo = BASE_WEIGHT_FAN_OUT / active_total;
+    let w_cx = BASE_WEIGHT_COMPLEXITY / active_total;
+    let w_ch = BASE_WEIGHT_CHURN / active_total;
+    assert!((w_fi + w_fo + w_cx + w_ch - 1.0).abs() < 1e-12);
 }
 
 #[test]
