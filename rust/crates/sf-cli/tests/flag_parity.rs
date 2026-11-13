@@ -589,6 +589,194 @@ fn diff_base_does_set_meta_filtered() {
 }
 
 #[test]
+fn version_flag_prints_version_and_exits_zero() {
+    // Ruby `--version` prints `StudFinder::VERSION` and exits 0.
+    // The Rust port carries the same const; must match Ruby's
+    // `lib/stud_finder/version.rb`.
+    let out = Command::new(stud_finder_bin())
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "--version must exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("0.7.0"),
+        "--version must print VERSION: {stdout}"
+    );
+}
+
+#[test]
+fn deprecated_coverage_alias_emits_warning_and_still_loads() {
+    // Ruby `--coverage PATH` is a deprecated alias for
+    // `--ruby-coverage`. It must emit the `coverage_flag_deprecated`
+    // warning (stderr + meta.warnings) and otherwise behave
+    // identically.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    // Minimal SimpleCov resultset.json so the coverage reader
+    // doesn't blow up; contents don't need to match any file.
+    let cov_path = tmp.path().join("resultset.json");
+    std::fs::write(&cov_path, r#"{"StudFinderTest": {"coverage": {}}}"#).unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coverage")
+        .arg(&cov_path)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("coverage_flag_deprecated"),
+        "deprecated --coverage must emit stderr warning: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let warnings = v.get("warnings").unwrap().as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.get("code") == Some(&serde_json::json!("coverage_flag_deprecated"))),
+        "meta.warnings must carry coverage_flag_deprecated: {warnings:?}"
+    );
+}
+
+#[test]
+fn churn_days_flag_flows_into_meta_and_history_window() {
+    // `--churn-days N` must land in meta.churn_days and also drive
+    // the history window used by sf-history. A smoke-level check
+    // that the flag isn't getting silently dropped.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--churn-days")
+        .arg("30")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v["meta"]["churn_days"],
+        serde_json::json!(30),
+        "churn-days must flow into meta: {}",
+        v["meta"]
+    );
+}
+
+#[test]
+fn exclude_flag_drops_matching_paths_from_scored_set() {
+    // `--exclude GLOB` is repeatable and applied after the built-in
+    // default-rule globs. An excluded path should NOT appear in the
+    // scored row set.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("app")).unwrap();
+    std::fs::write(
+        tmp.path().join("app/keep.rb"),
+        "class Keep\n  def one; end\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("app/drop.rb"),
+        "class Drop\n  def one; end\nend\n",
+    )
+    .unwrap();
+    // Need a third file so FileCollector's small-set guard doesn't
+    // trip (Rust port doesn't enforce the 5-file minimum yet, but
+    // keep tests robust).
+    std::fs::write(tmp.path().join("app/third.rb"), "class Third\nend\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--exclude")
+        .arg("app/drop.rb")
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("app/drop.rb"),
+        "excluded path must not appear in output: {stdout}"
+    );
+    assert!(
+        stdout.contains("app/keep.rb"),
+        "non-excluded path must still appear: {stdout}"
+    );
+}
+
+#[test]
+fn default_exclude_globs_match_ruby_defaults() {
+    // Ruby `FileCollector::DEFAULT_EXCLUDES` drops these paths
+    // before any user `--exclude` runs. The Rust port must mirror
+    // the same defaults; vendor/foo.rb should land in
+    // default_excluded_count and NOT in the scored set.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("spec")).unwrap();
+    std::fs::write(tmp.path().join("vendor/library.rb"), "class Lib\nend\n").unwrap();
+    std::fs::write(tmp.path().join("spec/foo_spec.rb"), "describe 'x'\n").unwrap();
+    std::fs::write(tmp.path().join("app.rb"), "class App\nend\n").unwrap();
+    std::fs::write(tmp.path().join("another.rb"), "class Another\nend\n").unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("vendor/library.rb"),
+        "vendor/** must be default-excluded: {stdout}"
+    );
+    assert!(
+        !stdout.contains("spec/foo_spec.rb"),
+        "spec/** must be default-excluded: {stdout}"
+    );
+    assert!(stdout.contains("app.rb"));
+}
+
+#[test]
+fn only_flag_narrows_to_matching_paths_and_sets_meta() {
+    // Ruby `--only paths` emits only those rows but still scores
+    // the full repo. meta.only_paths must carry the list and
+    // meta.filtered must be true.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--only")
+        .arg("order.rb")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["meta"]["filtered"], serde_json::json!(true));
+    assert_eq!(
+        v["meta"]["only_paths"],
+        serde_json::json!(["order.rb"]),
+        "meta.only_paths must list the --only paths: {}",
+        v["meta"]
+    );
+    let rows = v["ruby"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "--only should narrow to one row");
+    assert_eq!(rows[0]["path"], serde_json::json!("order.rb"));
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)

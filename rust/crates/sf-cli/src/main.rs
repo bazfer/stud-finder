@@ -27,64 +27,120 @@ use walkdir::WalkDir;
 
 use output::{OutputFormat, Sections, WarningPayload};
 
+/// Stud-finder version, shared with the Ruby gem. `--version`
+/// prints this and exits 0. Keep in sync with
+/// `lib/stud_finder/version.rb`.
+pub const VERSION: &str = "0.7.0";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "stud-finder",
+    version = VERSION,
     about = "Rank files by structural risk (Rust port, WIP)."
 )]
 struct Cli {
     /// Repository path to scan.
-    path: PathBuf,
-    /// Path to a coverage report (SimpleCov `resultset.json`, LCOV
-    /// `.info`, or Cobertura XML). Format is picked by extension.
-    /// When provided, enables the coverage signal + the interaction
-    /// cross-term in the composite.
-    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Path to a Ruby coverage report (SimpleCov `resultset.json`,
+    /// LCOV `.info`, or Cobertura XML). Enables the coverage signal
+    /// + the interaction cross-term on the Ruby section.
+    #[arg(long = "ruby-coverage")]
+    ruby_coverage: Option<PathBuf>,
+    /// Deprecated alias for `--ruby-coverage`. Emits a
+    /// `coverage_flag_deprecated` warning to stderr + `meta.warnings`
+    /// and treats the value as if it were passed to `--ruby-coverage`.
+    #[arg(long = "coverage")]
     coverage: Option<PathBuf>,
     /// Output format for the final rows. `table` keeps the human
-    /// output (default), `json` emits a `{ruby, javascript}` root,
-    /// `csv` and `markdown` emit one headed section per language.
+    /// output (default), `json` emits a `{meta, warnings, ruby,
+    /// javascript}` root, `csv` and `markdown` emit Ruby-contract
+    /// shape.
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
     output: OutputFormat,
-    /// Keep only the top `N` rows per section (after sorting). N
-    /// must be a positive integer (matches Ruby, which rejects
-    /// `--top 0` or negative with `--top must be positive`). Absent =
-    /// keep all. Applies to the Ruby and JavaScript sections
-    /// independently.
+    /// Keep only the top `N` rows per section (after sorting).
     #[arg(long, value_parser = parse_positive_top)]
     top: Option<usize>,
     /// Only emit rows for files changed between `<REF>` and HEAD.
-    /// Resolves by shelling out to `git diff --name-only <REF>...HEAD`
-    /// (merge-base-based three-dot). Non-git-repo or git failure
-    /// degrades to no filter with a stderr warning.
     #[arg(long)]
     diff_base: Option<String>,
+    /// Commit lookback window in days for churn + coupling signals
+    /// (Ruby default: 180).
+    #[arg(long, default_value_t = DEFAULT_WINDOW_DAYS)]
+    churn_days: u64,
+    /// Glob exclude pattern, repeatable. Applied AFTER the
+    /// built-in default-rule globs (vendor/, node_modules/, etc.).
+    /// Paths matching any pattern are dropped from the scored
+    /// population.
+    #[arg(long = "exclude", value_name = "PATTERN")]
+    excludes: Vec<String>,
+    /// Emit only these comma-separated repo-relative paths (still
+    /// scored against the full repo). Matches Ruby `--only`: the
+    /// full repo participates in percentile scoring, but only the
+    /// matching rows are emitted.
+    #[arg(long)]
+    only: Option<String>,
+    /// Print suppressed per-file warnings to stderr. In Ruby this
+    /// toggles additional stderr detail; in Rust most warnings are
+    /// already emitted — the flag is accepted for parity and will
+    /// expand verbosity in follow-ups.
+    #[arg(long)]
+    verbose: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let files = collect(&cli.path);
+    let path = cli.path.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    // Collected warning payloads flow to stderr AND Sections.warnings.
+    let mut warnings: Vec<WarningPayload> = Vec::new();
+
+    // Resolve coverage path: `--ruby-coverage` wins; `--coverage` is
+    // the deprecated alias and emits a warning when used.
+    let coverage_path: Option<PathBuf> = match (cli.ruby_coverage.as_ref(), cli.coverage.as_ref()) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(p)) => {
+            eprintln!(
+                "Warning: coverage_flag_deprecated: --coverage is deprecated; use --ruby-coverage."
+            );
+            warnings.push(WarningPayload {
+                code: "coverage_flag_deprecated".into(),
+                message: "--coverage is deprecated; use --ruby-coverage instead".into(),
+            });
+            Some(p.clone())
+        }
+        (None, None) => None,
+    };
+
+    let collect_result = collect(&path, &cli.excludes);
+    let files = collect_result.files;
+    let default_excluded_count = collect_result.default_excluded;
+
+    // Parse `--only` into a list once. Ruby splits on comma and
+    // strips each entry; empty entries are rejected.
+    let only_paths: Option<Vec<String>> = match cli.only.as_deref() {
+        Some(s) => {
+            let parts = parse_only_paths(s).unwrap_or_else(|err| {
+                eprintln!("stud-finder: {err}");
+                std::process::exit(2);
+            });
+            Some(parts)
+        }
+        None => None,
+    };
     // Score the Ruby graph on its own — JS/TS files are unprocessed in
     // this slice and must NOT participate in the percentile calculation
     // (they would otherwise pin a fan_in=0/fan_out=0 row into the
     // distribution and depress Ruby percentiles). sf-js builds its own
     // graph in a later slice; each language gets its own ranking
     // section, matching the Ruby implementation.
-    let (graph, complexity, ruby_skipped) = build_signals(&cli.path, &files);
-
-    // Collected warning payloads flow to both stderr (existing CLI
-    // behavior for terminal users) and `Sections.warnings` → JSON
-    // `meta.warnings` + root `warnings` (slice #10b). Codes are the
-    // Ruby `Warnings::MESSAGES` identifiers so byte-level consumers
-    // comparing Ruby/Rust outputs see matching warning records.
-    let mut warnings: Vec<WarningPayload> = Vec::new();
+    let (graph, complexity, ruby_skipped) = build_signals(&path, &files);
 
     // Pull churn + coupling from git history over the same registered
     // Ruby files. A non-git-repo or missing `git` degrades to zero
     // signals with a stderr warning — the run still completes.
     let ruby_paths: Vec<PathBuf> = graph.files().map(Path::to_path_buf).collect();
     let ruby_refs: Vec<&Path> = ruby_paths.iter().map(PathBuf::as_path).collect();
-    let history = sf_history::analyze(&cli.path, &ruby_refs, DEFAULT_WINDOW_DAYS);
+    let history = sf_history::analyze(&path, &ruby_refs, cli.churn_days);
     for warning in &history.warnings {
         match warning {
             HistoryWarning::BulkCommitsSkipped {
@@ -105,7 +161,7 @@ fn main() -> Result<()> {
             HistoryWarning::NotAGitRepo => {
                 eprintln!(
                     "stud-finder: {} is not a git repository; churn + coupling signals are skipped",
-                    cli.path.display()
+                    path.display()
                 );
                 warnings.push(WarningPayload {
                     code: "git_error".into(),
@@ -157,13 +213,13 @@ fn main() -> Result<()> {
     // composite. `Some(_)` activates both signals even if the loaded
     // report ended up empty (Ruby `coverage_available? = !@coverage.nil?`
     // semantics).
-    let coverage = load_coverage(cli.coverage.as_deref(), &cli.path, &ruby_refs);
+    let coverage = load_coverage(coverage_path.as_deref(), &path, &ruby_refs);
 
     // LOC pass — non-blank line count per Ruby file. Ruby
     // `LocCounter#non_blank_lines`. Unreadable files map to 0 and
     // land in the ScoredFile row anyway so a rename-at-scan-time
     // doesn't drop the row from the output.
-    let loc = count_loc(&cli.path, &ruby_refs);
+    let loc = count_loc(&path, &ruby_refs);
 
     // Cache the active-signal booleans BEFORE Signals is moved into
     // the scorer — the composite's active-weight renormalization and
@@ -193,7 +249,7 @@ fn main() -> Result<()> {
     // the run still completes even on a shallow / non-repo /
     // git-less host.
     let newness_report =
-        sf_newness::analyze(&cli.path, &ruby_refs, sf_newness::NewnessConfig::default());
+        sf_newness::analyze(&path, &ruby_refs, sf_newness::NewnessConfig::default());
     for warning in &newness_report.warnings {
         match warning {
             sf_newness::NewnessWarning::ShallowClone => {
@@ -236,7 +292,7 @@ fn main() -> Result<()> {
 
     // Build the JavaScript section on its own graph + complexity so
     // JS files don't pool into the Ruby percentile distribution.
-    let (js_graph, js_complexity, js_skipped) = build_js_signals(&cli.path, &files);
+    let (js_graph, js_complexity, js_skipped) = build_js_signals(&path, &files);
     // Per-section signal flags, captured BEFORE Signals is moved
     // into the JS scorer. Needed so a JS-only repository reports JS
     // weights (nonzero complexity) rather than falling back to the
@@ -246,7 +302,7 @@ fn main() -> Result<()> {
     let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
         let js_paths: Vec<PathBuf> = js_graph.files().map(Path::to_path_buf).collect();
         let js_refs: Vec<&Path> = js_paths.iter().map(PathBuf::as_path).collect();
-        let js_loc = count_loc(&cli.path, &js_refs);
+        let js_loc = count_loc(&path, &js_refs);
         let js_signals = Signals {
             graph: &js_graph,
             complexity: js_complexity,
@@ -260,8 +316,7 @@ fn main() -> Result<()> {
         // Reuse the Ruby-section newness report's git run (same repo,
         // supersets fine) rather than re-invoking git for JS. Only
         // JS paths appear in the metadata lookup.
-        let js_newness =
-            sf_newness::analyze(&cli.path, &js_refs, sf_newness::NewnessConfig::default());
+        let js_newness = sf_newness::analyze(&path, &js_refs, sf_newness::NewnessConfig::default());
         sf_score::apply_newness(&mut rows, &js_newness.metadata, &js_graph, |_| false);
         sort_rows(&mut rows);
         assign_ranks(&mut rows);
@@ -271,6 +326,33 @@ fn main() -> Result<()> {
     };
     let js_total_analyzed = js_rows.len();
 
+    // --- `--only` filter (applied BEFORE `--diff-base` so the two
+    //     stack: `--only` narrows the emitted set; `--diff-base`
+    //     narrows further to changed files). Ruby applies `--only`
+    //     and `--diff-base` mutually, picking whichever was provided;
+    //     when both appear together we honor the logical AND. Rust
+    //     only_paths are repo-root-relative strings; a future slice
+    //     will rebase to analysis root like `rebase_to_analysis_root`
+    //     does for `--diff-base`.
+    if let Some(only) = only_paths.as_ref() {
+        use std::collections::HashSet;
+        let keep: HashSet<PathBuf> = only.iter().map(PathBuf::from).collect();
+        let before_ruby = ruby_rows.len();
+        let before_js = js_rows.len();
+        ruby_rows.retain(|r| keep.contains(&r.path));
+        js_rows.retain(|r| keep.contains(&r.path));
+        if ruby_rows.is_empty() && js_rows.is_empty() && (before_ruby + before_js) > 0 {
+            eprintln!(
+                "Note: --only matched no scored files. The listed paths may be unscorable (docs, config, migrations) or outside this scan root."
+            );
+            warnings.push(WarningPayload {
+                code: "diff_no_scored_files".into(),
+                message: "diff matched no scored files; the PR may only touch unscorable files"
+                    .into(),
+            });
+        }
+    }
+
     // --- Diff-base filter (applied BEFORE --top) ---
     // An explicitly-requested --diff-base that CAN'T be satisfied
     // (missing git, non-repo, bad ref) is a hard failure: exit
@@ -279,7 +361,7 @@ fn main() -> Result<()> {
     // successful diff is a valid filter — the result is the empty
     // set, not "no filter".
     if let Some(base) = cli.diff_base.as_deref() {
-        match diff_names(&cli.path, base) {
+        match diff_names(&path, base) {
             Ok(changed) => {
                 ruby_rows.retain(|r| changed.contains(&r.path));
                 js_rows.retain(|r| changed.contains(&r.path));
@@ -324,28 +406,26 @@ fn main() -> Result<()> {
     let formula = output::formula_label(has_coverage, has_coupling);
     let weights =
         sf_score::effective_weights(has_complexity, has_churn, has_coupling, has_coverage);
-    // `--only` lands in slice #10c; for now the filter note + meta
-    // only cover `--diff-base`. Ruby `meta.filtered` is set ONLY
-    // when `filter_set` is populated — i.e. `--diff-base` or
-    // `--only` — never for `--top`, which is a truncation knob
-    // rather than a filter. Caught as Ohm's P2 on PR #86.
-    let filter_note = build_filter_note(cli.diff_base.as_deref(), None);
-    let filtered = cli.diff_base.is_some();
-    let repo_display = cli.path.display().to_string();
-    let only_slice: Option<&[String]> = None;
+    // Ruby `meta.filtered` is set ONLY when `filter_set` is
+    // populated — i.e. `--diff-base` or `--only`. `--top` is a
+    // truncation knob, not a filter. Caught as Ohm's P2 on PR #86.
+    let filter_note = build_filter_note(cli.diff_base.as_deref(), only_paths.as_deref());
+    let filtered = cli.diff_base.is_some() || only_paths.is_some();
+    let repo_display = path.display().to_string();
+    let only_slice: Option<&[String]> = only_paths.as_deref();
     output::emit(
         cli.output,
         Sections {
             ruby: &ruby_rows,
             js: &js_rows,
             repo: &repo_display,
-            churn_days: DEFAULT_WINDOW_DAYS,
+            churn_days: cli.churn_days,
             analyzed_at: &analyzed_at,
             analyzed_date: &analyzed_date,
             warnings: &warnings,
             file_count: ruby_total_analyzed + js_total_analyzed,
             files_skipped: ruby_skipped + js_skipped,
-            default_excluded_count: 0,
+            default_excluded_count,
             formula,
             weights: &weights,
             filter_note: filter_note.as_deref(),
@@ -418,6 +498,22 @@ fn unix_epoch_to_utc_components(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let year = (if m <= 2 { y + 1 } else { y }) as i32;
     (year, m, d, hour, minute, second)
+}
+
+/// Parse Ruby's `--only PATHS` comma-separated list, matching
+/// `value.split(',').map(&:strip).reject(&:empty?)` from
+/// `lib/stud_finder/cli.rb`. Returns `Err` only for pathological
+/// whitespace-only input so clap surfaces a clear error.
+fn parse_only_paths(s: &str) -> Result<Vec<String>, String> {
+    let out: Vec<String> = s
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if out.is_empty() {
+        return Err("--only must list at least one non-empty path".to_string());
+    }
+    Ok(out)
 }
 
 fn parse_positive_top(s: &str) -> Result<usize, String> {
@@ -609,8 +705,43 @@ fn resolve_js_module(graph: &DependencyGraph, target: &Path) -> Option<PathBuf> 
     None
 }
 
-fn collect(root: &Path) -> Vec<FileRef> {
-    let mut out = Vec::new();
+/// Ruby `FileCollector::DEFAULT_EXCLUDES` verbatim — glob patterns
+/// dropped before the user's `--exclude` list. Keep in sync with
+/// `lib/stud_finder/file_collector.rb`.
+const DEFAULT_EXCLUDES: &[&str] = &[
+    "db/schema.rb",
+    "db/migrate/**",
+    "node_modules/**",
+    "**/node_modules/**",
+    "vendor/**",
+    "**/*.min.js",
+    "tmp/**",
+    "log/**",
+    "coverage/**",
+    "spec/**",
+    "test/**",
+    "__tests__/**",
+    "**/__tests__/**",
+    "**/*.test.js",
+    "**/*.test.ts",
+    "**/*.test.jsx",
+    "**/*.test.tsx",
+    "**/*.spec.js",
+    "**/*.spec.ts",
+    "**/*.spec.jsx",
+    "**/*.spec.tsx",
+];
+
+pub struct CollectResult {
+    pub files: Vec<FileRef>,
+    pub default_excluded: usize,
+    pub custom_excluded: usize,
+}
+
+fn collect(root: &Path, user_excludes: &[String]) -> CollectResult {
+    let mut files = Vec::new();
+    let mut default_excluded = 0usize;
+    let mut custom_excluded = 0usize;
     for result in WalkDir::new(root) {
         let entry = match result {
             Ok(entry) => entry,
@@ -628,19 +759,103 @@ fn collect(root: &Path) -> Vec<FileRef> {
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path();
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let abs_path = entry.path();
+        let ext = abs_path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let language = match ext {
             "rb" => Language::Ruby,
             "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Language::JavaScript,
             _ => continue,
         };
-        out.push(FileRef {
-            path: path.strip_prefix(root).unwrap_or(path).to_path_buf(),
+        let relative = abs_path
+            .strip_prefix(root)
+            .unwrap_or(abs_path)
+            .to_path_buf();
+        let relative_str = relative.to_string_lossy();
+
+        // Default-rule globs first (matches Ruby precedence) — also
+        // mark auto-generated files as default-excluded.
+        if excluded_by_patterns(&relative_str, DEFAULT_EXCLUDES) || is_auto_generated(abs_path) {
+            default_excluded += 1;
+            continue;
+        }
+        // User `--exclude` patterns.
+        if !user_excludes.is_empty() && user_excludes.iter().any(|p| glob_match(p, &relative_str)) {
+            custom_excluded += 1;
+            continue;
+        }
+
+        files.push(FileRef {
+            path: relative,
             language,
         });
     }
-    out
+    CollectResult {
+        files,
+        default_excluded,
+        custom_excluded,
+    }
+}
+
+fn excluded_by_patterns(relative: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|p| glob_match(p, relative))
+}
+
+/// Ruby `File.fnmatch(pattern, relative, FNM_PATHNAME | FNM_DOTMATCH)`
+/// plus Ruby's `globstar_directory_match?` and the suffix-`/**`
+/// prefix fallback from `FileCollector#glob_match?`.
+///
+/// We use the `glob::Pattern` crate's matcher for the primary
+/// fnmatch call (PATHNAME semantics: `*` doesn't cross `/`). The
+/// two Ruby-specific extensions handle:
+///   - `**/foo/**` → match when `relative` is `foo/...` or
+///     `.../foo/...`
+///   - `foo/**` → match when `relative` starts with `foo/`
+fn glob_match(pattern: &str, relative: &str) -> bool {
+    // Primary fnmatch with PATHNAME semantics.
+    if let Ok(p) = glob::Pattern::new(pattern) {
+        if p.matches(relative) {
+            return true;
+        }
+    }
+    // Globstar directory match: `**/DIR/**`
+    if let Some(dir) = pattern
+        .strip_prefix("**/")
+        .and_then(|s| s.strip_suffix("/**"))
+    {
+        if relative.starts_with(&format!("{dir}/")) || relative.contains(&format!("/{dir}/")) {
+            return true;
+        }
+    }
+    // Suffix /** prefix fallback.
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        if relative.starts_with(&format!("{prefix}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Ruby `auto_generated?` — scan the first non-blank line for the
+/// `# This file is auto-generated` sentinel. Encoding errors + I/O
+/// errors return `false` (Ruby rescues the same cases).
+fn is_auto_generated(abs: &Path) -> bool {
+    let Ok(contents) = std::fs::read(abs) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&contents) else {
+        return false;
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let t = line.trim_start();
+        // Case-insensitive match on the sentinel.
+        return t
+            .to_ascii_lowercase()
+            .starts_with("# this file is auto-generated");
+    }
+    false
 }
 
 fn build_signals(
