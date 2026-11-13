@@ -32,6 +32,31 @@ use output::{OutputFormat, Sections, WarningPayload};
 /// `lib/stud_finder/version.rb`.
 pub const VERSION: &str = "0.7.0";
 
+/// Outcome of the one-shot "is the repo shallow and what do we do
+/// about it?" decision that runs before either section's newness
+/// analyze call. Matches the four branches of Ruby
+/// `apply_newness`'s shallow switch (`cli.rb:557`): newness-off, no
+/// shallow, auto-unshallow success, auto-unshallow skipped or
+/// failed. Both "disabled" variants cause JS and Ruby sections to
+/// receive empty newness metadata — matching Ruby, which takes the
+/// disabled branch once and reuses it across both languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShallowHandling {
+    /// Not shallow, OR newness is disabled and we don't care, OR
+    /// `git fetch --unshallow` succeeded. Either way, downstream
+    /// newness calls should run normally.
+    NotApplicable,
+    /// Shallow + `--no-auto-unshallow`: user explicitly skipped
+    /// the fetch. Emit only `shallow_clone_newness_disabled`.
+    SkippedByFlag,
+    /// Shallow + unshallow attempt succeeded. Proceed normally.
+    Unshallowed,
+    /// Shallow + unshallow attempt failed/timed-out/git-missing.
+    /// Emit BOTH `shallow_clone_newness_disabled` and
+    /// `shallow_clone_unshallow_failed`.
+    AttemptedAndFailed,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "stud-finder",
@@ -116,6 +141,19 @@ struct Cli {
     /// scorer's placeholder.
     #[arg(long = "no-newness", action = clap::ArgAction::SetTrue)]
     no_newness: bool,
+    /// Disable the automatic `git fetch --unshallow` on shallow
+    /// clones. The default behaviour (matching Ruby) is to attempt
+    /// an unshallow once per scan with a 45-second timeout when
+    /// `--no-newness` is NOT set and the repository is shallow — on
+    /// success, newness proceeds normally; on failure or timeout,
+    /// stud-finder emits both `shallow_clone_newness_disabled` and
+    /// `shallow_clone_unshallow_failed` and falls back to disabled
+    /// newness. Passing `--no-auto-unshallow` skips the fetch
+    /// entirely and only emits the first warning. Useful on CI
+    /// paths where CI already set `fetch-depth: 0`, or where the
+    /// unshallow network call must not fire.
+    #[arg(long = "no-auto-unshallow", action = clap::ArgAction::SetTrue)]
+    no_auto_unshallow: bool,
     /// Advisory minimum file count. When the scored population is
     /// smaller than this value a `small_repo` warning is emitted
     /// (percentile ranks are unreliable at small scales).
@@ -442,28 +480,100 @@ fn main() -> Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    let newness_report = if cli.no_newness {
+
+    // Shallow-clone handling runs ONCE per scan, BEFORE either
+    // section's analyze call — matching Ruby `apply_newness` which
+    // calls `attempt_unshallow` once and shares the resulting metadata
+    // across both sections. Doing it per-section would re-emit the
+    // warnings and re-run the fetch for each language.
+    //
+    // Ruby `attempt_unshallow` + `--no-auto-unshallow` behavior:
+    //   no_newness       → skip the shallow dance entirely
+    //   shallow + auto   → `git fetch --unshallow` (45s, SIGTERM→SIGKILL)
+    //                        success → proceed normally
+    //                        failure → emit BOTH warnings, disabled
+    //   shallow + no-auto → emit ONE warning, disabled
+    //   not-shallow      → proceed normally
+    let shallow_handling: ShallowHandling = if cli.no_newness {
+        ShallowHandling::NotApplicable
+    } else if sf_newness::is_shallow_repository(&path) {
+        if cli.no_auto_unshallow {
+            ShallowHandling::SkippedByFlag
+        } else {
+            eprintln!(
+                "stud-finder: auto-unshallow: fetching full history to compute evidence (use --no-auto-unshallow to skip)"
+            );
+            match sf_newness::attempt_unshallow(&path) {
+                Ok(()) => ShallowHandling::Unshallowed,
+                Err(err) => {
+                    eprintln!("stud-finder: auto-unshallow failed: {err}");
+                    ShallowHandling::AttemptedAndFailed
+                }
+            }
+        }
+    } else {
+        ShallowHandling::NotApplicable
+    };
+
+    // Emit the shallow-related warnings (newness_disabled on either
+    // disabled case, plus unshallow_failed on the attempt-failure
+    // case). Wording matches Ruby `SHALLOW_CLONE_WARNING` and
+    // `UNSHALLOW_FAILED_WARNING` in `lib/stud_finder/newness.rb`.
+    match shallow_handling {
+        ShallowHandling::SkippedByFlag | ShallowHandling::AttemptedAndFailed => {
+            eprintln!(
+                "stud-finder: shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI for full newness behavior)"
+            );
+            warnings.push(WarningPayload {
+                code: "shallow_clone_newness_disabled".into(),
+                message: "shallow git clone detected; newness rules disabled \
+                          (use fetch-depth: 0 in CI for full newness behavior)"
+                    .into(),
+            });
+        }
+        ShallowHandling::NotApplicable | ShallowHandling::Unshallowed => {}
+    }
+    if matches!(shallow_handling, ShallowHandling::AttemptedAndFailed) {
+        warnings.push(WarningPayload {
+            code: "shallow_clone_unshallow_failed".into(),
+            message: "auto-unshallow failed; evidence unavailable \
+                      (use fetch-depth: 0 in CI or pass --no-auto-unshallow)"
+                .into(),
+        });
+    }
+
+    let newness_disabled_by_shallow = matches!(
+        shallow_handling,
+        ShallowHandling::SkippedByFlag | ShallowHandling::AttemptedAndFailed
+    );
+    let newness_report = if cli.no_newness || newness_disabled_by_shallow {
         // Empty report with no metadata — apply_newness becomes a
-        // no-op pass on the base classification.
+        // no-op pass on the base classification. We DON'T call
+        // sf_newness::analyze on a known-shallow handled repo: Ruby
+        // short-circuits identically, and calling analyze would
+        // re-emit the ShallowClone warning we've already surfaced.
         sf_newness::NewnessReport::default()
     } else {
         sf_newness::analyze(&path, &ruby_refs, newness_cfg)
     };
+    // Any residual non-shallow warnings from analyze. ShallowClone
+    // should never appear here (we only call analyze when known-not-
+    // shallow or when unshallow succeeded), but leave the arm as a
+    // safety net.
     for warning in &newness_report.warnings {
         match warning {
             sf_newness::NewnessWarning::ShallowClone => {
                 eprintln!(
-                    "stud-finder: shallow git clone detected; newness rules disabled (use fetch-depth: 0 in CI)"
+                    "stud-finder: shallow git clone detected post-unshallow; newness rules disabled (use fetch-depth: 0 in CI for full newness behavior)"
                 );
                 warnings.push(WarningPayload {
                     code: "shallow_clone_newness_disabled".into(),
                     message: "shallow git clone detected; newness rules disabled \
-                              (use fetch-depth: 0)"
+                              (use fetch-depth: 0 in CI for full newness behavior)"
                         .into(),
                 });
             }
             sf_newness::NewnessWarning::NotAGitRepo => {
-                // No Ruby warning code — Ruby raises on non-repo here. Stderr only.
                 eprintln!("stud-finder: not a git repository; newness signals skipped");
             }
             sf_newness::NewnessWarning::GitNotFound => {
@@ -527,11 +637,12 @@ fn main() -> Result<()> {
             }
         }
         let mut rows = scorer.score_with_signals(js_signals);
-        // Reuse the Ruby-section newness report's git run (same repo,
-        // supersets fine) rather than re-invoking git for JS. Only
-        // JS paths appear in the metadata lookup. Honor
-        // --no-newness identically to the Ruby pass.
-        let js_newness = if cli.no_newness {
+        // Reuse the Ruby-section shallow handling: if the Ruby pass
+        // already decided newness must be disabled (shallow + skipped
+        // or shallow + unshallow-failed), JS gets the same disabled
+        // metadata. Matches Ruby `apply_newness` which shares one
+        // shallow-check + one unshallow attempt across both sections.
+        let js_newness = if cli.no_newness || newness_disabled_by_shallow {
             sf_newness::NewnessReport::default()
         } else {
             sf_newness::analyze(&path, &js_refs, newness_cfg)

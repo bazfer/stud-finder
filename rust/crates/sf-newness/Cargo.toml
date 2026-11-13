@@ -10,5 +10,8 @@ description = "Per-file newness signals (age_days, total_commits, is_new) for st
 
 [dependencies]
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

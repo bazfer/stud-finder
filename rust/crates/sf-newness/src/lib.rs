@@ -256,10 +256,18 @@ pub fn analysis_root_prefix(repo_root: &Path) -> Option<String> {
 /// Ask git whether `repo_root` is a shallow clone. Falls back to
 /// probing `.git/shallow` directly if the subprocess can't run.
 /// Matches Ruby `shallow_repository?`.
+///
+/// `repo_root` is passed through to `git -C` as an `OsStr` so a
+/// non-UTF-8 path can't be silently rewritten to the process CWD.
+/// For `is_shallow_repository` the worst case of such a slip is a
+/// benign (read-only) misread; for `attempt_unshallow` it's a
+/// mutating fetch into the wrong repo. Fix the pattern here too so
+/// the two entry points share one safe convention.
 pub fn is_shallow_repository(repo_root: &Path) -> bool {
-    let repo_arg = repo_root.to_str().unwrap_or(".");
     match Command::new("git")
-        .args(["-C", repo_arg, "rev-parse", "--is-shallow-repository"])
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--is-shallow-repository"])
         .output()
     {
         Ok(out) if out.status.success() => {
@@ -267,6 +275,225 @@ pub fn is_shallow_repository(repo_root: &Path) -> bool {
             stdout.trim() == "true"
         }
         _ => repo_root.join(".git").join("shallow").exists(),
+    }
+}
+
+/// Timeout for `attempt_unshallow`, matching Ruby
+/// `cli.rb#attempt_unshallow`'s `wait_thread.join(45)`.
+pub const UNSHALLOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Grace period between SIGTERM and SIGKILL, matching Ruby's
+/// `wait_thread.join(5)` between `Process.kill('TERM', ...)` and
+/// `Process.kill('KILL', ...)`.
+pub const UNSHALLOW_SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why an `attempt_unshallow` call failed. All variants mean the
+/// repo is still shallow after the call — the caller should fall
+/// back to disabled newness + emit `shallow_clone_unshallow_failed`.
+#[derive(Debug)]
+pub enum UnshallowError {
+    /// `git` binary not found on PATH. Ruby lets `Errno::ENOENT`
+    /// bubble up and the CLI `rescue StandardError` catches it.
+    GitNotFound,
+    /// Spawn succeeded but the process failed to complete inside
+    /// `UNSHALLOW_TIMEOUT`. We first send SIGTERM, wait up to
+    /// `UNSHALLOW_SIGTERM_GRACE`, then SIGKILL — matching Ruby's
+    /// `Process.kill('TERM', ...)` + `Process.kill('KILL', ...)`.
+    TimedOut,
+    /// `git fetch --unshallow` exited non-zero (most commonly: not
+    /// actually shallow, no upstream, or network failure). The
+    /// stderr the git subprocess produced is attached for context.
+    Failed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    /// I/O error while spawning, waiting, or reading stderr.
+    Io(String),
+}
+
+impl std::fmt::Display for UnshallowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnshallowError::GitNotFound => write!(f, "`git` not found on PATH"),
+            UnshallowError::TimedOut => write!(
+                f,
+                "`git fetch --unshallow` timed out after {}s",
+                UNSHALLOW_TIMEOUT.as_secs()
+            ),
+            UnshallowError::Failed {
+                exit_code,
+                stderr: _,
+            } => match exit_code {
+                Some(code) => write!(f, "`git fetch --unshallow` failed with exit {code}"),
+                None => write!(f, "`git fetch --unshallow` was killed by a signal"),
+            },
+            UnshallowError::Io(msg) => write!(f, "`git fetch --unshallow` I/O: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for UnshallowError {}
+
+/// Attempt `git -C <repo_root> fetch --unshallow` with a 45-second
+/// timeout, matching Ruby `attempt_unshallow` at `cli.rb:573`.
+///
+/// Returns `Ok(())` when the fetch succeeded (the repo is now not
+/// shallow — `is_shallow_repository` will return `false` on the
+/// next call). Returns `Err(UnshallowError)` otherwise; the caller
+/// should then emit both `shallow_clone_newness_disabled` and
+/// `shallow_clone_unshallow_failed` warnings and continue with
+/// disabled newness metadata.
+///
+/// On timeout the child is sent SIGTERM; if it hasn't exited after
+/// `UNSHALLOW_SIGTERM_GRACE` (5s) it is sent SIGKILL. This mirrors
+/// the Ruby escalation, which gives a running git a moment to flush
+/// its pack files before being killed outright.
+///
+/// Implementation note: `repo_root` is passed to `git -C` as an
+/// `OsStr`, NOT via `to_str().unwrap_or(".")`. The prior revision
+/// would silently redirect the fetch to the process working
+/// directory for any path containing non-UTF-8 bytes — a dangerous
+/// default on a MUTATING operation, since the fetch could then
+/// unshallow the wrong repository. Caught as Ohm's P2 on PR #93 r1.
+pub fn attempt_unshallow(repo_root: &Path) -> Result<(), UnshallowError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_root).args(["fetch", "--unshallow"]);
+    attempt_unshallow_with_command(cmd, UNSHALLOW_TIMEOUT)
+}
+
+/// Core implementation of `attempt_unshallow` — takes an already-
+/// built `Command` plus a configurable timeout so tests can:
+///
+/// 1. Swap `git fetch --unshallow` for a fake binary that emits
+///    stderr larger than the pipe capacity (would otherwise
+///    deadlock the fetch; exercises the concurrent drain).
+/// 2. Verify the TERM/grace/KILL escalation on a fast deadline
+///    rather than the production 45s one.
+///
+/// Stderr is drained on a dedicated thread so a verbose
+/// git/transport helper can't fill the pipe buffer (~64 KiB on
+/// Linux) and block the child's write (which would turn a
+/// successful fetch into a 45-second timeout). After child exit we
+/// wait a bounded `STDERR_JOIN_GRACE` for the drainer to flush;
+/// an inherited pipe handle held by a descendant process would
+/// otherwise keep the drainer in `read_to_end` indefinitely —
+/// matching Ruby `wait_thread.value.success?` which also doesn't
+/// wait for descendant pipe inheritors. Caught as Ohm's P2 on PR
+/// #93 r1.
+pub(crate) fn attempt_unshallow_with_command(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<(), UnshallowError> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(UnshallowError::GitNotFound);
+        }
+        Err(e) => return Err(UnshallowError::Io(e.to_string())),
+    };
+
+    // Drain stderr concurrently so a verbose fetch can't deadlock
+    // the pipe. `Arc<Mutex<Vec<u8>>>` is overkill for a once-write
+    // buffer but keeps the join-gracefully pattern simple: the
+    // drainer owns writes, the main thread reads after a bounded
+    // wait.
+    let stderr_pipe = child.stderr.take().expect("stderr is piped");
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let drainer_buf = Arc::clone(&stderr_buf);
+    let drainer = std::thread::spawn(move || {
+        let mut reader = stderr_pipe;
+        let mut local = Vec::new();
+        let _ = reader.read_to_end(&mut local);
+        if let Ok(mut shared) = drainer_buf.lock() {
+            *shared = local;
+        }
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let exit_result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    kill_with_escalation(&mut child);
+                    break Err(UnshallowError::TimedOut);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => break Err(UnshallowError::Io(e.to_string())),
+        }
+    };
+
+    // Give the drainer a bounded window to flush AFTER the child
+    // has exited (or been killed). A descendant inheriting the
+    // write end can keep `read_to_end` blocked indefinitely — we
+    // refuse to let that defeat the timeout. The drainer thread
+    // becomes orphaned on timeout; it will exit when its read
+    // eventually returns (or when the process exits).
+    const STDERR_JOIN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+    let join_deadline = std::time::Instant::now() + STDERR_JOIN_GRACE;
+    while !drainer.is_finished() && std::time::Instant::now() < join_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stderr_bytes = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+    match exit_result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(UnshallowError::Failed {
+            exit_code: status.code(),
+            stderr,
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// Two-step kill matching Ruby's `Process.kill('TERM', pid)` → wait
+/// → `Process.kill('KILL', pid)` escalation.
+///
+/// On Unix we emit SIGTERM via `libc::kill` (std's `Child::kill`
+/// sends SIGKILL unconditionally, which skips the escalation Ruby
+/// provides). After `UNSHALLOW_SIGTERM_GRACE` we fall back to
+/// `Child::kill` for a definitive SIGKILL. On non-Unix targets
+/// (which stud-finder does not currently support) we go straight
+/// to `Child::kill` since no portable SIGTERM primitive exists.
+fn kill_with_escalation(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // SIGTERM via libc::kill. 15 = SIGTERM on every Unix.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        let grace_deadline = std::time::Instant::now() + UNSHALLOW_SIGTERM_GRACE;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Reaped — done. ExitStatusExt in scope so the
+                    // import isn't dead on targets where signal() is
+                    // used.
+                    let _ = status.signal();
+                    return;
+                }
+                Ok(None) if std::time::Instant::now() >= grace_deadline => break,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
