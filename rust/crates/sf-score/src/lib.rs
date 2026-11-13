@@ -305,9 +305,21 @@ pub struct EffectiveWeights {
 /// Compute the active-weight renormalization for a given signal set.
 /// Mirrors the inline active-weight math in `Scorer::score_with_signals`
 /// so sf-cli can report `meta.weights` without rerunning the scorer.
-/// Returned weights match the ratios the scorer actually used for the
-/// composite — a caller that reports them alongside the output rows
-/// gives a Ruby-identical `meta.weights` block.
+///
+/// **Divergence from Ruby `Scorer#normalize_weights`:** Ruby always
+/// keeps all four `BASE_WEIGHT_KEYS` active (fan_in, fan_out,
+/// complexity, churn) regardless of whether the backing signal is
+/// present — a missing signal still occupies its share of the
+/// composite but contributes 0 to the per-file total. The Rust
+/// scorer drops absent signals from the active-weight sum, so this
+/// helper mirrors the Rust scorer rather than Ruby. The resulting
+/// weights match the composite the Rust scorer actually computed,
+/// so `meta.weights` stays truthful for THIS implementation, but
+/// byte-level diff against a Ruby run with the same signal set
+/// absent would differ on inactive-signal rows. Tracking this
+/// divergence (Ohm non-blocking on PR #86) in a follow-up so the
+/// scorer and this helper swap to Ruby's always-active behavior
+/// together.
 pub fn effective_weights(
     has_complexity: bool,
     has_churn: bool,

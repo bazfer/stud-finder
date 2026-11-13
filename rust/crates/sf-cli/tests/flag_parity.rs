@@ -507,3 +507,115 @@ fn diff_base_nested_scan_root_resolves_paths_correctly() {
     );
     assert!(file_lines[0].contains("order.rb"));
 }
+
+#[test]
+fn top_alone_does_not_set_meta_filtered() {
+    // Ohm P2 on PR #86: Ruby `meta.filtered` is set ONLY when
+    // `filter_set` is populated (diff-base / --only). `--top` is a
+    // truncation knob, not a filter, so meta.filtered must stay
+    // absent when --top is the only flag set.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("json")
+        .arg("--top")
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let meta = v.get("meta").unwrap().as_object().unwrap();
+    assert!(
+        meta.get("filtered").is_none(),
+        "--top alone must NOT set meta.filtered: {meta:?}"
+    );
+}
+
+#[test]
+fn diff_base_does_set_meta_filtered() {
+    // Companion to top_alone_does_not_set_meta_filtered: with a
+    // real diff-base filter in play, meta.filtered MUST be present
+    // and true.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success());
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    write_ruby_mini_repo(root);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "base"]);
+    run_git(&["checkout", "-b", "feature"]);
+    std::fs::write(
+        root.join("order.rb"),
+        "class Order\n  def process(x)\n    Payment.capture if x\n    :changed\n  end\nend\n",
+    )
+    .unwrap();
+    run_git(&["commit", "-qam", "touch order"]);
+
+    let out = Command::new(stud_finder_bin())
+        .arg(root)
+        .arg("--output")
+        .arg("json")
+        .arg("--diff-base")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let meta = v.get("meta").unwrap().as_object().unwrap();
+    assert_eq!(
+        meta.get("filtered"),
+        Some(&serde_json::json!(true)),
+        "--diff-base must set meta.filtered: {meta:?}"
+    );
+    assert_eq!(
+        meta.get("diff_base"),
+        Some(&serde_json::json!("main")),
+        "meta.diff_base must carry the ref: {meta:?}"
+    );
+}
+
+#[test]
+fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
+    // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
+    // meta.weights must come from the JS section (nonzero complexity)
+    // rather than from the Ruby section (all zero). Matches Ruby
+    // `analysis.ruby.weights || analysis.javascript.weights`.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("app.js"),
+        "export function greet(name) { return 'hi ' + name; }\n",
+    )
+    .unwrap();
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let weights = v["meta"]["weights"].as_object().expect("weights object");
+    let complexity = weights["complexity"].as_f64().expect("complexity f64");
+    assert!(
+        complexity > 0.0,
+        "JS-only repo must report nonzero complexity weight; got {weights:?}"
+    );
+}

@@ -117,14 +117,15 @@ pub struct Sections<'a> {
     pub js_coverage_available: bool,
 }
 
-/// A warning payload shaped for the Ruby JSON contract. `code` is
-/// the stable machine identifier; `message` is human-readable text.
-/// Additional fields (count, etc.) go in `extra`.
+/// A warning payload shaped for the Ruby JSON contract.
+/// `code` is the stable machine identifier; `message` is the
+/// human-readable text (with any count/threshold details already
+/// interpolated — Ruby `Warnings.normalize_one` emits exactly
+/// `{code, message}` and discards other fields).
 #[derive(Clone, Debug)]
 pub struct WarningPayload {
     pub code: String,
     pub message: String,
-    pub extra: Map<String, Value>,
 }
 
 pub fn emit(format: OutputFormat, sections: Sections<'_>) {
@@ -227,11 +228,18 @@ fn coverage_cell(coverage_available: bool, r: &ScoredFile) -> Value {
     }
 }
 
+/// Match Ruby `Warnings.normalize_one`: always emit exactly
+/// `{code, message}`. Extra fields the caller carries on
+/// `WarningPayload.extra` are NOT serialized to JSON — Ruby
+/// interpolates them into the human-readable `message` (e.g. the
+/// bulk-commit warning appends `(N skipped; max_commit_files=M)`)
+/// and discards them from the record. Caught as Ohm's P2 on PR #86:
+/// prior slice-#10b revision cloned `extra` onto the JSON object.
 fn warnings_json(warnings: &[WarningPayload]) -> Vec<Value> {
     warnings
         .iter()
         .map(|w| {
-            let mut m = w.extra.clone();
+            let mut m = Map::new();
             m.insert("code".into(), json!(w.code));
             m.insert("message".into(), json!(w.message));
             Value::Object(m)
@@ -638,9 +646,19 @@ fn table_row(coverage_available: bool, r: &ScoredFile) -> String {
     // Column widths are from Ruby's `table_row` format string.
     // Evidence is always format_score (Rust-side `r.evidence` is
     // always f64, unlike Ruby's `nil | Float`).
+    //
+    // Path: Ruby `%-45s` is a MINIMUM width (left-aligned pad to 45,
+    // longer strings print in full). Rust's `{:<45}` matches that —
+    // no truncation. Prior slice-#10b revision mistakenly
+    // length-capped at 45 and dropped actionable basenames on long
+    // paths (Ohm P2).
     let language = language_from_path(&r.path);
-    let path = truncate_left(&r.path.display().to_string(), 45);
-    let partner = truncate_left(&r.max_coupling_partner.display().to_string(), 40);
+    let path = r.path.display().to_string();
+    // Partner: Ruby `truncate_partner` — keep as-is if ≤40 chars,
+    // else emit `"..."` + the LAST 37 chars (the end of the path,
+    // which carries the actionable basename). Prior revision
+    // truncated the FIRST 40 chars and dropped the basename.
+    let partner = truncate_partner(&r.max_coupling_partner.display().to_string());
     let coverage = format_coverage_cell_table(coverage_available, r);
     format!(
         "{rank:>5}  {language:<10}  {path:<45}  {score:>6}  {evidence:>8}  \
@@ -701,15 +719,37 @@ fn language_from_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Right-truncate a string to `n` chars (operating on `.chars()`
-/// so multi-byte stays well-formed). Matches Ruby's Pathname
-/// truncation in `truncate_partner`.
-fn truncate_left(s: &str, n: usize) -> String {
+/// Match Ruby `truncate_partner` from `lib/stud_finder/cli.rb`:
+///
+/// ```ruby
+/// def truncate_partner(partner)
+///   partner = partner.to_s
+///   return partner if partner.length <= 40
+///   "...#{partner[-37..]}"
+/// end
+/// ```
+///
+/// Strings ≤40 chars pass through unchanged; longer strings emit as
+/// `"..."` + the LAST 37 chars so the end of the path (where the
+/// basename lives) is preserved. Ruby counts length in characters;
+/// Rust mirrors that via `chars().count()` so multi-byte text stays
+/// well-formed.
+fn truncate_partner(s: &str) -> String {
     let count = s.chars().count();
-    if count <= n {
+    if count <= 40 {
         s.to_string()
     } else {
-        s.chars().take(n).collect()
+        // `chars().rev().take(37)` then reverse back — avoids slicing
+        // by byte index which breaks on multi-byte characters.
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(37)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("...{tail}")
     }
 }
 
@@ -1228,22 +1268,48 @@ mod tests {
     }
 
     #[test]
-    fn warnings_json_passes_code_and_message_plus_extras() {
-        let mut extra = Map::new();
-        extra.insert("count".into(), json!(3));
-        extra.insert("max_commit_files".into(), json!(50));
+    fn warnings_json_emits_only_code_and_message_matching_ruby_normalize() {
+        // Ruby `Warnings.normalize_one` returns exactly
+        // `{code, message}`. Count/threshold details must already
+        // live inside `message` — the record itself has no extras.
+        // Caught as Ohm's P2 on PR #86.
         let payload = WarningPayload {
             code: "temporal_coupling_bulk_commits_skipped".into(),
-            message: "bulk commits skipped".into(),
-            extra,
+            message: "bulk commits skipped (3 skipped; max_commit_files=50)".into(),
         };
         let v = warnings_json(&[payload]);
         assert_eq!(v.len(), 1);
         let obj = v[0].as_object().unwrap();
         assert_eq!(obj["code"], json!("temporal_coupling_bulk_commits_skipped"));
-        assert_eq!(obj["message"], json!("bulk commits skipped"));
-        assert_eq!(obj["count"], json!(3));
-        assert_eq!(obj["max_commit_files"], json!(50));
+        assert!(obj["message"].as_str().unwrap().contains("3 skipped"));
+        assert_eq!(obj.len(), 2, "must emit only {{code, message}}: {obj:?}");
+    }
+
+    #[test]
+    fn truncate_partner_keeps_path_suffix_matching_ruby() {
+        // Ruby `truncate_partner`: ≤40 chars → verbatim; else
+        // `"..."` + last 37 chars (keeps the basename at the end).
+        let short = "lib/foo.rb";
+        assert_eq!(truncate_partner(short), short);
+
+        let exactly_40 = "a".repeat(40);
+        assert_eq!(truncate_partner(&exactly_40), exactly_40);
+
+        let long = "very/long/path/to/some/deeply/nested/module/basename.rb";
+        let got = truncate_partner(long);
+        assert!(
+            got.starts_with("..."),
+            "long path must get `...` prefix: {got}"
+        );
+        assert_eq!(
+            got.chars().count(),
+            40,
+            "truncated must be exactly 40 chars"
+        );
+        assert!(
+            got.ends_with("basename.rb"),
+            "truncation must keep the actionable basename: {got}"
+        );
     }
 
     #[test]

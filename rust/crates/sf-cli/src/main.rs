@@ -20,7 +20,6 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use clap::Parser;
-use serde_json::{Map, json};
 use sf_core::{DependencyGraph, FileRef, Language};
 use sf_history::{DEFAULT_WINDOW_DAYS, HistoryWarning};
 use sf_score::{CouplingSignal, ScoredFile, Scorer, Signals};
@@ -95,16 +94,12 @@ fn main() -> Result<()> {
                 eprintln!(
                     "stud-finder: {count} bulk commits (> {max_commit_files} files) skipped from coupling"
                 );
-                let mut extra = Map::new();
-                extra.insert("count".into(), json!(*count));
-                extra.insert("max_commit_files".into(), json!(*max_commit_files));
                 warnings.push(WarningPayload {
                     code: "temporal_coupling_bulk_commits_skipped".into(),
                     message: format!(
                         "one or more bulk commits were skipped while computing temporal coupling \
                          ({count} skipped; max_commit_files={max_commit_files})"
                     ),
-                    extra,
                 });
             }
             HistoryWarning::NotAGitRepo => {
@@ -117,7 +112,6 @@ fn main() -> Result<()> {
                     message: "git command failed while computing temporal coupling; \
                               coupling is unavailable"
                         .into(),
-                    extra: Map::new(),
                 });
             }
             HistoryWarning::GitNotFound => {
@@ -129,7 +123,6 @@ fn main() -> Result<()> {
                     message: "git was not found in PATH while computing temporal coupling; \
                               coupling is unavailable"
                         .into(),
-                    extra: Map::new(),
                 });
             }
             HistoryWarning::GitFailed(msg) => {
@@ -139,7 +132,6 @@ fn main() -> Result<()> {
                     message: "git command failed while computing temporal coupling; \
                               coupling is unavailable"
                         .into(),
-                    extra: Map::new(),
                 });
             }
         }
@@ -213,7 +205,6 @@ fn main() -> Result<()> {
                     message: "shallow git clone detected; newness rules disabled \
                               (use fetch-depth: 0)"
                         .into(),
-                    extra: Map::new(),
                 });
             }
             sf_newness::NewnessWarning::NotAGitRepo => {
@@ -246,6 +237,12 @@ fn main() -> Result<()> {
     // Build the JavaScript section on its own graph + complexity so
     // JS files don't pool into the Ruby percentile distribution.
     let (js_graph, js_complexity, js_skipped) = build_js_signals(&cli.path, &files);
+    // Per-section signal flags, captured BEFORE Signals is moved
+    // into the JS scorer. Needed so a JS-only repository reports JS
+    // weights (nonzero complexity) rather than falling back to the
+    // Ruby-section flags (all zero). Matches Ruby's
+    // `analysis.ruby.weights || analysis.javascript.weights`.
+    let has_js_complexity = !js_complexity.is_empty();
     let mut js_rows: Vec<ScoredFile> = if js_graph.files().count() > 0 {
         let js_paths: Vec<PathBuf> = js_graph.files().map(Path::to_path_buf).collect();
         let js_refs: Vec<&Path> = js_paths.iter().map(PathBuf::as_path).collect();
@@ -309,18 +306,31 @@ fn main() -> Result<()> {
     // run gets the 5-factor formula even though JS rows carry null
     // coverage.
     let has_coverage = output::report_coverage_available(coverage_available, false);
-    let formula = output::formula_label(has_coverage, has_ruby_coupling);
-    let weights = sf_score::effective_weights(
-        has_ruby_complexity,
-        has_ruby_churn,
-        has_ruby_coupling,
-        has_coverage,
-    );
+    // Ruby `analysis.ruby.weights || analysis.javascript.weights` —
+    // pick the Ruby section's effective weights when a Ruby analysis
+    // ran (ruby_rows non-empty), otherwise fall back to the JS
+    // section's. A JS-only repository must report the JS-section
+    // weights (nonzero complexity) rather than the Ruby-section
+    // weights (all zero). Caught as Ohm's P2 on PR #86.
+    let ruby_section_present = ruby_total_analyzed > 0;
+    let (has_complexity, has_churn, has_coupling) = if ruby_section_present {
+        (has_ruby_complexity, has_ruby_churn, has_ruby_coupling)
+    } else {
+        // JS section's signal state: complexity derived from the
+        // non-empty js_complexity map; churn + coupling never
+        // populated for JS in this slice.
+        (has_js_complexity, false, false)
+    };
+    let formula = output::formula_label(has_coverage, has_coupling);
+    let weights =
+        sf_score::effective_weights(has_complexity, has_churn, has_coupling, has_coverage);
     // `--only` lands in slice #10c; for now the filter note + meta
-    // only cover `--diff-base`. `--top` triggers `filtered: true`
-    // because it also post-filters the row set.
+    // only cover `--diff-base`. Ruby `meta.filtered` is set ONLY
+    // when `filter_set` is populated — i.e. `--diff-base` or
+    // `--only` — never for `--top`, which is a truncation knob
+    // rather than a filter. Caught as Ohm's P2 on PR #86.
     let filter_note = build_filter_note(cli.diff_base.as_deref(), None);
-    let filtered = cli.diff_base.is_some() || cli.top.is_some();
+    let filtered = cli.diff_base.is_some();
     let repo_display = cli.path.display().to_string();
     let only_slice: Option<&[String]> = None;
     output::emit(
