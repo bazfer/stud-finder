@@ -1,0 +1,30 @@
+[package]
+name = "sf-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "stud-finder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glob = "0.3"
+serde_json = { version = "1", features = ["preserve_order"] }
+walkdir.workspace = true
+sf-core.workspace = true
+sf-coverage.workspace = true
+sf-gate.workspace = true
+sf-history.workspace = true
+sf-js.workspace = true
+sf-newness.workspace = true
+sf-ruby = { path = "../sf-ruby" }
+sf-score = { path = "../sf-score" }
+
+[dev-dependencies]
+tempfile = "3"

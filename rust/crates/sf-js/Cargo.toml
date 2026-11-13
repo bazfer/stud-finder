@@ -1,0 +1,16 @@
+[package]
+name = "sf-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "JS/TS imports + cyclomatic complexity via oxc for stud-finder."
+
+[dependencies]
+oxc_allocator = "0.50"
+oxc_ast = "0.50"
+oxc_parser = "0.50"
+oxc_span = "0.50"
+oxc_syntax = "0.50"

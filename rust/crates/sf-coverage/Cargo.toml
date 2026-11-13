@@ -1,0 +1,16 @@
+[package]
+name = "sf-coverage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Coverage readers (SimpleCov resultset.json, LCOV, Cobertura XML) for stud-finder."
+
+[dependencies]
+serde_json = "1"
+roxmltree = "0.20"
+
+[dev-dependencies]
+tempfile = "3"

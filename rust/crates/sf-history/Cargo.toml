@@ -1,0 +1,14 @@
+[package]
+name = "sf-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Git-history-driven signals (churn + temporal coupling) for stud-finder."
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
