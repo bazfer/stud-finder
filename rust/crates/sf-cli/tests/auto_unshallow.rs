@@ -247,6 +247,99 @@ fn no_newness_skips_shallow_check_entirely() {
     );
 }
 
+/// Success path: when the source remote is reachable, the default
+/// `attempt_unshallow` actually restores newness metadata rather
+/// than leaving it disabled. Ohm's non-blocking ask on PR #93 r1
+/// (previous tests only exercised the failure branches).
+///
+/// We keep the shallow clone's origin pointing at the local source
+/// repo so `git fetch --unshallow` can succeed. After the scan,
+/// stud-finder should emit zero shallow warnings and the repo
+/// should no longer be shallow on inspection.
+#[test]
+fn default_auto_unshallow_success_restores_newness_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    init_source_repo(&src);
+    let shallow = tmp.path().join("shallow");
+    assert!(
+        Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--no-local",
+                src.to_str().unwrap(),
+                shallow.to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Sanity: starts shallow.
+    let is_shallow = Command::new("git")
+        .args(["rev-parse", "--is-shallow-repository"])
+        .current_dir(&shallow)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&is_shallow.stdout).trim(),
+        "true",
+        "test setup: clone must start shallow"
+    );
+    // Run stud-finder with DEFAULT (auto-unshallow enabled).
+    let out = Command::new(stud_finder_bin())
+        .arg(&shallow)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit 0 on successful unshallow: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Progress line appears; failure line does NOT.
+    assert!(
+        stderr.contains("auto-unshallow: fetching full history"),
+        "progress line must appear on successful path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("auto-unshallow failed"),
+        "no failure line on successful path: {stderr}"
+    );
+    // Warnings carry neither shallow code.
+    let payload: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let codes: Vec<&str> = payload["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        !codes.contains(&"shallow_clone_newness_disabled")
+            && !codes.contains(&"shallow_clone_unshallow_failed"),
+        "neither shallow code may appear after a successful unshallow: {codes:?}"
+    );
+    // Verify: the clone is no longer shallow — `git fetch --unshallow`
+    // ran for real. Not shallow means full history is present and
+    // newness could compute real `age_days` / `total_commits`.
+    let is_shallow_after = Command::new("git")
+        .args(["rev-parse", "--is-shallow-repository"])
+        .current_dir(&shallow)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&is_shallow_after.stdout).trim(),
+        "false",
+        "the real `git fetch --unshallow` must have landed"
+    );
+}
+
 /// Both sections (Ruby + JS) share the same shallow handling —
 /// Ruby's `apply_newness` runs once per scan, not once per
 /// language. Without this, we'd emit the shallow warning TWICE on

@@ -256,10 +256,18 @@ pub fn analysis_root_prefix(repo_root: &Path) -> Option<String> {
 /// Ask git whether `repo_root` is a shallow clone. Falls back to
 /// probing `.git/shallow` directly if the subprocess can't run.
 /// Matches Ruby `shallow_repository?`.
+///
+/// `repo_root` is passed through to `git -C` as an `OsStr` so a
+/// non-UTF-8 path can't be silently rewritten to the process CWD.
+/// For `is_shallow_repository` the worst case of such a slip is a
+/// benign (read-only) misread; for `attempt_unshallow` it's a
+/// mutating fetch into the wrong repo. Fix the pattern here too so
+/// the two entry points share one safe convention.
 pub fn is_shallow_repository(repo_root: &Path) -> bool {
-    let repo_arg = repo_root.to_str().unwrap_or(".");
     match Command::new("git")
-        .args(["-C", repo_arg, "rev-parse", "--is-shallow-repository"])
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--is-shallow-repository"])
         .output()
     {
         Ok(out) if out.status.success() => {
@@ -340,16 +348,50 @@ impl std::error::Error for UnshallowError {}
 /// `UNSHALLOW_SIGTERM_GRACE` (5s) it is sent SIGKILL. This mirrors
 /// the Ruby escalation, which gives a running git a moment to flush
 /// its pack files before being killed outright.
+///
+/// Implementation note: `repo_root` is passed to `git -C` as an
+/// `OsStr`, NOT via `to_str().unwrap_or(".")`. The prior revision
+/// would silently redirect the fetch to the process working
+/// directory for any path containing non-UTF-8 bytes — a dangerous
+/// default on a MUTATING operation, since the fetch could then
+/// unshallow the wrong repository. Caught as Ohm's P2 on PR #93 r1.
 pub fn attempt_unshallow(repo_root: &Path) -> Result<(), UnshallowError> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_root).args(["fetch", "--unshallow"]);
+    attempt_unshallow_with_command(cmd, UNSHALLOW_TIMEOUT)
+}
+
+/// Core implementation of `attempt_unshallow` — takes an already-
+/// built `Command` plus a configurable timeout so tests can:
+///
+/// 1. Swap `git fetch --unshallow` for a fake binary that emits
+///    stderr larger than the pipe capacity (would otherwise
+///    deadlock the fetch; exercises the concurrent drain).
+/// 2. Verify the TERM/grace/KILL escalation on a fast deadline
+///    rather than the production 45s one.
+///
+/// Stderr is drained on a dedicated thread so a verbose
+/// git/transport helper can't fill the pipe buffer (~64 KiB on
+/// Linux) and block the child's write (which would turn a
+/// successful fetch into a 45-second timeout). After child exit we
+/// wait a bounded `STDERR_JOIN_GRACE` for the drainer to flush;
+/// an inherited pipe handle held by a descendant process would
+/// otherwise keep the drainer in `read_to_end` indefinitely —
+/// matching Ruby `wait_thread.value.success?` which also doesn't
+/// wait for descendant pipe inheritors. Caught as Ohm's P2 on PR
+/// #93 r1.
+pub(crate) fn attempt_unshallow_with_command(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<(), UnshallowError> {
+    use std::io::Read;
     use std::process::Stdio;
-    let repo_arg = repo_root.to_str().unwrap_or(".");
-    let mut child = match Command::new("git")
-        .args(["-C", repo_arg, "fetch", "--unshallow"])
-        .stdin(Stdio::null())
+    use std::sync::{Arc, Mutex};
+
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(UnshallowError::GitNotFound);
@@ -357,37 +399,59 @@ pub fn attempt_unshallow(repo_root: &Path) -> Result<(), UnshallowError> {
         Err(e) => return Err(UnshallowError::Io(e.to_string())),
     };
 
-    let deadline = std::time::Instant::now() + UNSHALLOW_TIMEOUT;
-    loop {
+    // Drain stderr concurrently so a verbose fetch can't deadlock
+    // the pipe. `Arc<Mutex<Vec<u8>>>` is overkill for a once-write
+    // buffer but keeps the join-gracefully pattern simple: the
+    // drainer owns writes, the main thread reads after a bounded
+    // wait.
+    let stderr_pipe = child.stderr.take().expect("stderr is piped");
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let drainer_buf = Arc::clone(&stderr_buf);
+    let drainer = std::thread::spawn(move || {
+        let mut reader = stderr_pipe;
+        let mut local = Vec::new();
+        let _ = reader.read_to_end(&mut local);
+        if let Ok(mut shared) = drainer_buf.lock() {
+            *shared = local;
+        }
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let exit_result = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        use std::io::Read;
-                        let mut buf = String::new();
-                        let _ = s.read_to_string(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-                if status.success() {
-                    return Ok(());
-                }
-                return Err(UnshallowError::Failed {
-                    exit_code: status.code(),
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     kill_with_escalation(&mut child);
-                    return Err(UnshallowError::TimedOut);
+                    break Err(UnshallowError::TimedOut);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => return Err(UnshallowError::Io(e.to_string())),
+            Err(e) => break Err(UnshallowError::Io(e.to_string())),
         }
+    };
+
+    // Give the drainer a bounded window to flush AFTER the child
+    // has exited (or been killed). A descendant inheriting the
+    // write end can keep `read_to_end` blocked indefinitely — we
+    // refuse to let that defeat the timeout. The drainer thread
+    // becomes orphaned on timeout; it will exit when its read
+    // eventually returns (or when the process exits).
+    const STDERR_JOIN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+    let join_deadline = std::time::Instant::now() + STDERR_JOIN_GRACE;
+    while !drainer.is_finished() && std::time::Instant::now() < join_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stderr_bytes = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+    match exit_result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(UnshallowError::Failed {
+            exit_code: status.code(),
+            stderr,
+        }),
+        Err(e) => Err(e),
     }
 }
 

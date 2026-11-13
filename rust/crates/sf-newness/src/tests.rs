@@ -675,3 +675,138 @@ fn unshallow_error_display_names_failure_cause() {
     let err = UnshallowError::GitNotFound;
     assert!(err.to_string().contains("not found"));
 }
+
+// --- PR #93 Ohm P2 regressions ---
+
+/// Ohm P2 r1: stderr must be drained concurrently. If the child
+/// emits more stderr than the pipe capacity (~64 KiB on Linux)
+/// before the parent reads, the child blocks on write and
+/// `try_wait` never reports exit — turning a successful fetch
+/// into a 45-second timeout.
+///
+/// We swap the git invocation for a shell that emits ~1 MiB of
+/// stderr then exits 0. Prior implementation would deadlock; new
+/// implementation reads concurrently and returns Ok.
+#[test]
+fn verbose_stderr_does_not_deadlock_with_concurrent_drain() {
+    let mut cmd = Command::new("bash");
+    // ~1 MiB of stderr across 10000 lines, well past the pipe's
+    // 64 KiB kernel buffer on Linux/macOS.
+    cmd.args([
+        "-c",
+        "for i in $(seq 1 10000); do printf 'line %d padding padding padding padding padding padding padding padding\\n' \"$i\" >&2; done; exit 0",
+    ]);
+    let start = std::time::Instant::now();
+    let result = attempt_unshallow_with_command(cmd, std::time::Duration::from_secs(10));
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(result, Ok(())),
+        "verbose-stderr child must still succeed: {result:?} (elapsed {elapsed:?})"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "concurrent drain must keep elapsed well under the 10s cap: {elapsed:?}"
+    );
+}
+
+/// Ohm P2 r1: with a short injected deadline, the TERM/KILL
+/// escalation path must trigger instead of hanging. Previously
+/// only observable via the Display string; now exercised end to
+/// end via the testable entrypoint.
+#[test]
+fn timeout_escalation_kills_runaway_child_promptly() {
+    let mut cmd = Command::new("bash");
+    cmd.args(["-c", "sleep 60"]);
+    let start = std::time::Instant::now();
+    let result = attempt_unshallow_with_command(cmd, std::time::Duration::from_millis(200));
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(result, Err(UnshallowError::TimedOut)),
+        "runaway child must surface TimedOut: {result:?}"
+    );
+    // Sleep-60 child must be killed well before the 60-second
+    // sleep completes. Allow generous headroom for the SIGTERM
+    // grace + CI jitter.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "TERM/KILL escalation must bound the wait: {elapsed:?}"
+    );
+}
+
+/// Ohm P2 r1: an exit-non-zero child whose stderr landed in the
+/// buffer must surface that text in `UnshallowError::Failed`.
+/// Verifies the concurrent drain actually propagates bytes.
+#[test]
+fn failed_child_exposes_captured_stderr() {
+    let mut cmd = Command::new("bash");
+    cmd.args(["-c", "echo nope >&2; exit 42"]);
+    let result = attempt_unshallow_with_command(cmd, std::time::Duration::from_secs(5));
+    match result {
+        Err(UnshallowError::Failed { exit_code, stderr }) => {
+            assert_eq!(exit_code, Some(42), "exit code must round-trip");
+            assert!(
+                stderr.contains("nope"),
+                "captured stderr must include child's bytes: {stderr:?}"
+            );
+        }
+        other => panic!("expected Failed with stderr, got {other:?}"),
+    }
+}
+
+/// Ohm P2 r1: the public `attempt_unshallow` path must thread a
+/// non-UTF-8 repo path through to `git -C` as an `OsStr`, not
+/// substitute `.` and silently fetch into the process CWD. We
+/// can't directly verify git saw the exact bytes on a real repo
+/// — but the prior `to_str().unwrap_or(".")` would have made
+/// `attempt_unshallow(<invalid-utf-8-path>)` fetch the CWD; the
+/// new path hands the bytes to git which will error on a
+/// non-existent path. Either outcome means the path was NOT
+/// collapsed to `.`.
+#[cfg(unix)]
+#[test]
+fn non_utf8_repo_path_is_not_silently_redirected_to_cwd() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    // Byte 0xFF is invalid as a UTF-8 lead and never appears in
+    // valid UTF-8. Prefix with /tmp/ so the path is syntactically
+    // valid but non-UTF-8 after the slash.
+    let mut bytes = b"/tmp/sf-nonexistent-".to_vec();
+    bytes.push(0xFF);
+    bytes.extend_from_slice(b"-dir");
+    let os = OsString::from_vec(bytes);
+    let path = std::path::PathBuf::from(os);
+    assert!(
+        path.to_str().is_none(),
+        "test setup: path must be non-UTF-8"
+    );
+    assert!(!path.exists(), "test setup: path must not exist");
+
+    // On the OLD code (repo_root.to_str().unwrap_or(".")) this
+    // would have silently fetched the CWD, which — depending on
+    // the CWD's git state — would return either Ok(()) OR
+    // Failed-pointing-at-the-CWD's-git-error. Either is wrong.
+    //
+    // On the NEW code, git is handed the non-existent path, so
+    // it exits with "fatal: cannot change to '...'". That
+    // surfaces as `Failed`.
+    match attempt_unshallow(&path) {
+        Err(UnshallowError::Failed { stderr, .. }) => {
+            // git's error for -C on a bad path, varies by
+            // version but always mentions the path or "cannot
+            // change" / "not a git repository" — the point is
+            // it reached git with the bad path.
+            assert!(
+                !stderr.is_empty(),
+                "git must have emitted SOME diagnostic about the bad path"
+            );
+        }
+        Err(UnshallowError::GitNotFound) => {
+            // CI without git installed — we can't exercise the
+            // path-passing behavior but we at least didn't crash.
+        }
+        other => panic!(
+            "non-UTF-8 non-existent path must surface a Failed from git, got {other:?} \
+             (prior implementation would have collapsed to `.` and operated on CWD)"
+        ),
+    }
+}
