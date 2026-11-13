@@ -51,6 +51,28 @@ pub const MIN_CO_CHANGES: usize = 5;
 /// `TemporalCoupling#coupling_threshold` default.
 pub const COUPLING_THRESHOLD: f64 = 0.30;
 
+/// Tunable coupling + bulk-commit knobs, for sf-cli flag parity
+/// with Ruby `--coupling-threshold` / `--coupling-min-commits` /
+/// `--coupling-max-commit-files`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HistoryConfig {
+    pub window_days: u64,
+    pub max_commit_files: usize,
+    pub min_co_changes: usize,
+    pub coupling_threshold: f64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            window_days: DEFAULT_WINDOW_DAYS,
+            max_commit_files: BULK_COMMIT_THRESHOLD,
+            min_co_changes: MIN_CO_CHANGES,
+            coupling_threshold: COUPLING_THRESHOLD,
+        }
+    }
+}
+
 /// Per-file coupling result: strongest partner, the co-change ratio, and
 /// the raw co-change count for that pair. Matches the loop spec tuple
 /// shape `(partner, ratio, co_changes)`.
@@ -110,7 +132,30 @@ pub struct HistoryReport {
 /// churn + coupling signals restricted to `files`. Returns an empty
 /// report with a warning if the repo isn't a git repo or `git` is
 /// missing.
+///
+/// Convenience wrapper for the default config. Call
+/// `analyze_with_config` to override `max_commit_files`,
+/// `min_co_changes`, or `coupling_threshold`.
 pub fn analyze(repo_root: &Path, files: &[&Path], window_days: u64) -> HistoryReport {
+    analyze_with_config(
+        repo_root,
+        files,
+        HistoryConfig {
+            window_days,
+            ..HistoryConfig::default()
+        },
+    )
+}
+
+/// Same as `analyze`, but accepts a tunable `HistoryConfig` so the
+/// CLI can honor `--coupling-threshold` / `--coupling-min-commits` /
+/// `--coupling-max-commit-files`.
+pub fn analyze_with_config(
+    repo_root: &Path,
+    files: &[&Path],
+    config: HistoryConfig,
+) -> HistoryReport {
+    let window_days = config.window_days;
     let file_set: HashSet<PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
 
     let since_arg = format!("--since={window_days} days ago");
@@ -167,10 +212,10 @@ pub fn analyze(repo_root: &Path, files: &[&Path], window_days: u64) -> HistoryRe
         };
     }
 
-    parse_log(&output.stdout, &file_set)
+    parse_log(&output.stdout, &file_set, config)
 }
 
-fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
+fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>, config: HistoryConfig) -> HistoryReport {
     // Pre-populate zero churn for every requested file. A successful
     // `git log` that returned no commits touching our file set still
     // yields "every file has 0 churn" rather than "churn signal
@@ -247,11 +292,13 @@ fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
             }
         }
 
-        // Coupling: skip bulk commits (> BULK_COMMIT_THRESHOLD files
+        // Coupling: skip bulk commits (> config.max_commit_files
         // in commit_files restricted to the file_set). Matches Ruby
         // `append_commit` which filters by the file-set-restricted
-        // count, not the total commit size.
-        if commit_files.len() > BULK_COMMIT_THRESHOLD {
+        // count, not the total commit size. `0` disables the cap
+        // (Ruby documents `0 = unlimited`); without this guard a
+        // zero cap would skip every nonempty commit.
+        if config.max_commit_files > 0 && commit_files.len() > config.max_commit_files {
             bulk_commits_skipped += 1;
             continue;
         }
@@ -282,13 +329,18 @@ fn parse_log(stdout: &[u8], file_set: &HashSet<PathBuf>) -> HistoryReport {
         }
     }
 
-    let coupling = select_strongest_partners(&co_matrix, &own_changes);
+    let coupling = select_strongest_partners(
+        &co_matrix,
+        &own_changes,
+        config.min_co_changes,
+        config.coupling_threshold,
+    );
 
     let mut warnings = Vec::new();
     if bulk_commits_skipped > 0 {
         warnings.push(HistoryWarning::BulkCommitsSkipped {
             count: bulk_commits_skipped,
-            max_commit_files: BULK_COMMIT_THRESHOLD,
+            max_commit_files: config.max_commit_files,
         });
     }
 
@@ -313,6 +365,8 @@ fn round4(x: f64) -> f64 {
 fn select_strongest_partners(
     co_matrix: &HashMap<(PathBuf, PathBuf), usize>,
     own_changes: &HashMap<PathBuf, usize>,
+    min_co_changes: usize,
+    coupling_threshold: f64,
 ) -> HashMap<PathBuf, CouplingPartner> {
     // Walk through pairs and record the best partner on each endpoint.
     // Pre-order by (path, path) so ties break alphabetically on the
@@ -330,7 +384,7 @@ fn select_strongest_partners(
     // after the walk so one struct carries both facts.
     let mut partner_counts: HashMap<PathBuf, usize> = HashMap::new();
     let mut consider = |file: &Path, partner: &Path, count: usize| {
-        if count < MIN_CO_CHANGES {
+        if count < min_co_changes {
             return;
         }
         let own_a = *own_changes.get(file).unwrap_or(&0);
@@ -340,7 +394,7 @@ fn select_strongest_partners(
             return;
         }
         let ratio = round4((count as f64) / (min_own as f64));
-        if ratio < COUPLING_THRESHOLD {
+        if ratio < coupling_threshold {
             return;
         }
         *partner_counts.entry(file.to_path_buf()).or_insert(0) += 1;

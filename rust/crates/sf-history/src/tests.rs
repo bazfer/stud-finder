@@ -45,7 +45,7 @@ fn empty_log_produces_zero_report_with_success_flag() {
     // yields zero entries for every requested file (pre-populated),
     // and `history_succeeded` is true so downstream can tell this
     // apart from a git failure.
-    let report = parse_log(&[], &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(&[], &files_set(&["a.rb", "b.rb"]), HistoryConfig::default());
     assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&0));
     assert_eq!(report.churn_commits.get(&p("b.rb")), Some(&0));
     assert_eq!(report.churn_lines.get(&p("a.rb")), Some(&0));
@@ -62,7 +62,11 @@ fn churn_counts_commits_and_sums_lines() {
         ("bbb", &[("1", "1", "a.rb")]),
         ("ccc", &[("5", "0", "c.rb")]), // not in file set
     ]);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&2));
     assert_eq!(report.churn_commits.get(&p("b.rb")), Some(&1));
     assert_eq!(report.churn_commits.get(&p("c.rb")), None);
@@ -75,7 +79,11 @@ fn binary_files_count_commits_but_not_lines() {
     // Ruby `churn.rb` guards `added != '-' && numeric?(deleted)` — the
     // commit still counts, lines don't.
     let log = fake_log(&[("aaa", &[("-", "-", "logo.png"), ("3", "1", "a.rb")])]);
-    let report = parse_log(&log, &files_set(&["logo.png", "a.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["logo.png", "a.rb"]),
+        HistoryConfig::default(),
+    );
     assert_eq!(report.churn_commits.get(&p("logo.png")), Some(&1));
     assert_eq!(report.churn_lines.get(&p("logo.png")), Some(&0));
     assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&1));
@@ -117,7 +125,11 @@ fn coupling_pair_matches_ruby_min_own_ratio() {
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
 
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&10));
     assert_eq!(report.churn_commits.get(&p("b.rb")), Some(&8));
 
@@ -143,7 +155,11 @@ fn coupling_below_min_co_changes_is_dropped() {
         ("c04", &[("1", "1", "a.rb"), ("1", "1", "b.rb")]),
     ];
     let log = fake_log(&commits);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     assert!(report.coupling.is_empty(), "4 co-changes < 5 should drop");
 }
 
@@ -169,7 +185,11 @@ fn coupling_below_threshold_ratio_is_dropped() {
     let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     assert!(
         report.coupling.is_empty(),
         "ratio 5/20 = 0.25 should drop (< 0.30)"
@@ -193,7 +213,7 @@ fn bulk_commit_filter_skips_coupling_but_counts_churn() {
     let file_names: Vec<String> = (0..51).map(|i| format!("f{i:03}.rb")).collect();
     let paths: Vec<PathBuf> = file_names.iter().map(PathBuf::from).collect();
     let file_set: HashSet<PathBuf> = paths.iter().cloned().collect();
-    let report = parse_log(&log, &file_set);
+    let report = parse_log(&log, &file_set, HistoryConfig::default());
     assert_eq!(report.churn_commits.len(), 51);
     for pb in &paths {
         assert_eq!(report.churn_commits.get(pb), Some(&1));
@@ -244,7 +264,11 @@ fn partner_strongest_by_ratio_then_cochanges() {
     let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb", "c.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb", "c.rb"]),
+        HistoryConfig::default(),
+    );
     let a = report.coupling.get(&p("a.rb")).expect("a.rb coupled");
     assert_eq!(a.partner, p("b.rb"), "higher ratio (1.0) wins over 0.5");
     assert!((a.ratio - 1.0).abs() < 1e-9);
@@ -256,7 +280,7 @@ fn files_outside_set_are_excluded_from_everything() {
         ("c01", &[("3", "1", "a.rb"), ("2", "0", "extern.rb")]),
         ("c02", &[("1", "1", "extern.rb")]),
     ]);
-    let report = parse_log(&log, &files_set(&["a.rb"]));
+    let report = parse_log(&log, &files_set(&["a.rb"]), HistoryConfig::default());
     assert_eq!(report.churn_commits.get(&p("a.rb")), Some(&1));
     assert_eq!(report.churn_commits.get(&p("extern.rb")), None);
 }
@@ -466,7 +490,11 @@ fn coupling_ratio_rounds_to_four_decimals_matching_ruby() {
     let commits_ref: Vec<FakeCommit<'_>> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     let a = report.coupling.get(&p("a.rb")).expect("a coupled");
     // 5 / 5 = 1.0 (a's own is 7, b's own is 5, min = 5)
     assert!(
@@ -505,7 +533,11 @@ fn coupling_ratio_near_threshold_rounds_before_check() {
     let commits_ref: Vec<FakeCommit<'_>> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb"]),
+        HistoryConfig::default(),
+    );
     assert!(
         report.coupling.is_empty(),
         "5/17 = 0.2941 rounds to 0.2941 which is < 0.30 threshold, must drop"
@@ -545,7 +577,11 @@ fn coupling_partner_counts_all_qualifying_partners_not_just_the_strongest() {
     let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb", "c.rb", "d.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb", "c.rb", "d.rb"]),
+        HistoryConfig::default(),
+    );
     assert_eq!(
         report.coupling.get(&p("a.rb")).map(|c| c.partners),
         Some(3),
@@ -579,7 +615,11 @@ fn coupling_partners_count_excludes_below_threshold_pairs() {
     let commits_ref: Vec<(&str, &[(&str, &str, &str)])> =
         commits.iter().map(|(h, v)| (*h, v.as_slice())).collect();
     let log = fake_log(&commits_ref);
-    let report = parse_log(&log, &files_set(&["a.rb", "b.rb", "c.rb"]));
+    let report = parse_log(
+        &log,
+        &files_set(&["a.rb", "b.rb", "c.rb"]),
+        HistoryConfig::default(),
+    );
     assert_eq!(
         report.coupling.get(&p("a.rb")).map(|c| c.partners),
         Some(1),
