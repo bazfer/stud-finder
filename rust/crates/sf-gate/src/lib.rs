@@ -143,28 +143,54 @@ pub fn run(raw: &str) -> Result<GateResult, Error> {
         }
     }
 
-    let trunk_touched: Vec<Finding> = rows
+    // Validate + parse every row up front so a bad score/evidence
+    // type surfaces as InvalidReport rather than silently skipping
+    // the row (Ohm's P2 on PR #91 r2). Each cached tuple carries
+    // the parsed score/evidence + row ref for subsequent checks.
+    struct Parsed<'a> {
+        row: &'a Value,
+        class: Option<String>,
+        score: Option<f64>,
+        evidence: Option<f64>,
+    }
+    let mut parsed: Vec<Parsed<'_>> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        parsed.push(Parsed {
+            row: r,
+            class: row_class(r),
+            score: row_score(r)?,
+            evidence: row_evidence(r)?,
+        });
+    }
+
+    let trunk_touched: Vec<Finding> = parsed
         .iter()
-        .filter(|r| row_class(r).as_deref() == Some("trunk"))
-        .map(|r| build_finding(r, "Changed file is classified as trunk."))
+        .filter(|p| p.class.as_deref() == Some("trunk"))
+        .map(|p| build_finding(p.row, "Changed file is classified as trunk."))
         .collect();
 
-    let low_evidence_high_score: Vec<Finding> = rows
+    let low_evidence_high_score: Vec<Finding> = parsed
         .iter()
-        .filter(|r| {
-            let score = row_score(r).unwrap_or(0.0);
-            score >= HIGH_SCORE_THRESHOLD && is_low_evidence(row_evidence(r))
+        .filter(|p| {
+            // Ruby `row.fetch('score', 0).to_f` — missing score
+            // defaults to 0, which never satisfies the >= 0.75
+            // check, so an absent score simply never qualifies.
+            let score = p.score.unwrap_or(0.0);
+            score >= HIGH_SCORE_THRESHOLD && is_low_evidence(p.evidence)
         })
-        .map(|r| build_finding(r, low_evidence_high_score_reason().as_str()))
+        .map(|p| build_finding(p.row, low_evidence_high_score_reason().as_str()))
         .collect();
 
-    let newness_trunk_adjacent: Vec<Finding> = rows
+    let newness_trunk_adjacent: Vec<Finding> = parsed
         .iter()
-        .filter(|r| {
-            r.get("new_file").and_then(Value::as_bool).unwrap_or(false)
-                && r.get("escalation").and_then(Value::as_str) == Some("trunk_adjacent")
+        .filter(|p| {
+            p.row
+                .get("new_file")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && p.row.get("escalation").and_then(Value::as_str) == Some("trunk_adjacent")
         })
-        .map(|r| build_finding(r, "New file is trunk-adjacent."))
+        .map(|p| build_finding(p.row, "New file is trunk-adjacent."))
         .collect();
 
     Ok(GateResult {
@@ -206,52 +232,72 @@ fn row_class(row: &Value) -> Option<String> {
 ///
 /// Caught as Ohm's P2 on PR #91 r1: Rust `str::parse::<f64>()`
 /// accepts `"NaN"` and refuses `"0.9junk"`; neither matches Ruby.
-fn coerce_f64(v: Option<&Value>) -> Option<f64> {
+/// Coerce a row field to f64 using Ruby `to_f` semantics. Returns
+/// `Err(Error::InvalidReport)` for JSON types Ruby wouldn't accept
+/// — bool, array, object. Those are programming errors in the
+/// report, not benign missing data, so we surface them loudly.
+/// `null` and absent → None (treated as missing by the caller,
+/// which maps score-missing to 0 and evidence-missing to low).
+fn coerce_f64(field: &str, v: Option<&Value>) -> Result<Option<f64>, Error> {
     match v {
-        None | Some(Value::Null) => None,
-        Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => Some(ruby_to_f(s)),
-        _ => None,
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => Ok(n.as_f64()),
+        Some(Value::String(s)) => Ok(Some(ruby_to_f(s))),
+        _ => Err(Error::InvalidReport(format!(
+            "`{field}` must be a number, numeric string, or null"
+        ))),
     }
 }
 
 /// Port of Ruby `String#to_f`: returns the numeric prefix as f64,
 /// or `0.0` on anything Ruby wouldn't accept (garbage input,
-/// `NaN`/`Infinity` literals, or no numeric prefix).
+/// `NaN`/`Infinity` literals, no numeric prefix). Preserves
+/// Infinity when the numeric magnitude overflows f64 — Ruby
+/// `"1e999".to_f` returns `Infinity`, which the gate's score
+/// comparison treats as >= HIGH_SCORE_THRESHOLD. Verified against
+/// `ruby:3.3.13-slim`. Underscores between digits are stripped
+/// (Ruby `"0.7_5".to_f == 0.75`, `"1_0.5".to_f == 10.5`).
 fn ruby_to_f(s: &str) -> f64 {
     let bytes = s.as_bytes();
     let mut i = 0usize;
-    // Leading whitespace is skipped by Ruby's to_f.
     while i < bytes.len() && (bytes[i] as char).is_whitespace() {
         i += 1;
     }
     let mut end = i;
-    // Optional sign.
     if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
         end += 1;
     }
     let digits_start = end;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
+    // Accept digits and `_` where the underscore is wedged between
+    // two digits — Ruby's numeric-literal underscore rule.
+    while end < bytes.len()
+        && (bytes[end].is_ascii_digit()
+            || (bytes[end] == b'_'
+                && end + 1 < bytes.len()
+                && bytes[end + 1].is_ascii_digit()
+                && bytes[end - 1].is_ascii_digit()))
+    {
         end += 1;
     }
     let had_digits_before_dot = end > digits_start;
     if end < bytes.len() && bytes[end] == b'.' {
         end += 1;
         let frac_start = end;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
+        while end < bytes.len()
+            && (bytes[end].is_ascii_digit()
+                || (bytes[end] == b'_'
+                    && end + 1 < bytes.len()
+                    && bytes[end + 1].is_ascii_digit()
+                    && bytes[end - 1].is_ascii_digit()))
+        {
             end += 1;
         }
-        // Ruby refuses `.` without a leading digit AND without a
-        // trailing digit (e.g. `"."` → 0.0).
         if !had_digits_before_dot && end == frac_start {
             return 0.0;
         }
     } else if !had_digits_before_dot {
-        // No digits at all (e.g. `"NaN"`, `"Infinity"`, `"junk"`) →
-        // Ruby `to_f` returns 0.0 and never recognizes those literals.
         return 0.0;
     }
-    // Optional exponent.
     if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
         let exp_marker = end;
         end += 1;
@@ -262,26 +308,30 @@ fn ruby_to_f(s: &str) -> f64 {
         while end < bytes.len() && bytes[end].is_ascii_digit() {
             end += 1;
         }
-        // Bare exponent marker with no digits — Ruby rolls back
-        // the exponent portion rather than failing (e.g. `"1e"` →
-        // 1.0). Mirror by snipping back to the marker.
         if end == exp_digits_start {
             end = exp_marker;
         }
     }
-    let prefix = &s[i..end];
-    match prefix.parse::<f64>() {
-        Ok(n) if n.is_finite() => n,
+    // Strip underscores for the final `parse::<f64>` (Rust parser
+    // doesn't accept them even where Ruby does).
+    let raw = &s[i..end];
+    let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
+    match cleaned.parse::<f64>() {
+        // Ruby accepts overflow as Infinity (e.g. `"1e999"` →
+        // Infinity). Keep it — the composite check `>= 0.75` still
+        // fires correctly, and callers who want finite values can
+        // test themselves.
+        Ok(n) if !n.is_nan() => n,
         _ => 0.0,
     }
 }
 
-fn row_score(row: &Value) -> Option<f64> {
-    coerce_f64(row.get("score"))
+fn row_score(row: &Value) -> Result<Option<f64>, Error> {
+    coerce_f64("score", row.get("score"))
 }
 
-fn row_evidence(row: &Value) -> Option<f64> {
-    coerce_f64(row.get("evidence"))
+fn row_evidence(row: &Value) -> Result<Option<f64>, Error> {
+    coerce_f64("evidence", row.get("evidence"))
 }
 
 fn build_finding(row: &Value, reason: &str) -> Finding {
@@ -295,8 +345,11 @@ fn build_finding(row: &Value, reason: &str) -> Finding {
             .get("language")
             .and_then(Value::as_str)
             .map(str::to_string),
-        score: row_score(row),
-        evidence: row_evidence(row),
+        // `build_finding` only runs on rows that already passed
+        // the parse step in `run`, so unwrap-or-default is safe
+        // for score/evidence. Ohm's P2 on PR #91 r2.
+        score: row_score(row).ok().flatten(),
+        evidence: row_evidence(row).ok().flatten(),
         classification: row_class(row),
         reason: reason.to_string(),
     }
@@ -557,6 +610,52 @@ mod tests {
             0,
             "numeric-string evidence must coerce and not trigger finding"
         );
+    }
+
+    #[test]
+    fn score_overflow_is_infinity_matching_ruby() {
+        // Ohm P2 on PR #91 r2: Ruby `"1e999".to_f` returns
+        // Infinity. Infinity >= 0.75 so the row flags. Prior
+        // revision collapsed Infinity to 0.0, missing the finding.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":"1e999","evidence":0.1}],"javascript":[]}"#;
+        let r = run(json).expect("valid");
+        assert_eq!(
+            r.low_evidence_high_score.len(),
+            1,
+            "overflow score must remain high: {:?}",
+            r.low_evidence_high_score
+        );
+    }
+
+    #[test]
+    fn underscore_in_numeric_string_matches_ruby_to_f() {
+        // Ohm P2 on PR #91 r2: Ruby `"0.7_5".to_f == 0.75`,
+        // `"1_0.5".to_f == 10.5`. Rust's native parse rejects
+        // underscores; our ruby_to_f strips them when they sit
+        // between digits.
+        assert_eq!(ruby_to_f("0.7_5"), 0.75);
+        assert_eq!(ruby_to_f("1_0.5"), 10.5);
+    }
+
+    #[test]
+    fn bool_score_or_evidence_is_rejected_as_invalid_report() {
+        // Ohm P2 on PR #91 r2: Ruby `true.to_f` raises
+        // NoMethodError and Ruby's Gate blows up on this input.
+        // We reject with InvalidReport instead of silently
+        // treating as missing.
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":true,"evidence":0.1}],"javascript":[]}"#;
+        let err = run(json).unwrap_err();
+        assert!(
+            err.to_string().contains("malformed stud-finder report"),
+            "expected InvalidReport for bool score: {err}"
+        );
+    }
+
+    #[test]
+    fn array_evidence_is_rejected_as_invalid_report() {
+        let json = r#"{"ruby":[{"path":"a.rb","class":"leaf","score":0.9,"evidence":[0.1]}],"javascript":[]}"#;
+        let err = run(json).unwrap_err();
+        assert!(err.to_string().contains("malformed stud-finder report"));
     }
 
     #[test]
