@@ -581,8 +581,10 @@ fn md_escape(s: &str) -> String {
 // ---------------------------------------------------------------
 
 fn emit_table(sections: Sections<'_>) {
-    let coverage_available =
-        report_coverage_available(sections.ruby_coverage_available, sections.js_coverage_available);
+    let coverage_available = report_coverage_available(
+        sections.ruby_coverage_available,
+        sections.js_coverage_available,
+    );
     println!(
         "stud-finder — {} ({}-day churn, {})",
         sections.repo, sections.churn_days, sections.formula
@@ -959,10 +961,7 @@ mod tests {
     fn coverage_json_is_em_dash_when_file_missing_from_report() {
         let r = mk_row("a.rb", 0.0, Class::Leaf);
         let v = row_json("ruby", true, &r);
-        assert_eq!(
-            v.as_object().unwrap().get("coverage"),
-            Some(&json!("—"))
-        );
+        assert_eq!(v.as_object().unwrap().get("coverage"), Some(&json!("—")));
     }
 
     #[test]

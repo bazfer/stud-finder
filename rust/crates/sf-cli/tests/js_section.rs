@@ -93,7 +93,8 @@ fn js_section_renders_with_fan_in_from_relative_imports() {
     let (_header, rows) = parse_csv(&stdout);
     // Both sections present.
     assert!(
-        rows.iter().any(|r| r.get(1).map(String::as_str) == Some("ruby")),
+        rows.iter()
+            .any(|r| r.get(1).map(String::as_str) == Some("ruby")),
         "no ruby rows: {stdout}"
     );
     assert!(
@@ -252,7 +253,8 @@ fn no_js_files_keeps_only_ruby_section() {
     let stdout = run_csv(root);
     let (_, rows) = parse_csv(&stdout);
     assert!(
-        rows.iter().all(|r| r.get(1).map(String::as_str) == Some("ruby")),
+        rows.iter()
+            .all(|r| r.get(1).map(String::as_str) == Some("ruby")),
         "all rows should be ruby: {stdout}"
     );
     assert_eq!(language_of(&rows, "a.rb"), "ruby");

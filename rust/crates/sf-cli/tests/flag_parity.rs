@@ -189,10 +189,7 @@ fn output_markdown_emits_ruby_parity_shape() {
         .lines()
         .filter(|l| l.starts_with("| ") && l.contains(".rb") && !l.contains("---"))
         .count();
-    assert!(
-        data_row_count >= 2,
-        "expected 2+ Ruby data rows: {stdout}"
-    );
+    assert!(data_row_count >= 2, "expected 2+ Ruby data rows: {stdout}");
 }
 
 #[test]
