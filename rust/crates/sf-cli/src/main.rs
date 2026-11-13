@@ -122,6 +122,33 @@ struct Cli {
     /// Ruby default: 20.
     #[arg(long, default_value_t = 20, value_parser = parse_positive_usize)]
     min_files: usize,
+    /// Coupling ratio threshold. Pairs with ratio below this are
+    /// dropped from the coupling signal. Ruby default: 0.30. Must
+    /// fall in `[0.0, 1.0]`.
+    #[arg(long, default_value_t = sf_history::COUPLING_THRESHOLD, value_parser = parse_unit_float)]
+    coupling_threshold: f64,
+    /// Minimum co-change count for a pair to be considered. Pairs
+    /// with fewer co-changes than this are dropped. Ruby default: 5.
+    #[arg(long, default_value_t = sf_history::MIN_CO_CHANGES, value_parser = parse_positive_usize)]
+    coupling_min_commits: usize,
+    /// Bulk-commit cutoff: commits touching strictly more files
+    /// than this (within the scored set) are skipped from coupling.
+    /// They still contribute to churn. Ruby default: 50.
+    #[arg(long, default_value_t = sf_history::BULK_COMMIT_THRESHOLD, value_parser = parse_positive_usize)]
+    coupling_max_commit_files: usize,
+    /// Disable Rails association/string fan-in inference. Accepted
+    /// for parity with Ruby — the Rust port does not yet perform
+    /// Rails-specific inference, so this flag is a no-op today. It
+    /// is wired here so automation targeting Ruby's option set
+    /// passes through without failing.
+    #[arg(long = "no-rails-inference", action = clap::ArgAction::SetTrue)]
+    no_rails_inference: bool,
+    /// dependency-cruiser timeout in seconds. Accepted for parity
+    /// with Ruby — the Rust port uses oxc_parser directly rather
+    /// than shelling out to dependency-cruiser, so this flag is a
+    /// no-op today. Kept so Ruby-matching automation does not break.
+    #[arg(long, default_value_t = 60, value_parser = parse_positive_u64)]
+    js_timeout: u64,
 }
 
 fn main() -> Result<()> {
@@ -210,7 +237,16 @@ fn main() -> Result<()> {
     // signals with a stderr warning — the run still completes.
     let ruby_paths: Vec<PathBuf> = graph.files().map(Path::to_path_buf).collect();
     let ruby_refs: Vec<&Path> = ruby_paths.iter().map(PathBuf::as_path).collect();
-    let history = sf_history::analyze(&path, &ruby_refs, cli.churn_days);
+    // Honor --coupling-threshold / --coupling-min-commits /
+    // --coupling-max-commit-files by building a HistoryConfig once.
+    // Defaults match Ruby's.
+    let history_cfg = sf_history::HistoryConfig {
+        window_days: cli.churn_days,
+        max_commit_files: cli.coupling_max_commit_files,
+        min_co_changes: cli.coupling_min_commits,
+        coupling_threshold: cli.coupling_threshold,
+    };
+    let history = sf_history::analyze_with_config(&path, &ruby_refs, history_cfg);
     for warning in &history.warnings {
         match warning {
             HistoryWarning::BulkCommitsSkipped {
@@ -715,6 +751,27 @@ fn parse_positive_churn_days(s: &str) -> Result<u64, String> {
         .map_err(|_| "--churn-days must be a positive integer".to_string())?;
     if n == 0 {
         return Err("--churn-days must be positive".to_string());
+    }
+    Ok(n)
+}
+
+/// Generic positive-u64 parser (for `--js-timeout`).
+fn parse_positive_u64(s: &str) -> Result<u64, String> {
+    let n: u64 = s
+        .parse()
+        .map_err(|_| "value must be a positive integer".to_string())?;
+    if n == 0 {
+        return Err("value must be positive".to_string());
+    }
+    Ok(n)
+}
+
+/// Parser for weight-shaped Floats in `[0.0, 1.0]`. Matches Ruby
+/// `weight values must be between 0.0 and 1.0.` phrasing.
+fn parse_unit_float(s: &str) -> Result<f64, String> {
+    let n: f64 = s.parse().map_err(|_| "value must be a float".to_string())?;
+    if !(0.0..=1.0).contains(&n) {
+        return Err("value must be between 0.0 and 1.0".to_string());
     }
     Ok(n)
 }

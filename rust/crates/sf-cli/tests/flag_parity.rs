@@ -1417,6 +1417,94 @@ fn small_repo_warns_per_section_not_combined() {
 }
 
 #[test]
+fn coupling_threshold_above_one_is_rejected() {
+    // Ruby `parse_weights`-style range check: --coupling-threshold
+    // must be in [0.0, 1.0].
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coupling-threshold")
+        .arg("1.5")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "range-violated threshold must exit non-zero"
+    );
+}
+
+#[test]
+fn coupling_min_commits_zero_is_rejected() {
+    // Must be positive (a 0 threshold would never gate anything).
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coupling-min-commits")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--coupling-min-commits 0 must exit non-zero"
+    );
+}
+
+#[test]
+fn coupling_max_commit_files_zero_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--coupling-max-commit-files")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--coupling-max-commit-files 0 must exit non-zero"
+    );
+}
+
+#[test]
+fn no_rails_inference_is_accepted_for_parity() {
+    // `--no-rails-inference` is a no-op in the Rust port today
+    // (no Rails inference yet) but must be accepted so automation
+    // targeting Ruby doesn't break.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--no-rails-inference")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "--no-rails-inference must succeed as parity stub: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn js_timeout_is_accepted_for_parity() {
+    // `--js-timeout N` is a no-op (no dependency-cruiser shell-out
+    // in the Rust port) but must be accepted.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ruby_mini_repo(tmp.path());
+    let out = Command::new(stud_finder_bin())
+        .arg(tmp.path())
+        .arg("--js-timeout")
+        .arg("120")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "--js-timeout must succeed as parity stub"
+    );
+}
+
+#[test]
 fn js_only_repo_uses_js_section_weights_not_ruby_zeroes() {
     // Ohm P2 on PR #86: with no Ruby files + at least one JS file,
     // meta.weights must come from the JS section (nonzero complexity)
