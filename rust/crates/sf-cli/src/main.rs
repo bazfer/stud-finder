@@ -1797,35 +1797,75 @@ mod tests {
 // `output::emit` next to the other emitters, using the Ruby
 // `emit_table` layout (section headers, column widths, footer).
 
+/// Banner printed on `stud-finder gate --help` or `-h`. Matches
+/// Ruby `OptionParser`'s default summary layout byte-for-byte:
+/// 8-space `summary_indent`, switches left-justified in a 29-char
+/// column (so descriptions begin at column 37), one trailing `\n`.
+/// Verified against `ruby -Ilib bin/stud-finder gate --help`.
+const GATE_USAGE: &str = concat!(
+    "Usage: stud-finder gate [--input FILE] [--enforce]\n",
+    "        --input FILE                 Read stud-finder JSON output from FILE\n",
+    "        --enforce                    Exit non-zero when gate findings are present\n",
+);
+
 /// `stud-finder gate [--input FILE] [--enforce]` — reads a prior
 /// `stud-finder --output json` run and prints a markdown findings
 /// report over three CI-safety checks. Matches Ruby `run_gate` at
-/// `lib/stud_finder/cli.rb:147` verbatim on arguments + exit code
-/// semantics.
+/// `lib/stud_finder/cli.rb:147` verbatim on arguments, error-text
+/// and exit codes.
 ///
 /// Input source cascade: `--input FILE` wins, else stdin (if
 /// piped), else error. `--enforce` makes the return non-zero when
 /// any check produced findings; without it the command always
 /// returns 0 (observation mode).
+///
+/// Error wording and exit code (1, matching Ruby's rescue returning
+/// `1`):
+/// - `--input` without a value → `missing argument: --input`
+/// - unknown `--flag` → `invalid option: --flag`
+/// - positional args (or anything after `--`) → `Error: unexpected
+///   arguments: a b c` (all remaining, joined by space)
+/// - no `--input` on a TTY stdin → `Error: provide --input FILE or
+///   pipe JSON to stdin.`
+/// - missing `--input` file → `Error: input file not found: PATH`
+/// - gate crate error → crate's own `Error: ...` message
 fn run_gate_subcommand(argv: &[String]) -> Result<()> {
     let mut input_path: Option<String> = None;
     let mut enforce = false;
+    // Everything the Ruby OptionParser would have left in `@argv`
+    // after `parse!` — positional non-options plus everything after
+    // a `--` terminator. Ruby then raises ValidationError with the
+    // whole list joined by space.
+    let mut positional: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i < argv.len() {
         let a = &argv[i];
         if a == "--" {
+            // Ruby OptionParser treats `--` as a "stop parsing options"
+            // sentinel: itself is consumed, everything after lands in
+            // @argv as positional. We mirror by pushing the rest.
+            positional.extend(argv[i + 1..].iter().cloned());
             break;
+        }
+        if a == "-h" || a == "--help" {
+            print!("{GATE_USAGE}");
+            return Ok(());
         }
         if a == "--enforce" {
             enforce = true;
             i += 1;
             continue;
         }
+        // Ruby OptionParser: `--enforce=foo` → `needless argument: --enforce=foo`.
+        if let Some(rest) = a.strip_prefix("--enforce=") {
+            eprintln!("needless argument: --enforce={rest}");
+            std::process::exit(1);
+        }
         if a == "--input" {
-            let v = argv.get(i + 1).cloned().unwrap_or_else(|| {
-                eprintln!("Error: --input requires a value.");
-                std::process::exit(2);
-            });
+            let Some(v) = argv.get(i + 1).cloned() else {
+                eprintln!("missing argument: --input");
+                std::process::exit(1);
+            };
             input_path = Some(v);
             i += 2;
             continue;
@@ -1835,29 +1875,49 @@ fn run_gate_subcommand(argv: &[String]) -> Result<()> {
             i += 1;
             continue;
         }
-        eprintln!("Error: unexpected arguments: {a}");
-        std::process::exit(2);
+        // Unknown `--flag` → Ruby OptionParser raises InvalidOption
+        // with `invalid option: --flag`. Short options follow the
+        // same shape (`-x`). Everything else is positional.
+        if a.starts_with("--") || (a.starts_with('-') && a.len() > 1) {
+            eprintln!("invalid option: {a}");
+            std::process::exit(1);
+        }
+        positional.push(a.clone());
+        i += 1;
+    }
+
+    if !positional.is_empty() {
+        eprintln!("Error: unexpected arguments: {}", positional.join(" "));
+        std::process::exit(1);
     }
 
     let raw = match input_path {
         Some(p) => std::fs::read_to_string(&p).unwrap_or_else(|err| {
-            eprintln!("Error: failed to read --input {p}: {err}");
-            std::process::exit(2);
+            // Ruby distinguishes ENOENT (`Error: input file not
+            // found: #{path}`) from other IO errors (which Ruby
+            // lets propagate — we surface with a readable message
+            // and the same exit code).
+            if err.kind() == std::io::ErrorKind::NotFound {
+                eprintln!("Error: input file not found: {p}");
+            } else {
+                eprintln!("Error: failed to read --input {p}: {err}");
+            }
+            std::process::exit(1);
         }),
         None => {
-            // No --input: pull from stdin. A TTY stdin without a
-            // path is user error — Ruby prints a help hint here.
+            // No --input: pull from stdin. TTY-stdin-with-no-path
+            // matches Ruby wording verbatim.
             use std::io::{IsTerminal, Read};
             let mut buf = String::new();
             if std::io::stdin().is_terminal() {
-                eprintln!("Error: no input. Pass --input FILE or pipe stud-finder JSON on stdin.");
-                std::process::exit(2);
+                eprintln!("Error: provide --input FILE or pipe JSON to stdin.");
+                std::process::exit(1);
             }
             std::io::stdin()
                 .read_to_string(&mut buf)
                 .unwrap_or_else(|err| {
                     eprintln!("Error: failed to read stdin: {err}");
-                    std::process::exit(2);
+                    std::process::exit(1);
                 });
             buf
         }
@@ -1865,8 +1925,14 @@ fn run_gate_subcommand(argv: &[String]) -> Result<()> {
 
     let result = sf_gate::run(&raw).unwrap_or_else(|err| {
         eprintln!("{err}");
-        std::process::exit(2);
+        std::process::exit(1);
     });
+    // Ruby `@stdout.puts Gate.markdown(...)` — `puts` adds `\n`
+    // ONLY if the string doesn't already end in one, and
+    // `Gate.markdown` already ends with a single `\n` (from the
+    // trailing empty line that closes the last `<details>` block).
+    // So Ruby's final stdout ends with exactly ONE `\n`. We match
+    // by using `print!` (no auto-newline) against the same string.
     print!("{}", sf_gate::markdown(&result, enforce));
     if enforce && result.has_findings() {
         std::process::exit(1);
